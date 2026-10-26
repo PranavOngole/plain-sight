@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node tools/vercel-headers.mjs --check && node tests/smoke.mjs && node desktop/tests/native.mjs && node desktop/tests/adapter.mjs && node desktop/tests/config.mjs && node desktop/tests/copy.mjs",
+    "test": "node tools/vercel-headers.mjs --check && node tests/smoke.mjs && node desktop/tests/native.mjs && node desktop/tests/adapter.mjs && node desktop/tests/config.mjs && node desktop/tests/copy.mjs && node desktop/tests/harness-safety.mjs",
     "app:dev": "npm --prefix desktop run app:dev",
     "app:build": "npm --prefix desktop run app:build"
   },
