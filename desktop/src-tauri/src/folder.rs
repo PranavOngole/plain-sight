@@ -354,15 +354,41 @@ async fn save_as<R: Runtime>(
 /// content is written whole into a file of its own first, and only then takes
 /// the chosen file's place in one step, so a write that fails while the new
 /// content is being written (a full disk, tested on a disk image) leaves the
-/// file as it was (QA-G-21); if Foundation's replacement itself fails, Apple
-/// says the original may be at another location, which the error then names.
-/// The step is Foundation's replacement of a file, the same operation
+/// file as it was (QA-G-21). A replacement Foundation refuses (a folder the
+/// person may not change, tested on a disk image) comes back as the error
+/// and leaves the file as it was too; Apple says that when the replacement
+/// fails the original may be at another location, which the error then
+/// names. The step is Foundation's replacement of a file, the same operation
 /// NSDocument performs when it saves (Apple, Low-Level File Management
 /// Programming Topics, File Management, Moving, Copying, and Deleting Files,
 /// a retired document), and the staged file sits in the directory Foundation
 /// names for it on the chosen file's own volume (`replacing`).
 /// Where nothing is at the path yet, the same step puts the new file there.
+///
+/// Only a file, or nothing, may be at the path (QA-G-29). A folder there is
+/// refused before anything is staged, since the replacement would put the
+/// file in the folder's place with everything in it gone. A symbolic link
+/// there is refused too: the panel asked about the link's name, and a write
+/// through the link would land on the file it points to, which the person
+/// did not name (the write before this one went through it; Foundation's
+/// replacement refuses it as a missing file). The page then says "Could not
+/// save", and the person can choose another name.
 fn write_replacing(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // The link itself, not what it points to, is what is at the path.
+    if let Ok(found) = fs::symlink_metadata(path) {
+        if found.file_type().is_symlink() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "the chosen name is a link to another file, which the panel did not name",
+            ));
+        }
+        if found.is_dir() {
+            return Err(io::Error::new(
+                ErrorKind::IsADirectory,
+                "a folder is at the chosen path",
+            ));
+        }
+    }
     let staged = Staged::write(path, bytes)?;
     replacing::replace(path, &staged.file)
 }
@@ -429,6 +455,15 @@ mod replacing {
         let text = path
             .to_str()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the path is not UTF-8"))?;
+        // `fileURLWithPath:` answers nil for an empty path and for one that
+        // holds a NUL byte, and objc2 stops the app on a nil it does not
+        // expect; neither names a file, so both are refused here (QA-G-29).
+        if text.is_empty() || text.contains('\0') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path is empty or holds a NUL byte",
+            ));
+        }
         Ok(NSURL::fileURLWithPath(&NSString::from_str(text)))
     }
 
@@ -1405,16 +1440,18 @@ mod tests {
     }
 
     /// A small HFS+ disk image, mounted out of the Finder's sight, as a
-    /// volume a write can fill (QA-G-21 was found on one). None when hdiutil
-    /// is not there or cannot make or mount the image: the test then says so
-    /// and checks nothing. Dropping it ejects the volume and removes the image.
-    struct FullVolume {
+    /// volume of the test's own: one a write can fill (QA-G-21 was found on
+    /// one), whose folders the test may lock, and whose staging place it can
+    /// list. None when hdiutil is not there or cannot make or mount the
+    /// image: the test then says so and checks nothing. Dropping it ejects
+    /// the volume and removes the image.
+    struct ImageVolume {
         dir: PathBuf,
         mount: PathBuf,
     }
 
-    impl FullVolume {
-        fn mount(tag: &str) -> Option<FullVolume> {
+    impl ImageVolume {
+        fn mount(tag: &str) -> Option<ImageVolume> {
             let dir = scratch(tag);
             let image = dir.join("full.dmg");
             let mount = dir.join("mnt");
@@ -1443,7 +1480,7 @@ mod tests {
                 let _ = fs::remove_dir_all(&dir);
                 return None;
             }
-            Some(FullVolume { dir, mount })
+            Some(ImageVolume { dir, mount })
         }
 
         /// The names on the volume, the hidden ones (.fseventsd, Foundation's
@@ -1458,32 +1495,47 @@ mod tests {
             names
         }
 
-        /// Every staging folder Foundation made on the volume for a
-        /// replacement (NSIRD_...), anywhere under its hidden folder.
-        fn staging_folders(&self) -> Vec<PathBuf> {
-            fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
-                let Ok(entries) = fs::read_dir(dir) else {
-                    return;
-                };
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path
-                        .file_name()
-                        .is_some_and(|n| n.to_string_lossy().starts_with("NSIRD_"))
-                    {
-                        found.push(path);
-                    } else if path.is_dir() {
-                        walk(&path, found);
+        /// What Foundation's staging place on the volume still holds, by
+        /// path under it: the folder it stages a replacement in (NSIRD_...)
+        /// and anything inside one. The place is
+        /// `.TemporaryItems/folders.<uid>/TemporaryItems`; `.TemporaryItems`
+        /// itself is made unlistable (d-wx--x--t), so a walk from there sees
+        /// nothing and a check on it can never fail (QA-G-28). The inner
+        /// folder is the test user's own, listable, and stays on the volume
+        /// once a replacement has been staged, so this listing must succeed:
+        /// a place that cannot be listed fails the test instead.
+        fn staging_leftovers(&self) -> Vec<String> {
+            use std::os::unix::fs::MetadataExt;
+            fn walk(dir: &Path, place: &Path, found: &mut Vec<String>) {
+                let entries = fs::read_dir(dir)
+                    .unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display()));
+                for entry in entries {
+                    let path = entry.unwrap().path();
+                    found.push(
+                        path.strip_prefix(place)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                    if path.is_dir() {
+                        walk(&path, place, found);
                     }
                 }
             }
+            let uid = fs::metadata(&self.dir).unwrap().uid();
+            let place = self
+                .mount
+                .join(".TemporaryItems")
+                .join(format!("folders.{uid}"))
+                .join("TemporaryItems");
             let mut found = Vec::new();
-            walk(&self.mount.join(".TemporaryItems"), &mut found);
+            walk(&place, &place, &mut found);
+            found.sort();
             found
         }
     }
 
-    impl Drop for FullVolume {
+    impl Drop for ImageVolume {
         fn drop(&mut self) {
             let _ = std::process::Command::new("hdiutil")
                 .args(["detach", "-quiet"])
@@ -1500,7 +1552,7 @@ mod tests {
     /// left half written, and nothing of the write is left behind.
     #[test]
     fn a_failed_replacing_write_leaves_the_chosen_file_as_it_was() {
-        let Some(volume) = FullVolume::mount("full-volume") else {
+        let Some(volume) = ImageVolume::mount("full-volume") else {
             return;
         };
         let chosen = volume.mount.join("chosen in the panel.txt");
@@ -1533,9 +1585,136 @@ mod tests {
             "nothing else is left on the volume"
         );
         assert_eq!(
-            volume.staging_folders(),
-            Vec::<PathBuf>::new(),
-            "no staging folder is left behind"
+            volume.staging_leftovers(),
+            Vec::<String>::new(),
+            "no staging folder or staged file is left behind"
         );
+    }
+
+    /// Foundation's replacement itself can be refused (QA-G-28): a file the
+    /// person may write in a folder they may not change. The staged write
+    /// succeeds and the replacement does not; the write must say so and
+    /// leave the file as it was, with nothing of it left in the staging
+    /// place. (The old write, through the file itself, worked here; the page
+    /// says "Could not save" now, QA-G-29.)
+    #[test]
+    fn a_refused_replacement_is_reported_and_leaves_the_file_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(volume) = ImageVolume::mount("read-only-folder") else {
+            return;
+        };
+        let locked = volume.mount.join("a folder the person may not change");
+        fs::create_dir(&locked).unwrap();
+        let chosen = locked.join("chosen in the panel.txt");
+        fs::write(&chosen, b"as it was").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = write_replacing(&chosen, b"a replacement");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            result.is_err(),
+            "a replacement the system refuses is reported, so the page says Could not save"
+        );
+        assert_eq!(
+            fs::read(&chosen).unwrap(),
+            b"as it was",
+            "and the file is as it was"
+        );
+        assert_eq!(
+            volume.staging_leftovers(),
+            Vec::<String>::new(),
+            "nothing of the write is left in the staging place"
+        );
+    }
+
+    /// A folder at the chosen path is refused before anything is staged
+    /// (QA-G-29): Foundation's replacement would put the file in the folder's
+    /// place, with everything in it gone. The folder and what it holds stay
+    /// as they were.
+    #[test]
+    fn a_folder_at_the_chosen_path_is_refused_and_kept_with_what_it_holds() {
+        let dir = scratch("folder-at-path");
+        let folder = dir.join("chosen in the panel");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("inside.txt"), "kept").unwrap();
+        let err = write_replacing(&folder, b"a file").unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::IsADirectory, "{err}");
+        assert!(folder.is_dir(), "the folder is still a folder");
+        assert_eq!(
+            fs::read_to_string(folder.join("inside.txt")).unwrap(),
+            "kept",
+            "with what it held"
+        );
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "nothing else was written"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A symbolic link at the chosen path is refused (QA-G-29): the panel
+    /// asked about the link's name, and a write through the link would land
+    /// on the file it points to, which the person did not name. The link,
+    /// what it points to, a link to nothing and a link to a folder all stay
+    /// as they were, and the reason names the link.
+    #[test]
+    fn a_link_at_the_chosen_path_is_refused_and_what_it_points_to_is_kept() {
+        let dir = scratch("link-at-path");
+        let target = dir.join("elsewhere.txt");
+        fs::write(&target, "kept").unwrap();
+        let link = dir.join("chosen in the panel.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = write_replacing(&link, b"through the link").unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+        assert!(
+            err.to_string().contains("link"),
+            "the reason names the link: {err}"
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link is still a link"
+        );
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "kept",
+            "and what it points to is as it was"
+        );
+        let dangling = dir.join("to nothing.txt");
+        std::os::unix::fs::symlink(dir.join("not there.txt"), &dangling).unwrap();
+        let err = write_replacing(&dangling, b"x").unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+        assert!(
+            !dir.join("not there.txt").exists(),
+            "a link to nothing creates nothing"
+        );
+        let to_folder = dir.join("to a folder");
+        std::os::unix::fs::symlink(&dir, &to_folder).unwrap();
+        let err = write_replacing(&to_folder, b"x").unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            4,
+            "nothing else was written"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `NSURL fileURLWithPath:` answers nil for an empty path and for one
+    /// that holds a NUL byte, which would stop the app inside objc2
+    /// (QA-G-29); neither can come from the panel, and both are refused as
+    /// an error instead, at the one place paths become URLs.
+    #[test]
+    fn an_empty_path_or_one_holding_a_nul_byte_is_refused_without_a_panic() {
+        for odd in [PathBuf::new(), PathBuf::from("/tmp/plain-sight\0unit.txt")] {
+            let err = write_replacing(&odd, b"x").unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{odd:?}: {err}");
+            let err = replacing::staging_dir(&odd).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{odd:?}: {err}");
+            let err = replacing::replace(&odd, &odd).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidInput, "{odd:?}: {err}");
+        }
     }
 }
