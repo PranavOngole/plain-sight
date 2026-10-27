@@ -21,7 +21,7 @@ import path from 'node:path';
 import './e2e-downloads.mjs';
 import {
   DESKTOP, DOWNLOADS, EVIDENCE, HOME, ID, NotRun, ROOT, alive, decryptRecord, drive, firstWindow, isCoverPrefix, newDownloads, note, novelText,
-  run, sleep, spawnApp, stopApp, until
+  run, sleep, spawnApp, stopApp, stopCurrentApp, until
 } from './harness.mjs';
 
 // The page's own Word document writer (index.html, docxBytes), run here as it
@@ -904,5 +904,8 @@ test('File > Open... opens the system open panel, which the test cancels', async
 await run(tests, {
   name: 'e2e',
   needUnlocked: true,
-  after: async () => { if (app && alive(app.pid)) await stopApp(app); }
+  // The app that is current when each stop ends, so a copy a test launched
+  // again while the cleanup waited is stopped too; once the run is ending no
+  // test can launch one (spawnApp refuses; DM-249).
+  after: () => stopCurrentApp(() => app)
 });

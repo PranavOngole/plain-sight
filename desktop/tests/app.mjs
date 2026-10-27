@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { webcrypto } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { DESKTOP, EVIDENCE, HOME, NotRun, alive, decryptRecord, drive, driveRaw, firstWindow, freshStart, note, run, sleep, until } from './harness.mjs';
+import { DESKTOP, EVIDENCE, HOME, NotRun, alive, decryptRecord, drive, driveRaw, firstWindow, freshStart, note, refuseLaunchWhileEnding, run, sleep, until } from './harness.mjs';
 import { appMenuTitle, launchable, menuBarOf, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
@@ -52,11 +52,22 @@ function instances() {
 
 // Opened the way a person opens it, through LaunchServices. A copy left
 // running would be found in place of the new one, so none may be running.
+// Never once the run is ending; and a launch under way when it began is
+// marked (launching) until its copy is recorded, so that after() ends that
+// copy too (DM-249).
+let launching = false;
 async function launch() {
+  refuseLaunchWhileEnding('the release app');
   assert.deepEqual(instances(), [], 'no copy of the release app is running before it is opened');
-  execFileSync('open', ['-n', current.app]);
-  const pid = await until(() => instances().find((p) => !launched.includes(p)) || 0, 'the app process', 15000);
-  launched.push(pid);
+  launching = true;
+  let pid = 0;
+  try {
+    execFileSync('open', ['-n', current.app]);
+    pid = await until(() => instances().find((p) => !launched.includes(p)) || 0, 'the app process', 15000);
+    launched.push(pid);
+  } finally {
+    launching = false;
+  }
   app = { pid };
   note('opened pid ' + pid);
   await firstWindow(pid, (windows) => windows.some((w) => w.layer === 0 && w.onscreen), 'the app window', 15000);
@@ -490,7 +501,9 @@ await run(tests, {
   },
   after: async () => {
     // No copy this run opened outlives it, however a test ended; a copy someone
-    // else opened is never touched.
+    // else opened is never touched. A launch under way when the run began to
+    // end records its copy first, so that copy is ended too (DM-249).
+    await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});
     const ours = () => instances().filter((p) => launched.includes(p));
     for (const pid of ours()) driveRaw('quit-app', pid);
     await until(() => !ours().length, 'every copy this run opened to end', 5000).catch(() => ours().forEach((p) => process.kill(p, 'SIGKILL')));

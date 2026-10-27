@@ -424,6 +424,36 @@ test('the three suites that launch the app refuse a locked screen and wait for a
   }
 });
 
+// DM-249: after a Ctrl+C or a kill during a test, that test went on while the
+// harness put everything back, and a launch it made then outlived the run
+// (the Delivery Manager's AT-H8 to AT-H8c). harness-safety.mjs runs the
+// harness's refusal (spawnApp) and e2e.mjs's after() (stopCurrentApp); the two
+// suites that open a bundle launch and end it through LaunchServices, which
+// only a GUI run reaches, so their parts are pinned here: the refusal comes
+// with no wait between it and the open, a launch under way is marked until
+// its copy is recorded, and after() waits for that mark before it ends the
+// copies.
+test('no suite launches the app once the run is ending, and each suite\'s end stops a copy launched late (DM-249)', () => {
+  const tests = path.join(DESKTOP, 'tests');
+  const e2e = read(tests, 'e2e.mjs');
+  assert.ok(e2e.includes('\n  after: () => stopCurrentApp(() => app)\n});'), 'e2e.mjs\'s after() stops the app that is current when each stop ends');
+  assert.equal(/\bspawn\(|execFileSync\('open'/.test(e2e), false, 'e2e.mjs launches the app only through spawnApp, which refuses once the run is ending');
+  for (const [file, launcher, bundle] of [['app.mjs', 'async function launch(', 'current.app'], ['release.mjs', 'async function open(', 'APP']]) {
+    const text = read(tests, file);
+    const start = text.indexOf(launcher);
+    assert.ok(start >= 0, file + ' has its launch function');
+    const body = text.slice(start, text.indexOf('\n}\n', start));
+    const open = body.indexOf("execFileSync('open'");
+    const refusal = body.lastIndexOf("refuseLaunchWhileEnding('the release app');", open);
+    assert.ok(refusal >= 0 && open > refusal, file + ': the launch refuses before it opens the bundle once the run is ending');
+    assert.equal(/\bawait\b/.test(body.slice(refusal, open)), false, file + ': with no wait between the refusal and the open');
+    assert.ok(body.includes("  launching = true;\n  let pid = 0;\n  try {\n    execFileSync('open', ['-n', " + bundle + "]);\n    pid = await until(() => instances().find((p) => !launched.includes(p)) || 0, 'the app process', 15000);\n    launched.push(pid);\n  } finally {\n    launching = false;\n  }\n"), file + ': a launch under way is marked until its copy is recorded');
+    assert.equal([...text.matchAll(/execFileSync\('open'/g)].length, 1, file + ' opens the bundle in one place only');
+    const end = text.slice(text.indexOf('await run(tests, {'));
+    assert.ok(end.includes("  after: async () => {\n") && end.includes("    await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});\n    const ours = () => instances().filter((p) => launched.includes(p));\n"), file + ': after() waits for a launch under way before it ends the copies');
+  }
+});
+
 // The real-key save and folder tests (app.mjs) go to the test's own folder
 // through the panel's Go-to box and press the panel's default button only
 // after goTo, which cancels the panel when the panel does not show that

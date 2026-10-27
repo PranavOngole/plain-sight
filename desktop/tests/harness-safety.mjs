@@ -23,7 +23,7 @@
 import assert from 'node:assert/strict';
 import childProcess, { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -36,6 +36,11 @@ const HARNESS = path.join(HERE, 'harness.mjs');
 const BOX = 'PLAIN_SIGHT_HARNESS_TEST_BOX';
 // The parent writes this file in the box once it has sent the signal.
 const SIGNAL_SENT = 'signal-sent';
+// DM-249: the stand-in app the parent writes into its temporary folder, whose
+// path each child is handed, and the file in the box where every stand-in
+// records its pid.
+const STANDIN = 'PLAIN_SIGHT_HARNESS_TEST_STANDIN';
+const STANDIN_PIDS = 'standin-pids.txt';
 // The harness compiles its driver at import unless the file for this source
 // version exists. No case here runs the driver, so an empty file stands in
 // for it, in the child's own temporary folder.
@@ -276,6 +281,92 @@ if (process.argv[2] === '--child') {
         { name: 'a test after the signal', fn: async () => { console.log('TEST AFTER THE SIGNAL'); } }
       ], { after: slowAfter });
     },
+    // DM-249: after a signal, or once the run's own cleanup had begun, the
+    // test that was running went on and could launch the app again, which
+    // then outlived the run and ran over the restored folders (a launch of
+    // this branch's build removes the 1.0.0 app's folder.txt). The Delivery
+    // Manager's AT-H8b, AT-H8 and AT-H8c (dm-appstore-a3387d9/adv/tests/
+    // desktop/tests/dm-harness-adv-a33.mjs), adopted with the answer the fix
+    // sets. The app is a stand-in (the parent's STANDIN) started through the
+    // harness's spawnApp, as e2e.mjs starts the test build, and the suite's
+    // after() is e2e.mjs's own (stopCurrentApp). AT-H8b: the signal comes
+    // while the test waits, and its next step launches the app again.
+    async 'run-relaunch-waiting'() {
+      await runSuite([{ name: 'a test that launches the app again after a wait', fn: async () => {
+        await ready(launchApp());
+        await h.sleep(300);
+        console.log('WAITING');
+        await h.sleep(400);
+        launchApp();
+        console.log('RELAUNCHED ' + current.pid);
+        await h.sleep(4000);
+      } }], { after: e2eAfter });
+    },
+    // AT-H8, e2e.mjs's own shape: the signal comes while the test waits in its
+    // own stopApp() before it launches the app again.
+    async 'run-relaunch-stopping'() {
+      await runSuite([{ name: 'a test that restarts the app, as e2e.mjs does', fn: async () => {
+        await ready(launchApp());
+        await h.sleep(300);
+        console.log('STOPPING');
+        await h.stopApp(current);
+        launchApp();
+        console.log('RELAUNCHED ' + current.pid);
+        await h.sleep(4000);
+      } }], { after: e2eAfter });
+    },
+    // AT-H8c: the same, with the person's 1.0.0 folder choice (folder.txt) in
+    // the real identifier's Application Support folder, which the run moves
+    // aside and puts back.
+    async 'run-relaunch-folder'() {
+      writeFileSync(path.join(appSupport, 'folder.txt'), '/Users/someone/Notes');
+      await runSuite([{ name: 'a test that restarts the app, as e2e.mjs does', fn: async () => {
+        await ready(launchApp());
+        await h.sleep(400);
+        console.log('STOPPING');
+        await h.stopApp(current);
+        launchApp();
+        console.log('RELAUNCHED ' + current.pid);
+        await h.sleep(4000);
+      } }], { after: e2eAfter });
+    },
+    // The refusal on its own: the test's next launch comes only once the
+    // cleanup's after() has ended, so no after() could stop that app.
+    async 'run-launch-after-signal'() {
+      await runSuite([{ name: 'a test that launches the app once the cleanup has stopped it', fn: async () => {
+        await ready(launchApp());
+        console.log('IN TEST');
+        await afterDone;
+        try { launchApp(); } catch (err) { console.log('REFUSED ' + err.message); throw err; }
+        console.log('LAUNCHED AGAIN ' + current.pid);
+      } }], { after: e2eAfterThenSay });
+    },
+    // The same during the run's own cleanup, with no signal: a launch the test
+    // left for later comes once that cleanup's after() has ended.
+    async 'run-launch-in-own-cleanup'() {
+      await runSuite([{ name: 'a test that leaves a launch for later', fn: async () => {
+        await ready(launchApp());
+        afterDone.then(() => {
+          try { launchApp(); console.log('LAUNCHED AGAIN ' + current.pid); } catch (err) { console.log('REFUSED ' + err.message); }
+        });
+      } }], { after: e2eAfterThenSay });
+    },
+    // e2e.mjs's after() on its own: a copy started by a way the refusal does
+    // not see (not spawnApp) while the cleanup stops the first is stopped too,
+    // since after() stops the app that is current when each stop ends.
+    async 'run-late-app-stopped'() {
+      const signalCame = new Promise((resolve) => process.once('SIGINT', resolve));
+      await runSuite([{ name: 'a test that starts another copy while the cleanup stops the first', fn: async () => {
+        await ready(launchApp());
+        console.log('IN TEST');
+        await signalCame;
+        await h.sleep(200);
+        const child = spawn(process.env[STANDIN], [], { stdio: 'ignore', env: { ...process.env, ...standinEnv } });
+        current = { child, pid: child.pid };
+        console.log('STARTED ANOTHER ' + child.pid);
+        await h.sleep(4000);
+      } }], { after: e2eAfter });
+    },
     // H5: a sandbox probe's container (the bundle under test carries an
     // sbprobe- identifier), refused like a test copy's.
     async 'run-probe-container-refused'() {
@@ -407,6 +498,20 @@ if (process.argv[2] === '--child') {
   };
   // An after() that takes a while, as the suites' do while the app quits.
   const slowAfter = async () => { console.log('IN AFTER'); await new Promise((r) => setTimeout(r, 3000)); console.log('AFTER DONE'); };
+  // DM-249: the stand-in app (the parent's STANDIN), started through the
+  // harness's spawnApp as e2e.mjs starts the test build. `current` is the app
+  // a test launched last, as e2e.mjs's `app` is, and e2eAfter is e2e.mjs's
+  // after(); afterDone settles once a case's after() has ended.
+  const appSupport = path.join(home, 'Library', 'Application Support', h.ID);
+  const standinEnv = { STANDIN_PIDS: path.join(box, STANDIN_PIDS), STANDIN_WEBDATA: path.join(home, 'Library', 'WebKit', 'plain-sight'), STANDIN_APPDATA: appSupport };
+  let current = null;
+  const launchApp = () => { const child = h.spawnApp(process.env[STANDIN], standinEnv); current = { child, pid: child.pid }; return current; };
+  const recorded = () => (existsSync(standinEnv.STANDIN_PIDS) ? readFileSync(standinEnv.STANDIN_PIDS, 'utf8').split('\n') : []);
+  const ready = async (app) => { await h.until(() => recorded().includes(String(app.pid)), 'the stand-in app to start', 10000); return app; };
+  const e2eAfter = () => h.stopCurrentApp(() => current);
+  let afterEnded = null;
+  const afterDone = new Promise((resolve) => { afterEnded = resolve; });
+  const e2eAfterThenSay = async () => { await e2eAfter(); console.log('AFTER DONE'); afterEnded(); };
   try {
     await cases[which]();
     console.log('RESULT ok');
@@ -422,6 +527,35 @@ if (process.argv[2] === '--child') {
 // ---------------------------------------------------------------------------
 const ROOT = mkdtempSync(path.join(os.tmpdir(), 'plain-sight-harness-safety-'));
 
+// DM-249: a stand-in for the app, written into the temporary folder (the
+// Delivery Manager's adv/standin-app.mjs and standin-app-folder.mjs in one).
+// It records its pid once it can take a SIGTERM (a SIGTERM while node still
+// starts would end it at once, so the cases wait for that record), ends 1 s
+// after its first SIGTERM (the app's quit takes about a second), writes a file into STANDIN_WEBDATA 1.5 s after it starts
+// (as the test build writes its web data), and removes folder.txt from
+// STANDIN_APPDATA 150 ms after it starts, as every launch of this branch's
+// build does (folder.rs, Folder::with, through Folder::load). It writes
+// nothing to its output, so a closed pipe cannot end it, and it ends by
+// itself after 20 s.
+const STANDIN_APP = path.join(ROOT, 'standin-app.mjs');
+const STANDIN_EXE = path.join(ROOT, 'standin-app');
+writeFileSync(STANDIN_APP, [
+  "import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';",
+  "import path from 'node:path';",
+  "const env = process.env;",
+  "let quitting = false;",
+  "process.on('SIGTERM', () => { if (quitting) return; quitting = true; setTimeout(() => process.exit(0), 1000); });",
+  "process.on('SIGINT', () => {});",
+  "process.on('SIGHUP', () => {});",
+  "appendFileSync(env.STANDIN_PIDS, process.pid + '\\n');",
+  "if (env.STANDIN_APPDATA) setTimeout(() => { try { rmSync(path.join(env.STANDIN_APPDATA, 'folder.txt'), { force: true }); } catch {} }, 150);",
+  "if (env.STANDIN_WEBDATA) setTimeout(() => { try { mkdirSync(env.STANDIN_WEBDATA, { recursive: true }); writeFileSync(path.join(env.STANDIN_WEBDATA, 'written-by-' + process.pid), 'WRITTEN BY THE TEST APP'); } catch {} }, 1500);",
+  "setTimeout(() => process.exit(0), 20000);"
+].join('\n') + '\n');
+const shellQuoted = (p) => "'" + p.replace(/'/g, "'\\''") + "'";
+writeFileSync(STANDIN_EXE, '#!/bin/sh\nexec ' + shellQuoted(process.execPath) + ' ' + shellQuoted(STANDIN_APP) + '\n');
+chmodSync(STANDIN_EXE, 0o755);
+
 // A fake bundle under a test identifier, outside the fake home, for the
 // harness to read as PLAIN_SIGHT_APP (only its Info.plist is read).
 function fakeCopy(box, identifier) {
@@ -431,13 +565,13 @@ function fakeCopy(box, identifier) {
   return app;
 }
 
-function runCase(id, onOutput = () => {}, { app = null } = {}) {
-  const box = path.join(ROOT, id);
+function runCase(id, onOutput = () => {}, { app = null, tag = id } = {}) {
+  const box = path.join(ROOT, tag);
   const home = path.join(box, 'home');
   const tmp = path.join(box, 'tmp');
   const evidence = path.join(box, 'evidence');
   for (const d of [home, tmp, evidence]) mkdirSync(d, { recursive: true });
-  const env = { ...process.env, HOME: home, TMPDIR: tmp, PLAIN_SIGHT_EVIDENCE: evidence, [BOX]: box };
+  const env = { ...process.env, HOME: home, TMPDIR: tmp, PLAIN_SIGHT_EVIDENCE: evidence, [BOX]: box, [STANDIN]: STANDIN_EXE };
   // Nothing of the shell that runs npm test reaches the harness's settings.
   for (const name of ['PLAIN_SIGHT_E2E_DOWNLOADS', 'PLAIN_SIGHT_APP', 'PLAIN_SIGHT_IDLE_MIN', 'PLAIN_SIGHT_ONLY', 'PLAIN_SIGHT_ALLOW_REAL_ID']) delete env[name];
   if (app) env.PLAIN_SIGHT_APP = fakeCopy(box, app);
@@ -646,6 +780,125 @@ test('SIGTERM during a test and then SIGHUP during the cleanup, as a watcher\'s 
   assert.equal(r.lock, false, 'the lock is released');
 });
 
+// DM-249: after a Ctrl+C or a kill during a test, the test went on while the
+// harness put everything back, and nothing stopped it from launching the app
+// again: the Delivery Manager saw an app outlive the run and write into the
+// restored folders, and remove the person's restored folder.txt, in 10 of 10
+// runs each (AT-H8 and AT-H8c; AT-H8b is deterministic). They are adopted
+// here with the answer the fix sets, AT-H8 and AT-H8c in three runs each, side
+// by side (one lost run is enough to show the race, and the old harness lost
+// 10 of 10): the relaunch is refused and no app outlives the run. Three more
+// cases hold each part of the fix on its own, since either part alone hides
+// the other's absence in AT-H8b: the refusal after a signal, the refusal
+// during the run's own cleanup, and e2e.mjs's after() stopping a copy started
+// by a way the refusal does not see.
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// What became of the stand-ins a case started: the pids they recorded, those
+// still running just after the run ended, and the files one wrote into the
+// restored web data folder after it; then each is ended, so none outlives
+// the case.
+async function standinsAfter(r) {
+  await pause(400);   // a stand-in started at the very end records its pid once node is up
+  const file = path.join(path.dirname(r.home), STANDIN_PIDS);
+  const pids = existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').map(Number).filter((p) => p > 0) : [];
+  const running = pids.filter(isAlive);
+  await pause(1800);   // a stand-in writes 1.5 s after it starts
+  const web = path.join(r.home, 'Library', 'WebKit', 'plain-sight');
+  const wrote = existsSync(web) ? readdirSync(web).filter((name) => name.startsWith('written-by-')) : [];
+  for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch { /* it has ended */ } }
+  return { pids, running, wrote };
+}
+const refusedFor = (signal) => new RegExp('was not launched: the run is ending \\(' + (signal ? signal + ' came' : 'its cleanup has begun') + '\\), so nothing may start again \\(DM-249\\)');
+test('a Ctrl+C while a test waits, whose next step launches the app again, leaves no app running after the run: the relaunch is refused and the test stops as not run, exit code 130, the data back (DM-249; the Delivery Manager\'s AT-H8b, with the answer the fix sets)', async () => {
+  let sent = false;
+  const r = await runCase('run-relaunch-waiting', (out, child) => { if (!sent && out.includes('WAITING')) { sent = true; child.kill('SIGINT'); } });
+  const s = await standinsAfter(r);
+  assert.ok(sent, 'the signal was sent while the test waited; the child\'s output:\n' + r.out);
+  ended(r, 130);
+  assert.ok(r.out.includes('stop - a test that launches the app again after a wait ('), 'the test stopped as not run; the child\'s output:\n' + r.out);
+  assert.match(r.out, refusedFor('SIGINT'), 'the relaunch was refused, naming the signal');
+  assert.doesNotMatch(r.out, /^RELAUNCHED /m, 'no app was launched again');
+  assert.equal(s.pids.length, 1, 'one app was started, before the signal: ' + JSON.stringify(s.pids));
+  assert.deepEqual(s.running, [], 'no app outlives the run');
+  assert.deepEqual(s.wrote, [], 'nothing was written into the restored web data folder after the run');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('a Ctrl+C while a test stops the app before launching it again (e2e.mjs\'s own shape) leaves no app running after the run, in each of three runs: exit code 130, the data back, nothing written after the run (DM-249; the Delivery Manager\'s AT-H8, with the answer the fix sets)', async () => {
+  const runs = await Promise.all([1, 2, 3].map(async (n) => {
+    let sent = false;
+    const r = await runCase('run-relaunch-stopping', (out, child) => { if (!sent && out.includes('STOPPING')) { sent = true; child.kill('SIGINT'); } }, { tag: 'run-relaunch-stopping-' + n });
+    return { n, sent, r, s: await standinsAfter(r) };
+  }));
+  for (const { n, sent, r, s } of runs) {
+    assert.ok(sent, 'run ' + n + ': the signal was sent while the test stopped the app; the child\'s output:\n' + r.out);
+    ended(r, 130);
+    assert.doesNotMatch(r.out, /^RELAUNCHED /m, 'run ' + n + ': no app was launched again; the child\'s output:\n' + r.out);
+    assert.equal(s.pids.length, 1, 'run ' + n + ': one app was started, before the signal: ' + JSON.stringify(s.pids));
+    assert.deepEqual(s.running, [], 'run ' + n + ': no app outlives the run');
+    assert.deepEqual(s.wrote, [], 'run ' + n + ': nothing was written into the restored web data folder after the run');
+    clean(r);
+    assert.equal(r.lock, false, 'run ' + n + ': the lock is released');
+  }
+});
+test('a Ctrl+C while a test restarts the app leaves the person\'s 1.0.0 folder choice, folder.txt, in place a few seconds after the run, in each of three runs: no app outlives the run to remove it (DM-249; the Delivery Manager\'s AT-H8c, with the answer the fix sets)', async () => {
+  const runs = await Promise.all([1, 2, 3].map(async (n) => {
+    let sent = false;
+    const r = await runCase('run-relaunch-folder', (out, child) => { if (!sent && out.includes('STOPPING')) { sent = true; child.kill('SIGINT'); } }, { tag: 'run-relaunch-folder-' + n });
+    const folderTxt = path.join(r.home, 'Library', 'Application Support', 'com.pranavongole.plainsight', 'folder.txt');
+    const atExit = existsSync(folderTxt);
+    const s = await standinsAfter(r);
+    return { n, sent, r, s, atExit, later: existsSync(folderTxt) ? readFileSync(folderTxt, 'utf8') : null };
+  }));
+  for (const { n, sent, r, s, atExit, later } of runs) {
+    assert.ok(sent, 'run ' + n + ': the signal was sent while the test stopped the app; the child\'s output:\n' + r.out);
+    ended(r, 130);
+    assert.equal(atExit, true, 'run ' + n + ': folder.txt is back when the run ends');
+    assert.equal(later, '/Users/someone/Notes', 'run ' + n + ': and still there, as it was, a few seconds later');
+    assert.doesNotMatch(r.out, /^RELAUNCHED /m, 'run ' + n + ': no app was launched again; the child\'s output:\n' + r.out);
+    assert.equal(s.pids.length, 1, 'run ' + n + ': one app was started, before the signal: ' + JSON.stringify(s.pids));
+    assert.deepEqual(s.running, [], 'run ' + n + ': no app outlives the run');
+    clean(r);
+  }
+});
+test('a launch that a test asks for once the cleanup after a signal has stopped the app is refused, so no app is left that after() cannot stop: the test stops as not run, exit code 130 (DM-249)', async () => {
+  let sent = false;
+  const r = await runCase('run-launch-after-signal', (out, child) => { if (!sent && out.includes('IN TEST')) { sent = true; child.kill('SIGINT'); } });
+  const s = await standinsAfter(r);
+  assert.ok(sent, 'the signal was sent during the test; the child\'s output:\n' + r.out);
+  ended(r, 130);
+  assert.match(r.out, /^AFTER DONE$/m, 'the cleanup\'s after() ended first');
+  assert.ok(r.out.split('\n').some((line) => line.startsWith('REFUSED ') && refusedFor('SIGINT').test(line)), 'the launch was refused, naming the signal; the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /^LAUNCHED AGAIN /m, 'no app was launched again');
+  assert.equal(s.pids.length, 1, 'one app was started, before the signal: ' + JSON.stringify(s.pids));
+  assert.deepEqual(s.running, [], 'no app outlives the run');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('a launch asked for during the run\'s own cleanup, with no signal at all, is refused too, so no app outlives a run that ends by its own count (DM-249)', async () => {
+  const r = await runCase('run-launch-in-own-cleanup');
+  const s = await standinsAfter(r);
+  ended(r, 0);
+  assert.ok(r.out.split('\n').some((line) => line.startsWith('REFUSED ') && refusedFor(null).test(line)), 'the launch was refused, naming the cleanup; the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /^LAUNCHED AGAIN /m, 'no app was launched again');
+  assert.equal(s.pids.length, 1, 'one app was started, by the test: ' + JSON.stringify(s.pids));
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 0$/m);
+  assert.deepEqual(s.running, [], 'no app outlives the run');
+  clean(r);
+});
+test('e2e.mjs\'s after() stops the app that is current when each stop ends: a copy started by a way the refusal does not see, while the cleanup stops the first, is stopped too, exit code 130 (DM-249)', async () => {
+  let sent = false;
+  const r = await runCase('run-late-app-stopped', (out, child) => { if (!sent && out.includes('IN TEST')) { sent = true; child.kill('SIGINT'); } });
+  const s = await standinsAfter(r);
+  assert.ok(sent, 'the signal was sent during the test; the child\'s output:\n' + r.out);
+  ended(r, 130);
+  assert.match(r.out, /^STARTED ANOTHER \d+$/m, 'the second copy was started while the cleanup stopped the first; the child\'s output:\n' + r.out);
+  assert.equal(s.pids.length, 2, 'two copies were started: ' + JSON.stringify(s.pids));
+  assert.deepEqual(s.running, [], 'neither outlives the run');
+  clean(r);
+});
+
 // DM-247: three real-key tests (app.mjs) started from a first launch by
 // clearing the test data mid-run, which on a sandboxed copy removes the
 // copy's container; macOS refused that removal (EPERM) at the end of
@@ -810,6 +1063,9 @@ try {
     }
   }
 } finally {
+  // Any stand-in still running, found by its own script's path in this run's
+  // temporary folder, which nothing else runs (DM-249).
+  try { childProcess.execFileSync('pkill', ['-9', '-f', STANDIN_APP]); } catch { /* none left */ }
   rmSync(ROOT, { recursive: true, force: true });
 }
 if (existsSync(ROOT)) {

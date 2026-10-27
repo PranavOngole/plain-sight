@@ -40,7 +40,11 @@
 // ends with 1; a run stopped by Ctrl+C or a kill puts everything back and
 // ends with 130, and a signal that comes while the run is putting things back,
 // or a second one, waits for that to finish and is reported, not obeyed
-// (DM-248). The last lines of a run that starts list any test data left
+// (DM-248). Once a signal has come or the cleanup has begun, nothing launches
+// the app again: spawnApp and the suites' own launches refuse
+// (refuseLaunchWhileEnding) and the test stops as not run, and the suites'
+// after() stops the app that is current when its wait ends, so no app the
+// run started outlives it (DM-249). The last lines of a run that starts list any test data left
 // behind and every test container on the Mac by name (never opened), the
 // summary and the exit code.
 
@@ -207,8 +211,10 @@ export function alive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-// Starts an executable with its output in the evidence folder.
+// Starts an executable with its output in the evidence folder; never once the
+// run is ending (refuseLaunchWhileEnding, DM-249).
 export function spawnApp(exe, env = {}) {
+  refuseLaunchWhileEnding(exe);
   const child = spawn(exe, [], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
   const out = createWriteStream(path.join(EVIDENCE, 'app-output.log'), { flags: 'a' });
   child.stdout.pipe(out);
@@ -221,6 +227,13 @@ export async function stopApp(app) {
   if (!app || !alive(app.pid)) return;
   app.child.kill('SIGTERM');
   await until(() => !alive(app.pid), 'the app to stop', 8000).catch(() => app.child.kill('SIGKILL'));
+}
+// The end of a suite whose app the run spawns (e2e.mjs's after()): stops the
+// app that is current when each stop ends, until none is running, so a copy
+// that a test launched again while the cleanup waited for the old one is
+// stopped too, not left running over the restored data (DM-249).
+export async function stopCurrentApp(current) {
+  for (let app = current(); app && alive(app.pid); app = current()) await stopApp(app);
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +453,18 @@ export function restoreAppData() {
 // once, with the data still aside and the lock left (DM-248).
 let signalled = null;
 let cleaningUp = false;
+// No launch once the run is ending (DM-249). After a signal, or once the
+// run's own cleanup has begun, the test that was running goes on while the
+// harness puts everything back, and an app it launched again outlived the run
+// and ran over the restored folders: a launch of this branch's build removes
+// the 1.0.0 app's folder choice, folder.txt (Folder::load), and the Delivery
+// Manager's AT-H8c saw a stand-in do so in 10 of 10 runs. So spawnApp,
+// app.mjs's launch() and release.mjs's open() call this first, and the test
+// stops as not run.
+export class RunEnding extends UserActivity {}
+export function refuseLaunchWhileEnding(what) {
+  if (signalled || cleaningUp) throw new RunEnding(what + ' was not launched: the run is ending (' + (signalled ? signalled + ' came' : 'its cleanup has begun') + '), so nothing may start again (DM-249)');
+}
 export function watchSignalsThenBackup(cleanup, { name = 'the run' } = {}) {
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(signal, () => {
@@ -544,7 +569,8 @@ export async function run(tests, { name, needUnlocked = false, before = () => {}
   // Ctrl+C or a kill puts everything back: the app stops, its data and the
   // Downloads folder are restored, the lock is released. The cleanup runs
   // once, and every caller, a signal's handler included, waits for that one
-  // to finish (DM-248).
+  // to finish (DM-248). From its first line no app may be launched again
+  // (cleaningUp, refuseLaunchWhileEnding; DM-249).
   let cleaning = null;
   let restored = true;
   let testDataLeft = [];
