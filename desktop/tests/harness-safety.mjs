@@ -258,6 +258,24 @@ if (process.argv[2] === '--child') {
         }
       }]);
     },
+    // DM-248: a signal while the run's own cleanup is under way, as the
+    // suites' after() waits for the app to quit. The Delivery Manager's AT-H6
+    // (one SIGINT then) and AT-H7 (a first SIGINT during a test, a second
+    // while after() waits), dm-appstore-534f3cc/adv/tests534/desktop/tests/
+    // dm-harness-adv-534.mjs, and a SIGTERM during a test, then a SIGHUP
+    // during the cleanup, with a test after them that must not start.
+    async 'run-signal-during-cleanup'() {
+      await runSuite([{ name: 'a test that writes test data', fn: async () => { testData(dirs[0]); } }], { after: slowAfter });
+    },
+    async 'run-second-signal'() {
+      await runSuite([{ name: 'a long test', fn: async () => { testData(dirs[0]); console.log('IN TEST'); await new Promise((r) => setTimeout(r, 6000)); } }], { after: slowAfter });
+    },
+    async 'run-term-then-hup'() {
+      await runSuite([
+        { name: 'a short test', fn: async () => { testData(dirs[0]); console.log('IN TEST'); await new Promise((r) => setTimeout(r, 1000)); } },
+        { name: 'a test after the signal', fn: async () => { console.log('TEST AFTER THE SIGNAL'); } }
+      ], { after: slowAfter });
+    },
     // H5: a sandbox probe's container (the bundle under test carries an
     // sbprobe- identifier), refused like a test copy's.
     async 'run-probe-container-refused'() {
@@ -383,10 +401,12 @@ if (process.argv[2] === '--child') {
   const container = h.APP_ID === h.ID ? null : path.join(CONTAINERS(home), h.APP_ID);
   const testData = (dir) => { mkdirSync(dir, { recursive: true }); writeFileSync(marker(dir), 'TEST DATA'); };
   const refused = (call, target, code = 'EPERM') => Object.assign(new Error(code + ': ' + (code === 'EACCES' ? 'permission denied' : 'operation not permitted') + ', ' + call + ' \'' + target + '\''), { code });
-  const runSuite = (tests, { needUnlocked = true } = {}) => {
+  const runSuite = (tests, { needUnlocked = true, after = null } = {}) => {
     mkdirSync(path.join(home, 'Downloads'), { recursive: true });
-    return h.run(tests, { name: 'release', needUnlocked });
+    return h.run(tests, { name: 'release', needUnlocked, ...(after ? { after } : {}) });
   };
+  // An after() that takes a while, as the suites' do while the app quits.
+  const slowAfter = async () => { console.log('IN AFTER'); await new Promise((r) => setTimeout(r, 3000)); console.log('AFTER DONE'); };
   try {
     await cases[which]();
     console.log('RESULT ok');
@@ -574,6 +594,56 @@ test('a launch whose document window is on-screen ends the first wait with the w
   assert.match(r.out, /^FIRST WINDOW \[\{"height":744,"layer":0,"onscreen":true,"width":980,"x":790,"y":324\}\]$/m, 'the child\'s output:\n' + r.out);
   assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 0$/m);
   clean(r);
+});
+
+// DM-248: a Ctrl+C or a kill during the harness's own cleanup ended the run
+// with 130 before the app's data was put back, so the data stayed in
+// appdata-backup and the lock file stayed (the Delivery Manager's AT-H6 and
+// AT-H7 showed it under this file's fake home). They are adopted here with
+// the answer the fix sets: the signal waits for the restore and the lock
+// release, is reported, and the run then ends with 130.
+test('a Ctrl+C while the run\'s own cleanup waits for the app to quit waits for that cleanup: the data back, the lock released, the signal reported, exit code 130 (DM-248; the Delivery Manager\'s AT-H6)', async () => {
+  let sent = false;
+  const r = await runCase('run-signal-during-cleanup', (out, child) => {
+    if (sent || !out.includes('IN AFTER')) return;
+    sent = true;
+    child.kill('SIGINT');
+  });
+  assert.ok(sent, 'the signal was sent while after() waited; the child\'s output:\n' + r.out);
+  ended(r, 130);
+  assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
+  assert.match(r.out, /^release: SIGINT came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the signal is reported');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('a second Ctrl+C, after a first one during a test started the cleanup, is reported and not obeyed: the data back, the lock released, exit code 130 (DM-248; the Delivery Manager\'s AT-H7)', async () => {
+  let first = false;
+  let second = false;
+  const r = await runCase('run-second-signal', (out, child) => {
+    if (!first && out.includes('IN TEST')) { first = true; child.kill('SIGINT'); return; }
+    if (first && !second && out.includes('IN AFTER')) { second = true; child.kill('SIGINT'); }
+  });
+  assert.ok(first && second, 'both signals were sent; the child\'s output:\n' + r.out);
+  ended(r, 130);
+  assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
+  assert.match(r.out, /^release: SIGINT came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the second signal is reported');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('SIGTERM during a test and then SIGHUP during the cleanup, as a watcher\'s kill and a closed terminal send them, wait for the cleanup as well, and no test starts after the first (DM-248)', async () => {
+  let term = false;
+  let hup = false;
+  const r = await runCase('run-term-then-hup', (out, child) => {
+    if (!term && out.includes('IN TEST')) { term = true; child.kill('SIGTERM'); return; }
+    if (term && !hup && out.includes('IN AFTER')) { hup = true; child.kill('SIGHUP'); }
+  });
+  assert.ok(term && hup, 'both signals were sent; the child\'s output:\n' + r.out);
+  ended(r, 130);
+  assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
+  assert.match(r.out, /^release: SIGHUP came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the SIGHUP is reported');
+  assert.doesNotMatch(r.out, /TEST AFTER THE SIGNAL/, 'no test starts once a signal has come');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
 });
 
 // DM-247: three real-key tests (app.mjs) started from a first launch by

@@ -38,7 +38,9 @@
 // 7 before the run when it refuses the bundle. A run without the
 // Accessibility permission for the program running it does not start and
 // ends with 1; a run stopped by Ctrl+C or a kill puts everything back and
-// ends with 130. The last lines of a run that starts list any test data left
+// ends with 130, and a signal that comes while the run is putting things back,
+// or a second one, waits for that to finish and is reported, not obeyed
+// (DM-248). The last lines of a run that starts list any test data left
 // behind and every test container on the Mac by name (never opened), the
 // summary and the exit code.
 
@@ -431,9 +433,26 @@ export function restoreAppData() {
 // a cleanup that ever ran with the backup incomplete is refused by
 // restoreAppData, which clears nothing and names what to put back. Exported
 // for the harness checks, which run it against a fake home.
-export function watchSignalsThenBackup(cleanup) {
+// Once a signal has come, or once the run's own cleanup has begun, a further
+// SIGINT, SIGTERM or SIGHUP is reported and waits: the run ends with 130 only
+// after the app's data is back and the lock released. Before, a Ctrl+C while
+// the cleanup waited for the app to quit (or a second Ctrl+C) ended the run at
+// once, with the data still aside and the lock left (DM-248).
+let signalled = null;
+let cleaningUp = false;
+export function watchSignalsThenBackup(cleanup, { name = 'the run' } = {}) {
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.on(signal, () => { note('stopped by ' + signal); cleanup().finally(() => process.exit(130)); });
+    process.on(signal, () => {
+      if (signalled || cleaningUp) {
+        note(signal + ' while the run puts everything back: it waits for that');
+        console.log(name + ': ' + signal + ' came while the run puts the app\'s data back; the run ends with 130 once that is done');
+      } else {
+        note('stopped by ' + signal);
+      }
+      if (signalled) return;
+      signalled = signal;
+      cleanup().finally(() => process.exit(130));
+    });
   }
   backupAppData();
 }
@@ -523,24 +542,25 @@ export async function run(tests, { name, needUnlocked = false, before = () => {}
   if (!takeLock(name)) { console.log(`${name}: not started: another GUI test run holds ${LOCK}. Errors: 0`); process.exit(5); }
   requireUnlocked = needUnlocked;
   // Ctrl+C or a kill puts everything back: the app stops, its data and the
-  // Downloads folder are restored, the lock is released.
-  let cleaned = false;
+  // Downloads folder are restored, the lock is released. The cleanup runs
+  // once, and every caller, a signal's handler included, waits for that one
+  // to finish (DM-248).
+  let cleaning = null;
   let restored = true;
   let testDataLeft = [];
-  const cleanup = async () => {
-    if (cleaned) return;
-    cleaned = true;
+  const cleanup = () => (cleaning ||= (async () => {
+    cleaningUp = true;
     stopGuard();
     try { await after(); } catch (err) { note('after: ' + err.message); }
     try { collectDownloads(); } catch (err) { note('downloads: ' + err.message); }
     try { testDataLeft = restoreAppData(); } catch (err) { restored = false; testDataLeft = err.testDataLeft || []; console.log('Could not restore app data: ' + err.message); }
     for (const dir of testDataLeft) console.log('test data left behind: ' + dir + ' (macOS refused to remove it; remove it by hand, see wave-g/probe/DESIGN.md, Leftovers)');
     dropLock();
-  };
+  })());
   markDownloads();
   runStartedAt = Date.now();
   try {
-    watchSignalsThenBackup(cleanup);
+    watchSignalsThenBackup(cleanup, { name });
   } catch (err) {
     // A move aside that macOS refuses, or a backup an earlier run left:
     // backupAppData put back whatever it had moved, so the run did not start
@@ -554,6 +574,7 @@ export async function run(tests, { name, needUnlocked = false, before = () => {}
   try {
     await before();
     for (const t of tests) {
+      if (signalled) break;   // the run is being put back for a signal: no further test starts
       if (only && !only.test(t.name)) continue;
       if (stopped) { notRun += 1; console.log('skip - ' + t.name + ' (not run: ' + stopped + ')'); continue; }
       try {
@@ -571,6 +592,9 @@ export async function run(tests, { name, needUnlocked = false, before = () => {}
   } finally {
     await cleanup();
   }
+  // A signal that came during the run's own cleanup waited for it; the data
+  // is back and the lock released, so the run ends as a signal ends it.
+  if (signalled) process.exit(130);
   console.log(`\nEvidence: ${EVIDENCE}`);
   console.log('Test containers on this Mac at the end of the run (names only, never opened): ' + (testContainers().join(', ') || 'none'));
   console.log(`${passed} passed, ${failed} failed, ${notRun} not run, ${passed + failed + notRun} total. Errors: ${failed + (restored ? 0 : 1)}`);
