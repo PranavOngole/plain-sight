@@ -14,7 +14,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { OVERRIDE, REAL_ID, SANDBOX, bundleFacts, bundleIdentifier, refusal, verdict, webDataFolder } from './launch-guard.mjs';
 import { MANIFEST, SIGNATURE, TEST_NAME, copyUnsigned, sameEntitlements, testIdentifier } from './testcopy.mjs';
 
@@ -252,12 +252,10 @@ test('the network watch takes the identifier literally: one with regular-express
 // Mac. codesign and plutil are the real ones.
 function watchEnv({ codesign = null } = {}) {
   const bin = path.join(ROOT, 'watch-bin' + (codesign ? '-codesign' : ''));
-  if (!existsSync(bin)) {
-    mkdirSync(bin, { recursive: true });
-    for (const [name, body] of [['pgrep', 'exit 1'], ['lsof', 'exit 0'], ['script', 'exit 0'], ['nettop', 'exit 0'], ...(codesign ? [['codesign', codesign]] : [])]) {
-      writeFileSync(path.join(bin, name), '#!/bin/sh\n' + body + '\n');
-      chmodSync(path.join(bin, name), 0o755);
-    }
+  mkdirSync(bin, { recursive: true });
+  for (const [name, body] of [['pgrep', 'exit 1'], ['lsof', 'exit 0'], ['script', 'exit 0'], ['nettop', 'exit 0'], ...(codesign ? [['codesign', codesign]] : [])]) {
+    writeFileSync(path.join(bin, name), '#!/bin/sh\n' + body + '\n');
+    chmodSync(path.join(bin, name), 0o755);
   }
   return { ...process.env, PATH: bin + ':' + process.env.PATH };
 }
@@ -275,6 +273,60 @@ test('the network watch given a path with no bundle, or a bundle codesign cannot
     assert.ok(written && /^the bundle could not be read: /.test(written.verdict), label + ': the report says so: ' + JSON.stringify(written));
     assert.deepEqual([written.appPids, written.networkPids, written.samples], [[], [], 0], label + ': and lists no process');
   }
+});
+
+// DM-240: no test ran launchable() itself, so with its process.exit(REFUSED)
+// removed the guard printed its refusal and returned, the suite went on to
+// the backup and to `open -n` of the real-identifier bundle, and every suite
+// passed (the Delivery Manager's GD1). Its AT-L1a to AT-L1c
+// (dm-appstore-534f3cc/adv/tests534/desktop/tests/dm-guard-adv-534.mjs):
+// launchable() in a process of its own, as the suites run it, with the
+// codesign reader handed in, so nothing is signed. A refused bundle ends that
+// process with exit code 7 before the line after the call runs; a test copy's
+// facts are returned.
+function launchIn(app, signatureId, entitlementsXml) {
+  const code = 'import { launchable } from ' + JSON.stringify(pathToFileURL(path.join(TESTS, 'launch-guard.mjs')).href) + ';\n'
+    + 'const facts = launchable("guardcheck", ' + JSON.stringify(app) + ', { codesign: (a, r) => (r === "identifier" ? ' + JSON.stringify(signatureId) + ' : ' + JSON.stringify(entitlementsXml) + ') });\n'
+    + 'console.log("RETURNED " + JSON.stringify(facts && facts.identifier));';
+  const env = { ...process.env };
+  delete env[OVERRIDE];
+  return spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env });
+}
+test('launchable(), run as the suites run it, ends its process with exit code 7 and an Errors line on a bundle sandboxed under the real identifier or on no bundle at all, before the line after the call runs, and returns a test copy\'s facts (DM-240; the Delivery Manager\'s AT-L1a to AT-L1c)', () => {
+  const real = launchIn(fakeBundle('launch-real', REAL_ID), REAL_ID, sandboxed);
+  assert.equal(real.status, 7, 'AT-L1a: exit code 7; output: ' + real.stdout + real.stderr);
+  assert.match(real.stdout, /^guardcheck: not started: .* is sandboxed under the real bundle identifier com\.pranavongole\.plainsight .*Errors: 1$/m, 'AT-L1a: the refusal and its Errors line');
+  assert.equal(real.stdout.includes('RETURNED'), false, 'AT-L1a: the line after the call never ran, so a suite would not go on to open the bundle');
+  const copy = launchIn(fakeBundle('launch-copy', testIdentifier(1761000015)), testIdentifier(1761000015), sandboxed);
+  assert.equal(copy.status, 0, 'AT-L1b: a test copy lets the process go on: ' + copy.stdout + copy.stderr);
+  assert.equal(copy.stdout.trim(), 'RETURNED "' + testIdentifier(1761000015) + '"', 'AT-L1b: and its facts are returned');
+  const none = launchIn(path.join(ROOT, 'nothing here', 'Plain Sight.app'), REAL_ID, sandboxed);
+  assert.equal(none.status, 7, 'AT-L1c: no bundle ends the process with 7 too: ' + none.stdout + none.stderr);
+  assert.match(none.stdout, /not started: no app bundle at /, 'AT-L1c: the reason');
+  assert.equal(none.stdout.includes('RETURNED'), false, 'AT-L1c: the line after the call never ran');
+});
+
+// DM-242: the watch's own wiring, watch(), runs only as a script, so with
+// watch() matching the unsandboxed paths whatever bundle it is handed, every
+// suite passed (the Delivery Manager's NW1). Its AT-N1: netwatch.mjs run as
+// release.mjs runs it, for one second, on a fake bundle sandboxed under a
+// test identifier (never opened), with a stand-in codesign on its PATH that
+// answers the guard's two reads, so nothing is signed: the report records the
+// bundle and that bundle's container pattern, and with the app never running
+// the watch ends with exit code 2.
+test('the network watch handed a sandboxed test copy matches that bundle\'s container and records the bundle, and with the app never running ends with exit code 2 (DM-242; the Delivery Manager\'s AT-N1)', () => {
+  const id = testIdentifier(1761000016);
+  const bundle = fakeBundle('watch-sandboxed', id);
+  const entitlements = path.join(ROOT, 'watch-entitlements.plist');
+  writeFileSync(entitlements, sandboxed);
+  const codesign = 'case "$1" in\n  -dv) echo "Identifier=' + id + '" >&2; exit 0 ;;\n  -d) cat "' + entitlements + '"; exit 0 ;;\nesac\nexit 1';
+  const report = path.join(ROOT, 'netwatch-sandboxed.json');
+  const r = spawnSync(process.execPath, [path.join(TESTS, 'netwatch.mjs'), '1', report, bundle], { encoding: 'utf8', env: watchEnv({ codesign }) });
+  assert.equal(r.status, 2, 'exit code 2; output: ' + r.stdout + r.stderr);
+  const written = JSON.parse(readFileSync(report, 'utf8'));
+  assert.equal(written.verdict, 'the app was never seen running', 'nothing was proven, and the report says so');
+  assert.equal(written.webData, String(new RegExp('/Library/Containers/' + id.replace(/\./g, '\\.') + '/Data/Library/WebKit/')), 'the watch matched the bundle\'s container: ' + written.webData);
+  assert.deepEqual(written.bundle, { app: bundle, identifier: id, sandboxed: true }, 'and recorded the bundle it was handed');
 });
 
 test('the copy script rewrites the identifier and the names, leaves the migration manifest and the old signature out, keeps the rest, and leaves the source as it was', () => {

@@ -232,6 +232,26 @@ test('the quit\'s answer timer is 1.5 s in quit.rs, and the README and the quit.
   assert.match(readme, new RegExp(literal('the quit goes on after ' + askSeconds + ' seconds, and if it then never says it is done, the app\'s own timer ends it after ' + safety[1] + ' more seconds, so about ' + total + ' seconds in all')), 'the README\'s quit bullet states both timers and their sum');
 });
 
+// DM-237 (b), at the use: the pin above reads ASK's declaration, so a timer
+// thread that slept a literal 15 s while ASK stayed 1.5 s passed every suite
+// (the Delivery Manager's RM07b). The app's code in quit.rs, its tests left
+// out, sleeps exactly twice: for ASK in ask()'s answer timer and for SAFETY
+// in run_hook()'s safety timer.
+test('quit.rs\'s two timers sleep for ASK and SAFETY themselves: ask()\'s answer timer and run_hook()\'s safety timer are the only sleeps in the app\'s code (DM-237 b; the Delivery Manager\'s RM07b)', () => {
+  const quitRs = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'src', 'quit.rs'), 'utf8');
+  const testsAt = quitRs.indexOf('\n#[cfg(test)]');
+  assert.ok(testsAt > 0, 'quit.rs keeps its tests in a module at its end');
+  const app = quitRs.slice(0, testsAt);
+  assert.deepEqual([...app.matchAll(/std::thread::sleep\(([^;]*)\);/g)].map((m) => m[1]), ['ASK', 'SAFETY'], 'the only sleeps in the app\'s code, in this order');
+  const body = (name) => {
+    const at = app.indexOf('\nfn ' + name + '(');
+    assert.ok(at >= 0, 'quit.rs has fn ' + name);
+    return app.slice(at, app.indexOf('\n}\n', at));
+  };
+  assert.ok(body('ask').includes('    std::thread::spawn(move || {\n        std::thread::sleep(ASK);\n        answered(question, false);\n    });'), 'ask()\'s timer sleeps ASK, then counts the silence as nothing to lose');
+  assert.ok(body('run_hook').includes('    std::thread::spawn(|| {\n        std::thread::sleep(SAFETY);\n        finish();\n    });'), 'run_hook()\'s timer sleeps SAFETY, then ends the app');
+});
+
 test('the app\'s question whether a quit would lose text is answered by the page\'s callback, and false without one or when it fails (D-48)', () => {
   const a = load();
   try {
