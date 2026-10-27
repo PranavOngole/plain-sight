@@ -480,7 +480,7 @@ test('in the app a successful Save or Open answers the quit question with false 
 // Open after Esc, the ten-minute wipe and the quit, since wipe() never
 // cleared it, so a full copy of the last saved text stayed in the page's
 // memory until the next Save, Open or the window closed. Since QA-G-33 the
-// page keeps no copy at all, only a count of its edits at the last Save or
+// page keeps no lasting copy, only a count of its edits at the last Save or
 // Open, which the wipe drops; the cases below keep their intent: after a
 // wipe, the same words typed again are text a quit would lose (QA-01's
 // repro: Save "abc", Esc, type "abc"; true is the answer the fix sets, false

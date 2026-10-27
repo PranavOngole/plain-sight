@@ -207,14 +207,16 @@ if (process.argv[2] === '--child') {
       process.exit(9);
     },
     // DM-243: the run's own end. A test copy's launch makes its container
-    // (here a folder in the fake home), macOS App Data protection refuses its
-    // removal (here the hook, as EPERM), and run() ends the process itself.
+    // (here a folder in the fake home), macOS refuses its removal (here the
+    // hook, as EPERM, which is what release-run-1 saw; its cause was not
+    // shown), and run() ends the process itself.
     async 'run-test-container-refused'() {
       onRemove = (target) => { if (target === container) throw refused('rmdir', target); };
       await runSuite([launchMakesContainer]);
     },
-    // QA-01's harness cases on 534f3cc (wave-g/qa/scripts/app/r7_harness_adv.mjs
-    // with r7_harness_child.mjs, H4 to H28), on this file's stand-in: QA-01
+    // Eleven of QA-01's harness cases on 534f3cc (H4, H5, H6, H7, H8b, H8c,
+    // H8d, H13b, H22, H26 and H28 of wave-g/qa/scripts/app/r7_harness_adv.mjs
+    // with r7_harness_child.mjs), on this file's stand-in: QA-01
     // made macOS's refusals real (chflags uchg for EPERM, an ACL "deny delete"
     // for EACCES); here the hook answers with the same error codes. H4: the
     // container refused with EACCES.
@@ -999,9 +1001,10 @@ test('a test that needs a first launch of an unsandboxed bundle still gets its f
   clean(r);
 });
 
-// QA-G-36 and DISH-G-70: guards of round 7 that no case above holds. QA-01's
-// harness cases on 534f3cc (wave-g/qa/scripts/app/r7_harness_adv.mjs, H4 to
-// H28, with its expectations), the Delivery Manager's AT-H1 to AT-H4
+// QA-G-36 and DISH-G-70: guards of round 7 that no case above holds. Eleven
+// of QA-01's harness cases on 534f3cc (wave-g/qa/scripts/app/r7_harness_adv.mjs:
+// H4, H5, H6, H7, H8b, H8c, H8d, H13b, H22, H26 and H28, with its
+// expectations), the Delivery Manager's AT-H1 to AT-H4
 // (dm-appstore-534f3cc/adv/tests534/desktop/tests/dm-harness-adv-534.mjs)
 // and DISH-G-70's breaks R1 to R7: each case below goes red on a break of
 // harness.mjs that the cases above let through.

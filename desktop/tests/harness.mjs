@@ -14,7 +14,8 @@
 //   a real vault or folder choice is never seen or changed by a test; a run
 //   that cannot put one back ends with exit code 6 and says where it is;
 // - test data that macOS will not let the run remove (the container a test
-//   copy's launch made: App Data protection answers EPERM) is left where it
+//   copy's launch made: macOS answered its removal with EPERM at the end of
+//   release-run-1, for a cause not shown) is left where it
 //   is and named, never counted as the person's data not coming back; with
 //   nothing worse, the run ends with exit code 8 (DM-243). A test copy runs
 //   once: a run on a copy whose container is still there does not start;
@@ -44,8 +45,9 @@
 // the app again: spawnApp and the suites' own launches refuse
 // (refuseLaunchWhileEnding) and the test stops as not run, and the suites'
 // after() stops the app that is current when its wait ends, so no app the
-// run started outlives it (DM-249). The last lines of a run that starts list any test data left
-// behind and every test container on the Mac by name (never opened), the
+// run started outlives it (DM-249). A run names any test data left behind as
+// it puts things back; every run that ends by its own count (not by a signal)
+// then lists every test container on the Mac by name (never opened), the
 // summary and the exit code.
 
 import { execFileSync, spawn } from 'node:child_process';
