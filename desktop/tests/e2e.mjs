@@ -413,6 +413,15 @@ test('the folder button opens the real system folder panel, as a window at the n
   assert.ok(windows.every((w) => w.layer === 0), 'the panel does not float above other apps: layers ' + windows.map((w) => w.layer).join(', '));
 });
 
+// The intro's folder status in the app with no folder chosen and the
+// encrypted mode picked: the page's own words (index.html, folderRender),
+// which the jsdom suite holds the page to (native.mjs). They read "Save
+// downloads an encrypted .sight file." until Save without a folder went
+// through the save panel (a460b1f, 22 October 2026); the two tests that read
+// the status still expected the old words in e2e-run-3 (26 October), the
+// first failing on them and the second timing out waiting for them.
+const NO_FOLDER_STATUS = 'Save opens a save panel for an encrypted .sight file.';
+
 test('in the app the intro speaks of an app, not a browser, and offers the system folder picker', async () => {
   mkdirSync(FOLDER, { recursive: true });
   await stopApp(app);
@@ -426,7 +435,7 @@ test('in the app the intro speaks of an app, not a browser, and offers the syste
   assert.match(intro, /Save my text on this computer, encrypted/);
   assert.equal(await page.shown('btn-folder'), true, 'the folder button shows');
   assert.equal(await page.shown('folder-help'), false, 'no browser help');
-  assert.equal(await page.text('folder-status'), 'Save downloads an encrypted .sight file.');
+  assert.equal(await page.text('folder-status'), NO_FOLDER_STATUS);
   await picture('b01-intro-app-wording.png');
 });
 
@@ -573,7 +582,7 @@ test('a folder that has gone away: Save says it could not write, and the text st
 test('"Stop using the folder" forgets it, in the app\'s data too, and Save asks for a password again', async () => {
   await page.openIntro();
   await page.click('btn-folder-forget');
-  await until(async () => (await page.text('folder-status')) === 'Save downloads an encrypted .sight file.', 'the status to change back');
+  await until(async () => (await page.text('folder-status')) === NO_FOLDER_STATUS, 'the status to change back');
   assert.equal(existsSync(path.join(HOME, 'Library/Application Support', ID, 'folder.bookmark')), false, 'the bookmark is deleted');
   await page.start();
   await page.click('btn-save');
@@ -641,7 +650,20 @@ test('the menu bar is the app\'s own and holds only standard items', async () =>
   for (const want of ['About Plain Sight', 'Services', 'Hide Plain Sight', 'Hide Others', 'Show All', 'Quit Plain Sight']) {
     assert.ok(items['Plain Sight'].includes(want), 'the app menu has ' + want);
   }
-  assert.deepEqual(items.File, ['Open...', 'Save...', 'Close Window'], 'the File menu of a document app (D-44)');
+  // The File menu shows Open..., Save... and Close Window. AppKit adds Close
+  // All as Close Window's alternate: the same key W with the Option modifier
+  // (AXMenuItemCmdModifiers 2 in the driver's listing; Redo, Shift, shows 1),
+  // seen only while Option is held. e2e-run-3 (26 October 2026, run.log line
+  // 357) listed it, and the old exact list failed on it. So the three visible
+  // items are expected exactly, and Close All only as that alternate, so that
+  // any other item still fails (D-44).
+  const file = menus.find((m) => m.title === 'File').items.filter((i) => i.title);
+  assert.deepEqual(file.filter((i) => i.title !== 'Close All').map((i) => i.title), ['Open...', 'Save...', 'Close Window'], 'the File menu of a document app (D-44)');
+  const close = file.find((i) => i.title === 'Close Window');
+  assert.deepEqual([close.key, close.mods], ['W', 0], 'Close Window is Cmd+W');
+  const closeAll = file.filter((i) => i.title === 'Close All');
+  assert.ok(closeAll.length <= 1, 'Close All at most once: ' + JSON.stringify(closeAll));
+  for (const i of closeAll) assert.deepEqual([i.key, i.mods], ['W', 2], 'Close All only as the Option alternate of Close Window: ' + JSON.stringify(i));
   for (const want of ['Undo', 'Redo', 'Cut', 'Copy', 'Paste', 'Select All']) assert.ok(items.Edit.includes(want), 'Edit has ' + want);
   assert.ok(items.Help.includes('Plain Sight Help'), 'the Help menu has the help item (D-44): ' + items.Help.join(', '));
   const all = Object.values(items).flat().join(' | ');
@@ -812,7 +834,15 @@ test('the window is marked not restorable, and macOS keeps no window state or pi
   await page.press('Escape');
   await page.type('words on screen before a quit');
   await page.press('G', { meta: true, shift: true });
-  await ask({ close: true });   // the quit's Esc ends the peek, then the app ends; a restorable window's state is written then
+  // Since D-48 a close with text on the page and no vault first asks "Quit
+  // without saving?", so the close waits for the sheet; e2e-run-3 (26
+  // October 2026) timed out here waiting for the app to end. The sheet's
+  // Quit, pressed through the probe as the sheet test above presses it, ends
+  // the app through the page's quit: its Esc ends the peek, then the app
+  // ends, and a restorable window's state would be written then.
+  await ask({ close: true });
+  await sheetUp('the close before a quit');
+  assert.equal(await ask({ sheet: 'quit' }), true, 'the probe pressed Quit in the sheet');
   await until(() => !alive(app.pid), 'the app to end after the close', 8000);
   await sleep(1000);
   assertNoWindowState('after a quit');
