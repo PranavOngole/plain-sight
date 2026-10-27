@@ -15,7 +15,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { DESKTOP, EVIDENCE, HOME, NotRun, alive, drive, note, run, sleep, until } from './harness.mjs';
-import { launchable, webDataFolder } from './launch-guard.mjs';
+import { appMenuTitle, launchable, menuBarOf, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
 // Before anything else, and before the harness's run() moves any data aside:
@@ -25,6 +25,9 @@ const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/
 // then PLAIN_SIGHT_APP=<the copy>). The facts read here also say where the
 // bundle's web data lives: in its container when it is sandboxed.
 const BUNDLE = launchable('release', APP);
+// The app menu is titled by the bundle's name, "Plain Sight test copy" on a
+// test copy; its items keep the app's own words (DM-241).
+const APP_MENU = appMenuTitle(BUNDLE);
 const EXE = path.join(APP, 'Contents/MacOS/plain-sight');
 const WEB_DATA = webDataFolder(HOME, BUNDLE);
 let app = null;
@@ -86,14 +89,14 @@ test('the sealed release app opens through LaunchServices as a double-click does
 test('its menu bar is the app\'s own and holds only standard items', async () => {
   const menus = drive('menus', app.pid).menus.filter((m) => m.title !== 'Apple');
   note('menu bar: ' + JSON.stringify(menus));
-  assert.deepEqual(menus.map((m) => m.title), ['Plain Sight', 'File', 'Edit', 'View', 'Window', 'Help']);
+  assert.deepEqual(menus.map((m) => m.title), menuBarOf(BUNDLE));
   const items = Object.fromEntries(menus.map((m) => [m.title, m.items.map((i) => i.title).filter(Boolean)]));
-  for (const want of ['About Plain Sight', 'Services', 'Hide Plain Sight', 'Hide Others', 'Show All', 'Quit Plain Sight']) assert.ok(items['Plain Sight'].includes(want), want);
+  for (const want of ['About Plain Sight', 'Services', 'Hide Plain Sight', 'Hide Others', 'Show All', 'Quit Plain Sight']) assert.ok(items[APP_MENU].includes(want), want);
   assert.equal(/peek|vault|hidden|reload|inspect|debug|developer|devtools/i.test(Object.values(items).flat().join(' | ')), false);
 });
 
 test('the app\'s own Quit item ends it', async () => {
-  drive('menu', app.pid, 'Plain Sight', 'Quit Plain Sight');
+  drive('menu', app.pid, APP_MENU, 'Quit Plain Sight');
   await ended('the Quit item');
 });
 
@@ -111,7 +114,7 @@ function documentWindow() {
   return windows.find((w) => w.subrole === 'AXStandardWindow') || null;
 }
 async function endAndSkip(reason) {
-  drive('menu', app.pid, 'Plain Sight', 'Quit Plain Sight');
+  drive('menu', app.pid, APP_MENU, 'Quit Plain Sight');
   await ended('the Quit item');
   throw new NotRun(reason);
 }

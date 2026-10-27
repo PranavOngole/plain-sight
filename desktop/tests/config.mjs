@@ -315,7 +315,8 @@ test('both suites that open a bundle run the launch guard before any launch and 
   const tests = path.join(DESKTOP, 'tests');
   for (const file of ['release.mjs', 'app.mjs']) {
     const text = read(tests, file);
-    assert.match(text, /^import \{ launchable, webDataFolder \} from '\.\/launch-guard\.mjs';$/m, file + ' takes the guard from launch-guard.mjs');
+    const imported = text.match(/^import \{ ([A-Za-z, ]+) \} from '\.\/launch-guard\.mjs';$/m);
+    assert.ok(imported && ['launchable', 'webDataFolder'].every((name) => imported[1].split(', ').includes(name)), file + ' takes the guard and the web data folder from launch-guard.mjs');
     const guard = text.indexOf("const BUNDLE = launchable('");
     const open = text.indexOf("execFileSync('open'");
     const started = text.indexOf('await run(tests');
@@ -333,6 +334,25 @@ test('both suites that open a bundle run the launch guard before any launch and 
   assert.equal(MANIFEST, 'Contents/Resources/container-migration.plist', 'the copy loses the migration manifest');
   assert.ok(testIdentifier(1).startsWith(REAL_ID + '.testcopy-') && testIdentifier(1) !== REAL_ID, 'the copy gets a test identifier of its own');
   assert.notEqual(TEST_NAME, 'Plain Sight', 'and a name of its own');
+});
+
+// DM-241: macOS titles the app menu with the bundle's name, which is "Plain
+// Sight test copy" on the copy the two suites run on, while the items keep
+// the app's own words ("About Plain Sight", "Quit Plain Sight"). So neither
+// suite may name the app menu "Plain Sight" itself: both take the title from
+// the bundle they open (launch-guard.mjs, appMenuTitle and menuBarOf).
+test('the suites that open a bundle take the app menu\'s title from that bundle and name no "Plain Sight" menu of their own (DM-241)', () => {
+  const tests = path.join(DESKTOP, 'tests');
+  for (const file of ['release.mjs', 'app.mjs']) {
+    const text = read(tests, file);
+    const literal = text.split('\n').findIndex((line) => /(['"`])Plain Sight\1/.test(line));
+    assert.equal(literal, -1, file + ' line ' + (literal + 1) + ' names the app menu "Plain Sight" itself: ' + (text.split('\n')[literal] || '').trim());
+    assert.match(text, /^const APP_MENU = appMenuTitle\(BUNDLE\);$/m, file + ' reads the app menu\'s title from the bundle');
+    assert.match(text, /menuBarOf\(BUNDLE\)/, file + ' expects the menu bar of the bundle it opened');
+    const calls = [...text.matchAll(/drive\('menu', app\.pid, ([^,]+), '(About|Hide|Quit) Plain Sight'\)/g)];
+    assert.ok(calls.length > 0, file + ' presses an item of the app menu');
+    for (const call of calls) assert.equal(call[1], 'APP_MENU', file + ': ' + call[0] + ' looks for the item in the bundle\'s own app menu');
+  }
 });
 
 // The real-key save and folder tests (app.mjs) go to the test's own folder

@@ -24,11 +24,11 @@ const plist = (dict) => '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist
   + '</dict></plist>\n';
 // A fake bundle: an Info.plist with the identifier and name given, an empty
 // executable, and (when asked) the migration manifest and an old signature.
-function fakeBundle(tag, identifier, { manifest = false, signature = false, displayName = null } = {}) {
+function fakeBundle(tag, identifier, { manifest = false, signature = false, displayName = null, name = 'Plain Sight' } = {}) {
   const app = path.join(ROOT, tag + '.app');
   mkdirSync(path.join(app, 'Contents', 'MacOS'), { recursive: true });
   mkdirSync(path.join(app, 'Contents', 'Resources'), { recursive: true });
-  const info = { CFBundleIdentifier: identifier, CFBundleName: 'Plain Sight', CFBundleExecutable: 'plain-sight' };
+  const info = { CFBundleIdentifier: identifier, CFBundleName: name, CFBundleExecutable: 'plain-sight' };
   if (displayName) info.CFBundleDisplayName = displayName;
   writeFileSync(path.join(app, 'Contents', 'Info.plist'), plist(info));
   writeFileSync(path.join(app, 'Contents', 'MacOS', 'plain-sight'), '');
@@ -106,6 +106,24 @@ test('the web data folder follows the bundle: the identifier under Library/WebKi
   assert.equal(webDataFolder(home, { identifier: REAL_ID, sandboxed: false }), path.join(home, 'Library/WebKit', REAL_ID));
   const id = testIdentifier(1761000000);
   assert.equal(webDataFolder(home, { identifier: id, sandboxed: true }), path.join(home, 'Library/Containers', id, 'Data/Library/WebKit/WebsiteData'));
+});
+
+// DM-241: macOS titles the app menu with the bundle's name, so a copy made by
+// the script shows "Plain Sight test copy" there while the items keep the
+// binary's own words, "About Plain Sight", "Hide Plain Sight" and "Quit Plain
+// Sight" (release-run-1, 26 October 2026, run.log line 59). The two suites
+// that open a bundle expect the menu bar this gives for the bundle they open.
+test('the suites expect the app menu under the bundle\'s own name: "Plain Sight test copy" on a copy the script made, "Plain Sight" on the app (DM-241)', async () => {
+  const { appMenuTitle, menuBarOf } = await import('./launch-guard.mjs');
+  assert.equal(typeof menuBarOf, 'function', 'launch-guard.mjs gives the suites the menu bar they expect for a bundle');
+  const source = fakeBundle('menu-source', REAL_ID, { displayName: 'Plain Sight' });
+  const copy = copyUnsigned(source, path.join(ROOT, 'menu-copy'), 1761000002);
+  const facts = bundleFacts(copy, { codesign: codesignSaying(sandboxed) });
+  assert.equal(facts.name, TEST_NAME, 'the copy carries the test name');
+  assert.deepEqual(menuBarOf(facts), [TEST_NAME, 'File', 'Edit', 'View', 'Window', 'Help'], 'the copy\'s app menu is expected under its own name');
+  assert.equal(appMenuTitle(facts), 'Plain Sight test copy', 'and the Quit and About items are looked for in that menu');
+  assert.deepEqual(menuBarOf(bundleFacts(source, { codesign: codesignSaying('') })), ['Plain Sight', 'File', 'Edit', 'View', 'Window', 'Help'], 'the app\'s own bundle keeps "Plain Sight"');
+  assert.deepEqual(menuBarOf(bundleFacts(fakeBundle('menu-renamed', REAL_ID, { name: 'Another Name' }), { codesign: codesignSaying('') }))[0], 'Another Name', 'the title is read from the bundle, not assumed');
 });
 
 test('the copy script rewrites the identifier and the names, leaves the migration manifest and the old signature out, keeps the rest, and leaves the source as it was', () => {

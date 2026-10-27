@@ -14,7 +14,7 @@ import { webcrypto } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DESKTOP, EVIDENCE, HOME, NotRun, alive, clearTestData, decryptRecord, drive, driveRaw, note, run, sleep, until } from './harness.mjs';
-import { launchable, webDataFolder } from './launch-guard.mjs';
+import { appMenuTitle, launchable, menuBarOf, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
 // Before anything else, and before the harness's run() moves any data aside:
@@ -24,6 +24,9 @@ const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/
 // then PLAIN_SIGHT_APP=<the copy>). The facts read here also say where the
 // bundle's web data lives: in its container when it is sandboxed.
 const BUNDLE = launchable('app', APP);
+// The app menu is titled by the bundle's name, "Plain Sight test copy" on a
+// test copy; its items keep the app's own words (DM-241).
+const APP_MENU = appMenuTitle(BUNDLE);
 let app = null;   // { pid }
 let frontBefore = -1;
 
@@ -87,7 +90,7 @@ test('the app opens from its bundle as a normal Mac app: one window, in front, w
   assert.equal(driveRaw('frontmost').pid, app.pid);
   const menus = drive('menus', app.pid).menus.map((m) => m.title);
   note('menus: ' + JSON.stringify(drive('menus', app.pid).menus));
-  assert.deepEqual(menus.filter((t) => t !== 'Apple'), ['Plain Sight', 'File', 'Edit', 'View', 'Window', 'Help']);
+  assert.deepEqual(menus.filter((t) => t !== 'Apple'), menuBarOf(BUNDLE));
 });
 
 test('real keys reach the page: Return starts writing, typing goes to the hidden buffer, Cmd+Shift+G then Cmd+C copies exactly it', async () => {
@@ -297,7 +300,7 @@ test('a window blur ends a peek: after the About panel has had the focus, Cmd+C 
   await cleanPage();
   await keys.type('hidden while away');
   await keys.press('cmd+shift+g');               // peek on
-  drive('menu', app.pid, 'Plain Sight', 'About Plain Sight');
+  drive('menu', app.pid, APP_MENU, 'About Plain Sight');
   await until(() => drive('cgwindows', app.pid).windows.filter((x) => x.onscreen).length >= 2, 'the About panel', 5000);
   await sleep(500);
   await keys.press('cmd+w');                     // close the About panel

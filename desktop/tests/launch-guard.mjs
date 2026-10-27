@@ -74,6 +74,16 @@ export function bundleFacts(app, { codesign = codesignEntitlements } = {}) {
   return { app, identifier, name: String(plist.CFBundleName || ''), entitlements, sandboxed: entitlements[SANDBOX] === true };
 }
 
+// The app menu's title as macOS shows it: the bundle's CFBundleName. On a
+// copy made by testcopy.mjs that is "Plain Sight test copy", while the
+// menu's items keep the app's own words, "About Plain Sight", "Hide Plain
+// Sight" and "Quit Plain Sight" (release-run-1, 26 October 2026, run.log
+// line 59). So the two suites take the title from the bundle they open
+// (DM-241).
+export const appMenuTitle = (facts) => facts.name;
+// The menu bar the two suites expect of that bundle, Apple's menu left out.
+export const menuBarOf = (facts) => [appMenuTitle(facts), 'File', 'Edit', 'View', 'Window', 'Help'];
+
 // null when the bundle may be opened, else the reason it may not: a bundle
 // sandboxed under the real identifier, unless the override is exactly "1".
 export function refusal(facts, env = process.env) {
