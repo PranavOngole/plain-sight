@@ -336,6 +336,26 @@ test('both suites that open a bundle run the launch guard before any launch and 
   assert.notEqual(TEST_NAME, 'Plain Sight', 'and a name of its own');
 });
 
+// QA-G-35: the wiring check above finds the guard by the start of its line
+// only, so a suite that passed PLAIN_SIGHT_ALLOW_REAL_ID=1 on every run
+// (QA-01's R1c and R1c2, the Delivery Manager's GD2) passed npm test and
+// would reopen the D-39 trap. Each suite calls the guard exactly once, with
+// its own name and APP and nothing else, and no line of code in either names
+// the override or reads or sets the environment beyond PLAIN_SIGHT_APP
+// (comment lines, which explain the override, are left out of the check).
+test('each suite that opens a bundle calls the launch guard exactly as launchable(<suite>, APP), and no code in either names the override or touches the environment beyond reading PLAIN_SIGHT_APP (QA-G-35, D-39)', () => {
+  const tests = path.join(DESKTOP, 'tests');
+  for (const [file, suite] of [['release.mjs', 'release'], ['app.mjs', 'app']]) {
+    const code = read(tests, file).split('\n').filter((line) => !/^\s*\/\//.test(line)).join('\n');
+    const calls = [...code.matchAll(/launchable\(([^)]*)\)/g)].map((m) => m[0]);
+    assert.deepEqual(calls, ["launchable('" + suite + "', APP)"], file + ' calls the guard once, with its own name and APP only');
+    assert.match(code, new RegExp("^const BUNDLE = launchable\\('" + suite + "', APP\\);$", 'm'), file + ' keeps the facts the guard returns');
+    for (const word of ['PLAIN_SIGHT_ALLOW_REAL_ID', 'OVERRIDE']) assert.equal(code.includes(word), false, file + ' names ' + word + ' in its code');
+    const env = [...code.matchAll(/process\.env\b(\.\w+)?/g)].map((m) => m[0]);
+    assert.deepEqual([...new Set(env)], ['process.env.PLAIN_SIGHT_APP'], file + ' reads only PLAIN_SIGHT_APP from the environment and sets nothing in it: ' + JSON.stringify(env));
+  }
+});
+
 // DM-241: macOS titles the app menu with the bundle's name, which is "Plain
 // Sight test copy" on the copy the two suites run on, while the items keep
 // the app's own words ("About Plain Sight", "Quit Plain Sight"). So neither
