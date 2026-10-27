@@ -5,10 +5,12 @@
 // Run from the repository root: node desktop/tests/config.mjs
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const DESKTOP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = path.resolve(DESKTOP, '..');
@@ -353,6 +355,40 @@ test('each suite that opens a bundle calls the launch guard exactly as launchabl
     for (const word of ['PLAIN_SIGHT_ALLOW_REAL_ID', 'OVERRIDE']) assert.equal(code.includes(word), false, file + ' names ' + word + ' in its code');
     const env = [...code.matchAll(/process\.env\b(\.\w+)?/g)].map((m) => m[0]);
     assert.deepEqual([...new Set(env)], ['process.env.PLAIN_SIGHT_APP'], file + ' reads only PLAIN_SIGHT_APP from the environment and sets nothing in it: ' + JSON.stringify(env));
+  }
+});
+
+// QA-G-38: the pin above covers release.mjs and app.mjs, not the modules they
+// import: with harness.mjs setting PLAIN_SIGHT_ALLOW_REAL_ID (QA-01's K20)
+// every suite passed, and a suite that imports the harness and then asks the
+// guard about a bundle sandboxed under the real identifier was let through
+// (QA-01's D0d, adopted in launch-guard-tests.mjs): the D-39 trap with npm
+// test green. QA-01's D0c and D0b (wave-g/qa/scripts/app/r8_guard_adv.mjs),
+// adopted: no other file of desktop/tests names the override in code, and
+// importing harness.mjs, testcopy.mjs or launch-guard.mjs in a process of its
+// own, with the override unset, leaves it unset.
+test('no other module of desktop/tests names the override in code, and importing the harness, the copy script or the guard leaves it unset (QA-G-38; QA-01\'s D0b and D0c)', () => {
+  const tests = path.join(DESKTOP, 'tests');
+  const allowed = new Set(['launch-guard.mjs', 'launch-guard-tests.mjs', 'config.mjs', 'harness-safety.mjs']);
+  const code = (file) => read(tests, file).split('\n').filter((line) => !/^\s*\/\//.test(line)).join('\n');
+  const naming = readdirSync(tests).filter((file) => file.endsWith('.mjs') && !allowed.has(file) && /PLAIN_SIGHT_ALLOW_REAL_ID|\bOVERRIDE\b/.test(code(file)));
+  assert.deepEqual(naming, [], 'no file but the guard, its tests, this file and the safety suite names the override in code: ' + JSON.stringify(naming));
+  // Each import in a process of its own, as a suite's imports run, under a
+  // temporary home and evidence folder. The harness compiles its driver at
+  // import unless a file of that name is in the temporary folder, so an empty
+  // one stands in for it: nothing is compiled or run.
+  const box = mkdtempSync(path.join(os.tmpdir(), 'plain-sight-config-override-'));
+  try {
+    writeFileSync(path.join(box, 'plain-sight-drive-' + createHash('sha256').update(readFileSync(path.join(tests, 'drive.swift'))).digest('hex').slice(0, 12)), '');
+    const env = { ...process.env, HOME: box, TMPDIR: box, PLAIN_SIGHT_EVIDENCE: box };
+    for (const name of ['PLAIN_SIGHT_ALLOW_REAL_ID', 'PLAIN_SIGHT_APP']) delete env[name];
+    for (const file of ['harness.mjs', 'testcopy.mjs', 'launch-guard.mjs']) {
+      const r = spawnSync(process.execPath, ['--input-type=module', '-e', 'await import(' + JSON.stringify(pathToFileURL(path.join(tests, file)).href) + '); console.log("OVERRIDE AFTER THE IMPORT " + JSON.stringify(process.env.PLAIN_SIGHT_ALLOW_REAL_ID ?? null));'], { encoding: 'utf8', env });
+      assert.equal(r.status, 0, file + ' imports in a process of its own: ' + r.stdout + r.stderr);
+      assert.match(r.stdout, /^OVERRIDE AFTER THE IMPORT null$/m, 'importing ' + file + ' leaves the override unset: ' + r.stdout);
+    }
+  } finally {
+    rmSync(box, { recursive: true, force: true });
   }
 });
 

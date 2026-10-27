@@ -11,6 +11,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -304,6 +305,29 @@ test('launchable(), run as the suites run it, ends its process with exit code 7 
   assert.equal(none.status, 7, 'AT-L1c: no bundle ends the process with 7 too: ' + none.stdout + none.stderr);
   assert.match(none.stdout, /not started: no app bundle at /, 'AT-L1c: the reason');
   assert.equal(none.stdout.includes('RETURNED'), false, 'AT-L1c: the line after the call never ran');
+});
+
+// QA-G-38, QA-01's D0d (wave-g/qa/scripts/app/r8_guard_adv.mjs): the guard as
+// a suite runs it, after the suite's own imports, the harness first. A module
+// the suites import could set the override for them (QA-01's K20, which every
+// suite passed); then this bundle would be let through. In a process of its
+// own, under a temporary home, with an empty file standing in for the
+// harness's driver, so nothing is compiled or run.
+test('after a suite\'s own imports (the harness first), the guard still ends the process with exit code 7 on a bundle sandboxed under the real identifier (QA-G-38; QA-01\'s D0d)', () => {
+  const box = path.join(ROOT, 'd0d');
+  mkdirSync(box, { recursive: true });
+  writeFileSync(path.join(box, 'plain-sight-drive-' + createHash('sha256').update(readFileSync(path.join(TESTS, 'drive.swift'))).digest('hex').slice(0, 12)), '');
+  const app = fakeBundle('d0d-real', REAL_ID);
+  const code = 'await import(' + JSON.stringify(pathToFileURL(path.join(TESTS, 'harness.mjs')).href) + ');\n'
+    + 'const { launchable } = await import(' + JSON.stringify(pathToFileURL(path.join(TESTS, 'launch-guard.mjs')).href) + ');\n'
+    + 'const facts = launchable("app", ' + JSON.stringify(app) + ', { codesign: (a, r) => (r === "identifier" ? ' + JSON.stringify(REAL_ID) + ' : ' + JSON.stringify(sandboxed) + ') });\n'
+    + 'console.log("NOT REFUSED " + facts.identifier);';
+  const env = { ...process.env, HOME: box, TMPDIR: box, PLAIN_SIGHT_EVIDENCE: box };
+  for (const name of [OVERRIDE, 'PLAIN_SIGHT_APP']) delete env[name];
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', env });
+  assert.equal(r.status, 7, 'exit code 7; output: ' + r.stdout + r.stderr);
+  assert.match(r.stdout, /^app: not started: .* is sandboxed under the real bundle identifier com\.pranavongole\.plainsight .*Errors: 1$/m, 'the refusal, with its Errors line');
+  assert.equal(r.stdout.includes('NOT REFUSED'), false, 'the line after the call never ran');
 });
 
 // DM-242: the watch's own wiring, watch(), runs only as a script, so with
