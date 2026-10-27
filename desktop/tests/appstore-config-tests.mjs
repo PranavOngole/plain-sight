@@ -14,7 +14,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { APPLICATION_IDENTIFIER, CONFIG_NAME, ENTITLEMENTS_NAME, REPOSITORY, Refusal, TAURI, TEAM_IDENTIFIER, parseArgs, plan, write } from '../tools/appstore-config.mjs';
+import { APPLICATION_IDENTIFIER, CONFIG_NAME, ENTITLEMENTS_NAME, REPOSITORY, Refusal, TAURI, TEAM_IDENTIFIER, failureLine, parseArgs, plan, write } from '../tools/appstore-config.mjs';
 
 const DESKTOP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TOOL = path.join(DESKTOP, 'tools', 'appstore-config.mjs');
@@ -140,8 +140,8 @@ test('a team id that is not ten upper-case letters or digits is refused, and not
 
 test('an identity that is not "Apple Distribution: <name> (<TEAMID>)" is refused, and nothing is written', () => {
   refusedRun('a Developer ID identity', { identity: 'Developer ID Application: Test Person (ABCDE12345)' }, /the identity must start with "Apple Distribution: "/);
-  refusedRun('another team\'s identity', { identity: 'Apple Distribution: Test Person (ZYXWV98765)' }, /the identity must end with "\(ABCDE12345\)"/);
-  refusedRun('no team in the identity', { identity: 'Apple Distribution: Test Person' }, /the identity must end with "\(ABCDE12345\)"/);
+  refusedRun('another team\'s identity', { identity: 'Apple Distribution: Test Person (ZYXWV98765)' }, /the identity must end with " \(ABCDE12345\)"/);
+  refusedRun('no team in the identity', { identity: 'Apple Distribution: Test Person' }, /the identity must end with " \(ABCDE12345\)"/);
   refusedRun('no name in the identity', { identity: 'Apple Distribution:  (ABCDE12345)' }, /the identity names no one/);
   refusedRun('a line break in the identity', { identity: 'Apple Distribution: Test\nPerson (ABCDE12345)' }, /the identity holds a control character/);
 });
@@ -337,6 +337,113 @@ test('when the first file cannot be put back either, the error says so and where
   assert.ok(err && !(err instanceof Refusal), 'an error, not a refusal: ' + (err && err.stack));
   assert.ok(err.message.endsWith(", and could not remove the new " + made + " again (EPERM: operation not permitted, unlink '" + made + "'): remove it by hand"), err.message);
   assert.deepEqual(listing(none), [CONFIG_NAME], 'the new configuration is named and left; no temporary file');
+});
+
+// DM-254 (the Delivery Manager's delta of a92087a) and DISH-G-84: nine guards
+// of the command that no case held, each broken and every case still green.
+// One case each; the Delivery Manager's S9, S11, S10 and S15 and QA-01's C8.2
+// for the first four, DISH's N2 to N6 through plan()'s entitlementsFile and
+// tauriConfFile options for the other five.
+test('a link placed at a temporary name is not followed: write() fails with EEXIST, the file the link leads to is unchanged, and nothing is left (DM-254 SC1; the Delivery Manager\'s S9)', () => {
+  const out = freshOut();
+  const victim = path.join(ROOT, 'victim.txt');
+  writeFileSync(victim, 'VICTIM UNCHANGED\n');
+  const planned = plan(parseArgs(args({ out }), { cwd: ROOT }));
+  symlinkSync(victim, path.join(out, CONFIG_NAME) + '.tmp-' + process.pid);
+  assert.throws(() => write(planned), (err) => err.code === 'EEXIST', 'the temporary file is made anew, never through what is at its name');
+  assert.equal(readFileSync(victim, 'utf8'), 'VICTIM UNCHANGED\n', 'the file the link leads to is unchanged');
+  assert.deepEqual(listing(out), [], 'the link and every temporary name are gone, and no output file exists');
+});
+
+test('a build number with a line break or leading zeros is refused as a whole, and nothing is written; a long whole number is written as given (DM-254 SC2; the Delivery Manager\'s S11)', () => {
+  const reason = /the build number must be a whole number from 1, such as 1 or 2: /;
+  refusedRun('a line break inside', { build: '7\n8' }, reason);
+  refusedRun('a line break at the end', { build: '7\n' }, reason);
+  refusedRun('leading zeros', { build: '007' }, reason);
+  const out = freshOut();
+  const r = run(args({ out, build: '1234567890123456789012345' }));
+  assert.equal(r.status, 0, 'output: ' + r.stdout + r.stderr);
+  assert.equal(JSON.parse(readFileSync(path.join(out, CONFIG_NAME), 'utf8')).bundle.macOS.bundleVersion, '1234567890123456789012345');
+});
+
+// QA-01's C8.2 (r9_config_adv.mjs; its break A4, QA-G-43): the earlier
+// configuration immutable (chflags uchg), so the command can neither keep it
+// aside nor replace it, and every temporary file must still go.
+test('a write that fails once its temporary files exist removes them: nothing changes and no temporary file is left, when the first rename fails and when the earlier configuration cannot be kept aside (DM-254 SC6; the Delivery Manager\'s S10, QA-01\'s C8.2 and its break A4)', () => {
+  const out = freshOut();
+  const planned = plan(parseArgs(args({ out }), { cwd: ROOT }));
+  assert.throws(() => write(planned, { rename: renameFailing(1) }), /^Error: EPERM: operation not permitted, rename /);
+  assert.deepEqual(listing(out), [], 'nothing is written and no temporary file is left');
+  const pair = freshOut();
+  assert.equal(run(args({ out: pair })).status, 0, 'an earlier pair');
+  const config = path.join(pair, CONFIG_NAME);
+  const before = [readFileSync(config, 'utf8'), readFileSync(path.join(pair, ENTITLEMENTS_NAME), 'utf8')];
+  execFileSync('chflags', ['uchg', config]);
+  let r;
+  try {
+    r = run(args({ out: pair, team: 'ZYXWV98765', identity: 'Apple Distribution: Other Person (ZYXWV98765)', extra: ['--force'] }));
+  } finally {
+    execFileSync('chflags', ['nouchg', config]);
+  }
+  assert.equal(r.status, 1, 'exit code 1: ' + r.stdout + r.stderr);
+  assert.match(r.stdout, new RegExp('^appstore-config: not written: could not keep the earlier ' + esc(config) + ' to put it back should the write fail \\(EPERM: operation not permitted, link .*\\)\\. Errors: 1\\n$'), 'one plain line: ' + r.stdout);
+  assert.deepEqual([readFileSync(config, 'utf8'), readFileSync(path.join(pair, ENTITLEMENTS_NAME), 'utf8')], before, 'neither earlier file changed');
+  assert.deepEqual(listing(pair), [CONFIG_NAME, ENTITLEMENTS_NAME].sort(), 'no temporary file is left');
+});
+
+test('an identity with no space before "(<TEAMID>)" is refused, and nothing is written (DM-254 SC9; the Delivery Manager\'s S15)', () => {
+  refusedRun('no space before the team id', { identity: 'Apple Distribution: Test Person(' + TEAM + ')' }, /the identity must end with " \(ABCDE12345\)", a space and the team id given, in brackets: /);
+});
+
+// Input files of the command's own, for plan()'s options: an Entitlements.plist
+// written by plutil from the value given (an object, or a list), and a
+// tauri.conf.json from the value given (an object, a text, or no file).
+let inputSets = 0;
+function inputFiles({ entitlements = everyday, conf: c = { identifier: 'com.example.app', bundle: { macOS: { minimumSystemVersion: '12.0' } } }, confText } = {}) {
+  inputSets += 1;
+  const dir = path.join(ROOT, 'input-files-' + inputSets);
+  mkdirSync(dir);
+  const entitlementsFile = path.join(dir, 'Entitlements.plist');
+  execFileSync('plutil', ['-convert', 'xml1', '-o', entitlementsFile, '-'], { input: JSON.stringify(entitlements) });
+  const tauriConfFile = path.join(dir, 'tauri.conf.json');
+  if (confText !== null) writeFileSync(tauriConfFile, confText === undefined ? JSON.stringify(c) : confText);
+  return { entitlementsFile, tauriConfFile };
+}
+// One refusal of plan(): a Refusal, which the command prints as "not written",
+// naming the reason, with nothing written.
+function refusedPlan(label, files, reason) {
+  const out = freshOut();
+  let err = null;
+  try { write(plan(parseArgs(args({ out }), { cwd: ROOT }), files)); } catch (e) { err = e; }
+  assert.ok(err, label + ': refused');
+  assert.match(failureLine(err), /^appstore-config: not written: .*\. Errors: 1$/, label + ': a refusal, which the command prints as "not written": ' + failureLine(err));
+  assert.match(err.message, reason, label + ': it names the reason: ' + err.message);
+  assert.deepEqual(listing(out), [], label + ': nothing was written');
+}
+
+test('an Entitlements.plist that already holds com.apple.application-identifier or com.apple.developer.team-identifier is refused, and nothing is written (DISH-G-84, its N2)', () => {
+  for (const key of [APPLICATION_IDENTIFIER, TEAM_IDENTIFIER]) {
+    refusedPlan('it holds ' + key, inputFiles({ entitlements: { ...everyday, [key]: 'ZYXWV98765' } }), new RegExp('already holds ' + esc(key) + ', which only the App Store entitlements may hold$'));
+  }
+});
+
+test('a tauri.conf.json without an identifier, or with an empty one, is refused, and nothing is written (DISH-G-84, its N3)', () => {
+  refusedPlan('no identifier', inputFiles({ conf: { bundle: { macOS: { minimumSystemVersion: '12.0' } } } }), /tauri\.conf\.json names no identifier$/);
+  refusedPlan('an empty identifier', inputFiles({ conf: { identifier: '', bundle: { macOS: { minimumSystemVersion: '12.0' } } } }), /tauri\.conf\.json names no identifier$/);
+});
+
+test('a tauri.conf.json without bundle.macOS.minimumSystemVersion is refused, and nothing is written (DISH-G-84, its N4)', () => {
+  refusedPlan('no bundle', inputFiles({ conf: { identifier: 'com.example.app' } }), /tauri\.conf\.json names no bundle\.macOS\.minimumSystemVersion$/);
+  refusedPlan('no minimum', inputFiles({ conf: { identifier: 'com.example.app', bundle: { macOS: {} } } }), /tauri\.conf\.json names no bundle\.macOS\.minimumSystemVersion$/);
+});
+
+test('an Entitlements.plist that holds a list, not a dictionary, is refused, and nothing is written (DISH-G-84, its N5)', () => {
+  refusedPlan('a list', inputFiles({ entitlements: ['com.apple.security.app-sandbox'] }), /Entitlements\.plist holds no dictionary of entitlements$/);
+});
+
+test('a tauri.conf.json that cannot be read, missing or not JSON, is refused, and nothing is written (DISH-G-84, its N6)', () => {
+  refusedPlan('missing', inputFiles({ confText: null }), /^could not read .*tauri\.conf\.json \(ENOENT\)$/);
+  refusedPlan('not JSON', inputFiles({ confText: '{ "identifier": ' }), /^could not read .*tauri\.conf\.json \(/);
 });
 
 test('desktop/.gitignore keeps both files out of the repository, and desktop/package.json runs the command as npm run appstore:config', () => {

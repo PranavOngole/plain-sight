@@ -97,7 +97,7 @@ export function plan(options, { entitlementsFile = path.join(TAURI, 'Entitlement
   const { team, identity, profile, build, out, force } = options;
   if (!/^[A-Z0-9]{10}$/.test(team)) refuse('the team id must be ten upper-case letters or digits, as Membership details shows it: ' + JSON.stringify(team));
   if (!identity.startsWith(IDENTITY_PREFIX)) refuse('the identity must start with "' + IDENTITY_PREFIX + '", as security find-identity -v lists the Apple Distribution certificate: ' + JSON.stringify(identity));
-  if (!identity.endsWith(' (' + team + ')')) refuse('the identity must end with "(' + team + ')", the team id given: ' + JSON.stringify(identity));
+  if (!identity.endsWith(' (' + team + ')')) refuse('the identity must end with " (' + team + ')", a space and the team id given, in brackets: ' + JSON.stringify(identity));
   if (!identity.slice(IDENTITY_PREFIX.length, identity.length - (team.length + 3)).trim()) refuse('the identity names no one between "' + IDENTITY_PREFIX + '" and "(' + team + ')": ' + JSON.stringify(identity));
   if (/[\u0000-\u001f\u007f]/.test(identity)) refuse('the identity holds a control character: ' + JSON.stringify(identity));
   if (!path.basename(profile).endsWith(PROFILE_EXTENSION)) refuse('the profile must be the ' + PROFILE_EXTENSION + ' file downloaded in step 4: ' + profile);
@@ -194,6 +194,10 @@ function putBack(placed, failed, err, { rename, unlink }) {
   return problems.length ? new Error(first + ', and ' + problems.join('; ')) : new Refusal(first + '; ' + back.join('; '));
 }
 
+// The one line a run that fails prints: a refusal ("not written:", with what
+// to change) or any other error ("failed:"), and the error count.
+export const failureLine = (err) => 'appstore-config: ' + (err instanceof Refusal ? 'not written: ' : 'failed: ') + (err && err.message ? err.message : err) + '. Errors: 1';
+
 function main() {
   try {
     const written = write(plan(parseArgs(process.argv.slice(2))));
@@ -202,7 +206,7 @@ function main() {
   } catch (err) {
     // A refusal names what to change; any other error (a write the disk
     // refused, say) is reported as plainly, and its temporary files are gone.
-    console.log('appstore-config: ' + (err instanceof Refusal ? 'not written: ' : 'failed: ') + (err && err.message ? err.message : err) + '. Errors: 1');
+    console.log(failureLine(err));
     process.exit(1);
   }
 }
