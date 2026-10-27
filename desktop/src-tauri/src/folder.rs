@@ -1020,6 +1020,24 @@ mod tests {
             save("2026-10-26 14-00-00.txt", "plain words", "notes"),
             Err("the name must end in .txt".to_owned())
         );
+        // Names whose extension only ends in, or starts with, the proposed one
+        // are other extensions: the Delivery Manager's AT-R10
+        // (dm-appstore-534f3cc/adv/dm_adv_folder.rs), against a check that
+        // took any extension ending in the proposed one (DM-246, RM24b).
+        for (proposed, chosen, ext) in [
+            ("2026-10-26 14-00-00.txt", "notes.xtxt", "txt"),
+            ("2026-10-26 14-00-00.txt", "notes.txtx", "txt"),
+            ("2026-10-26 14-00-00.docx", "notes.docx.txt", "docx"),
+            ("untitled-draft-20261026-1400.sight", "notes", "sight"),
+            ("untitled-draft-20261026-1400.sight", "notes.", "sight"),
+            ("2026-10-26 14-00-00.md", "notes.md ", "md"),
+        ] {
+            assert_eq!(
+                save(proposed, "near miss", chosen),
+                Err(format!("the name must end in .{ext}")),
+                "{proposed} answered {chosen:?}"
+            );
+        }
         assert_eq!(
             fs::read_dir(&dir).unwrap().count(),
             0,

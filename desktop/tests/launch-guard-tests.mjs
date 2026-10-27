@@ -380,6 +380,31 @@ test('a symbolic link at the copy\'s path, even one that leads nowhere, stops th
   assert.equal(lstatSync(path.join(later, TEST_NAME + '.app')).isSymbolicLink(), true, 'the link is still there');
 });
 
+// DM-246 (b): the cleanup after a ditto that fails part way had no test (the
+// Delivery Manager's CP1, the removal skipped for the ditto's own step,
+// passed every suite). A file in the source that cannot be read makes the
+// real ditto stop after it has begun the copy (QA-01's E7 in
+// r7_guard_adv.mjs), leaving a partial copy that still has the source's
+// Info.plist, the real identifier's.
+test('a ditto that fails part way leaves no partial copy: the copy it began is removed, and the error names the ditto step and its reason (DM-246, CP1; QA-01 E7)', () => {
+  const source = fakeBundle('source-unreadable', REAL_ID, { manifest: true });
+  const unreadable = path.join(source, 'Contents', 'Resources', 'zz-unreadable.bin');
+  writeFileSync(unreadable, 'not readable');
+  chmodSync(unreadable, 0o000);
+  const destination = path.join(ROOT, 'destination-unreadable');
+  const copy = path.join(destination, TEST_NAME + '.app');
+  try {
+    let message = null;
+    try { copyUnsigned(source, destination, 1761000011); } catch (err) { message = err.message; }
+    assert.match(String(message), /^could not copy .+ with ditto \(ditto: .+zz-unreadable\.bin: Permission denied\); the unfinished copy, which may still carry the real identifier, was removed: /, 'the error names the ditto step and its reason: ' + message);
+    assert.ok(String(message).endsWith(copy), 'and the copy it removed: ' + message);
+    assert.equal(existsSync(copy), false, 'no partial copy is left, so none under the real identifier');
+    assert.equal(read(path.join(source, 'Contents/Info.plist'), 'CFBundleIdentifier'), REAL_ID, 'the source is as it was');
+  } finally {
+    chmodSync(unreadable, 0o644);
+  }
+});
+
 test('the read-back compares the entitlements exactly: the same keys and values in any order pass, a missing, extra or changed one fails', () => {
   const reordered = { 'com.apple.security.files.bookmarks.app-scope': true, 'com.apple.security.files.user-selected.read-write': true, [SANDBOX]: true };
   assert.equal(sameEntitlements(THREE, reordered), true);
