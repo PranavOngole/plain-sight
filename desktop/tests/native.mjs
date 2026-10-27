@@ -608,8 +608,10 @@ test('in the app Esc, the ten-minute wipe and the quit keep no copy of the last 
 // Save "abc", Backspace three times, type "abc": true (534f3cc said false).
 // Words typed while a Save is still being written stay unsaved when it lands,
 // on all three Save paths: the mark is the count at the click, not at the
-// landing (QA-G-35; the Delivery Manager's AT-D2 and AT-D3, DM-245).
-test('in the app the quit question counts edits and keeps no copy of the saved text: Save "abc", three Backspaces and "abc" again is text a quit would lose, and words typed while a Save is written stay unsaved after it lands (QA-G-33, QA-G-35, DM-245)', async () => {
+// landing (QA-G-35; the Delivery Manager's AT-D2 and AT-D3, DM-245); for the
+// encrypted Save also while its key is derived, before the save panel is
+// asked (DISH-G-73).
+test('in the app the quit question counts edits and keeps no copy of the saved text: Save "abc", three Backspaces and "abc" again is text a quit would lose, and words typed while a Save is written stay unsaved after it lands (QA-G-33, QA-G-35, DM-245, DISH-G-73)', async () => {
   const loaded = async (native, storage = {}, html = HTML) => {
     const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1', ...storage }, html });
     await p.settle(50);
@@ -703,6 +705,37 @@ test('in the app the quit question counts edits and keeps no copy of the saved t
       assert.equal(p.toast(), mode === 'sight' ? 'Saved' : 'Saved ' + call[1], mode + ': the Save landed');
       if (mode === 'txt') assert.equal(call[2], 'abc', 'txt: the file holds the text at the click');
       assert.equal(native.unsaved(), true, mode + ': the Z typed while the save panel was open is not in the file, so a quit would lose it');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+  // Words typed while the encrypted Save derives its key: after the password
+  // is confirmed and before the save panel is asked (DISH-G-73). The page
+  // takes the count before the derivation on purpose (`const at = edits;`
+  // before `await exportEncrypted(password)`, which reads the text in the
+  // same turn); with the count taken after it (DISH's E10, the Delivery
+  // Manager's JC4) the letter would count as saved and a quit would lose it
+  // with no question, and the cases above, which type only once the panel is
+  // up, all passed. DISH's probe case (wave-g/dish/dish_r8_delta/src_adv/
+  // desktop/tests/dish_g73.mjs), adopted; the Delivery Manager's AT-D3
+  // (dm-appstore-a3387d9/adv/dm-native-adv-a33.mjs) types in the same window.
+  {
+    let answer = null;
+    const native = fakeNative({ downloadGate: new Promise((resolve) => { answer = resolve; }) });
+    const p = await loaded(native, { 'plainSight.saveMode': 'sight' });
+    try {
+      p.type('abc');
+      p.$('#btn-save').click();
+      await p.settle(30);
+      p.$('#pw-input').value = 'a long enough password';
+      p.$('#pw-ok').click();
+      await sleep(2);   // the Save goes on: exportEncrypted has read the text and derives the key (about 25 ms here)
+      assert.equal(native.calls.some((c) => c[0] === 'saveDownload'), false, 'sight: the save panel is not asked yet, the key is still being derived');
+      p.type('Z');
+      await until(() => native.calls.some((c) => c[0] === 'saveDownload'), 'the save panel, sight');
+      answer();
+      await p.settle(80);
+      assert.equal(p.toast(), 'Saved', 'sight: the Save landed');
+      assert.equal(native.unsaved(), true, 'sight: the Z typed while the key was derived is not in the file, so a quit would lose it');
       assert.deepEqual(p.errors, []);
     } finally { p.close(); }
   }
