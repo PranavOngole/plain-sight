@@ -379,13 +379,15 @@ async fn save_as<R: Runtime>(
 /// content is being written (a full disk, tested on a disk image) leaves the
 /// file as it was (QA-G-21). A replacement Foundation refuses (a folder the
 /// person may not change, tested on a disk image) comes back as the error
-/// and leaves the file as it was too; Apple says that when the replacement
-/// fails the original may be at another location, which the error then
-/// names. The step is Foundation's replacement of a file, the same operation
-/// NSDocument performs when it saves (Apple, Low-Level File Management
-/// Programming Topics, File Management, Moving, Copying, and Deleting Files,
-/// a retired document), and the staged file sits in the directory Foundation
-/// names for it on the chosen file's own volume (`replacing`).
+/// and leaves the file as it was too; Apple says the original may then be
+/// at another location, named under NSFileOriginalItemLocationKey in
+/// Foundation's error; the app shows only the error's description and does
+/// not pass that location on. The step is Foundation's replacement of a
+/// file, the same operation NSDocument performs when it saves (Apple,
+/// Low-Level File Management Programming Topics, File Management, Moving,
+/// Copying, and Deleting Files, a retired document), and the staged file
+/// sits in the directory Foundation names for it on the chosen file's own
+/// volume (`replacing`).
 /// Where nothing is at the path yet, the same step puts the new file there.
 ///
 /// Only a file, or nothing, may be at the path (QA-G-29). A folder there is

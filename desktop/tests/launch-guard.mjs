@@ -154,8 +154,9 @@ export function launchable(suite, app, options = {}) {
 // Where WebKit keeps the bundle's web data. Outside the sandbox, under the
 // identifier in the home folder's Library/WebKit; inside it, in the app's
 // container without the identifier (WebKit, WebsiteDataStoreCocoa.mm: the
-// rule the container migration manifest in src-tauri follows, not yet seen
-// in a launched sandboxed build).
+// rule the container migration manifest in src-tauri follows; seen in a
+// launched sandboxed probe build on 26 October (sbprobe2-run-1, test
+// migrate)).
 export function webDataFolder(home, facts) {
   return facts.sandboxed
     ? path.join(home, 'Library', 'Containers', facts.identifier, 'Data', 'Library', 'WebKit', 'WebsiteData')

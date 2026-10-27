@@ -219,7 +219,7 @@ test('the app runs in the App Sandbox with exactly its three entitlements, none 
   });
 });
 
-test('the one bundled resource brings the vault and the app\'s data folder into the container at the first sandboxed launch (D-37; Apple\'s article says it copies them)', () => {
+test('the one bundled resource brings the vault and the app\'s data folder into the container at the first sandboxed launch (D-37; macOS moved them in a probe build on 26 October 2026, though Apple\'s article says it copies them)', () => {
   assert.deepEqual(conf.bundle.macOS.files, { 'Resources/container-migration.plist': './container-migration.plist' }, 'one file, in Contents/Resources');
   const id = conf.identifier;
   assert.deepEqual(readPlist(read(TAURI, 'container-migration.plist')), {
