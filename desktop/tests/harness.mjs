@@ -9,8 +9,26 @@
 // - the app's own data folders are moved aside first and put back after, so
 //   a real vault or folder choice is never seen or changed by a test; a run
 //   that cannot put one back ends with exit code 6 and says where it is;
+// - test data that macOS will not let the run remove (the container a test
+//   copy's launch made: App Data protection answers EPERM) is left where it
+//   is and named, never counted as the person's data not coming back; with
+//   nothing worse, the run ends with exit code 8 (DM-243). A test copy runs
+//   once: a run on a copy whose container is still there does not start;
 // - only files the run created are moved out of ~/Downloads, into the
 //   evidence folder, matched by name and time.
+//
+// Exit codes, the most serious first when several apply: 6 the app's own
+// data could not be put back (the run says where it waits); 3 the run
+// stopped (a touch of the keyboard or mouse, or the screen locked during a
+// run that needs it unlocked); 1 a test failed; 8 test data left behind,
+// your own data is back; 0 every test passed or was not run. A run that does
+// not start ends with 4 (the app is open, the Mac is in use, the screen is
+// locked for a suite that needs it unlocked, the test copy ran before, or a
+// folder could not be moved aside, in which case everything is put back) or
+// 5 (another GUI run holds the lock), and launch-guard.mjs ends a suite with
+// 7 before the run when it refuses the bundle. The last lines of a run list
+// any test data left behind and every test container on the Mac by name
+// (never opened), the summary and the exit code.
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, webcrypto } from 'node:crypto';
@@ -32,6 +50,9 @@ export const ID = 'com.pranavongole.plainsight';
 // refuses it with its own message before anything is moved.
 export const APP_ID = (process.env.PLAIN_SIGHT_APP && bundleIdentifier(process.env.PLAIN_SIGHT_APP)) || ID;
 export const HOME = os.homedir();
+// Where macOS keeps the containers of sandboxed apps: listed by name here,
+// never opened.
+const CONTAINERS = path.join(HOME, 'Library', 'Containers');
 // Where the app's downloads land: the real Downloads folder for the release
 // app, or the folder named in PLAIN_SIGHT_E2E_DOWNLOADS, which the test build
 // writes into instead (folder.rs, e2e feature only). e2e.mjs names a folder
@@ -97,6 +118,11 @@ export function appCopiesRunning() {
 export function mayStart({ needUnlocked = false } = {}) {
   const open = appCopiesRunning();
   if (open.length) return 'the app is open (pid ' + open.join(', ') + '); close it first, since a run moves the app\'s data aside';
+  // A test copy runs once. The container its first run made is still there,
+  // and macOS may let this run neither move it aside nor clear it, so the run
+  // would start over that run's data or stop in the middle of the move
+  // (DM-243). The container's name is checked; it is never opened.
+  if (APP_ID !== ID && existsSync(path.join(CONTAINERS, APP_ID))) return 'the bundle under test, ' + APP_ID + ', has a container from an earlier run, which macOS may let this run neither move aside nor clear; make a fresh copy with npm run app:testcopy, or remove that container by hand (see wave-g/probe/DESIGN.md, Leftovers)';
   const s = driveRaw('session');
   if (needUnlocked && s.locked) return 'the screen is locked; this run needs it unlocked';
   if (!s.locked && s.idle < IDLE_MIN) return `the Mac was used ${Number(s.idle).toFixed(0)} s ago; the run needs ${IDLE_MIN} s without keyboard or mouse use`;
@@ -173,6 +199,15 @@ export const DATA_DIRS = [
   // The test copy's folders too, when the bundle under test is one (DM-240).
   ...(APP_ID === ID ? [] : dataFoldersOf(APP_ID))
 ].map((p) => path.join(HOME, p));
+// A test identifier: a copy's (testcopy.mjs) or a sandbox probe's. A data
+// folder whose name starts with one holds test data only, never the
+// person's (DM-243).
+const TEST_ID = /^com\.pranavongole\.plainsight\.(testcopy|sbprobe)-/;
+export const isTestData = (dir) => TEST_ID.test(path.basename(dir));
+// The test containers on this Mac, by name only.
+export function testContainers() {
+  try { return readdirSync(CONTAINERS).filter((name) => TEST_ID.test(name)).sort(); } catch { return []; }
+}
 let backupDir = null;
 // The data folders that were there before the run. The run moves each of them
 // aside; a restore clears only a folder the run moved aside or one that was
@@ -260,16 +295,21 @@ export function clearTestData() {
 // already: it is never cleared. Before the backup, and while it is incomplete,
 // nothing is cleared or put back: the run refuses and names what to put back
 // by hand and from where; after a complete restore a second call changes
-// nothing (QA-G-24).
+// nothing (QA-G-24). A test identifier's folder that the run made and that
+// macOS will not let it remove (a test copy's container: EPERM, or EACCES)
+// holds test data only: it is left where it is and returned in the list of
+// test data left behind, never counted as a folder that did not come back
+// (DM-243). Returns that list.
 export function restoreAppData() {
-  if (phase === 'untouched') { note('nothing to restore: the app data was never moved aside'); return; }
-  if (phase === 'restored') { note('nothing to restore: the app data is back already'); return; }
+  if (phase === 'untouched') { note('nothing to restore: the app data was never moved aside'); return []; }
+  if (phase === 'restored') { note('nothing to restore: the app data is back already'); return []; }
   if (phase === 'moving') {
     throw new Error('the backup of the app data is incomplete, so nothing is cleared or put back by the run; put back by hand:\n  ' + leftBehind().join('\n  '));
   }
   const moved = movedAside();
   const problems = [];
   const left = [];
+  const testDataLeft = [];
   for (const dir of DATA_DIRS) {
     if (!clearable(dir, moved)) continue;
     let step = 'clear the test data in';
@@ -278,6 +318,10 @@ export function restoreAppData() {
       step = 'put back';
       if (moved.includes(dir)) renameSync(asideOf(dir), dir);
     } catch (err) {
+      if (step === 'clear the test data in' && !moved.includes(dir) && isTestData(dir) && (err.code === 'EPERM' || err.code === 'EACCES')) {
+        testDataLeft.push(dir);
+        continue;
+      }
       problems.push('could not ' + step + ' ' + dir + ' (' + (err.code || err.message) + ')');
       if (moved.includes(dir)) left.push(dir);
     }
@@ -295,11 +339,12 @@ export function restoreAppData() {
       problems.push('the backup folder ' + backupDir + ' was not empty (' + (err.code || err.message) + ')');
     }
   }
-  if (problems.length) throw new Error(problems.join('; '));
+  if (problems.length) throw Object.assign(new Error(problems.join('; ')), { testDataLeft });
   backupDir = null;
   existedBefore = [];
   phase = 'restored';
-  note('app data restored');
+  note('app data restored' + (testDataLeft.length ? '; test data left behind: ' + JSON.stringify(testDataLeft) : ''));
+  return testDataLeft;
 }
 
 // The run's own safety: Ctrl+C and a kill are watched from the start, before
@@ -406,18 +451,29 @@ export async function run(tests, { name, needUnlocked = false, before = () => {}
   // Downloads folder are restored, the lock is released.
   let cleaned = false;
   let restored = true;
+  let testDataLeft = [];
   const cleanup = async () => {
     if (cleaned) return;
     cleaned = true;
     stopGuard();
     try { await after(); } catch (err) { note('after: ' + err.message); }
     try { collectDownloads(); } catch (err) { note('downloads: ' + err.message); }
-    try { restoreAppData(); } catch (err) { restored = false; console.log('Could not restore app data: ' + err.message); }
+    try { testDataLeft = restoreAppData(); } catch (err) { restored = false; testDataLeft = err.testDataLeft || []; console.log('Could not restore app data: ' + err.message); }
+    for (const dir of testDataLeft) console.log('test data left behind: ' + dir + ' (macOS refused to remove it; remove it by hand, see wave-g/probe/DESIGN.md, Leftovers)');
     dropLock();
   };
   markDownloads();
   runStartedAt = Date.now();
-  watchSignalsThenBackup(cleanup);
+  try {
+    watchSignalsThenBackup(cleanup);
+  } catch (err) {
+    // A move aside that macOS refuses, or a backup an earlier run left:
+    // backupAppData put back whatever it had moved, so the run did not start
+    // (DM-243). Before, the error left the run with exit code 1 and the lock.
+    dropLock();
+    console.log(`${name}: not started: ${err.message}. Errors: 0`);
+    process.exit(4);
+  }
   startGuard();
   let passed = 0, failed = 0, notRun = 0, stopped = null;
   try {
@@ -441,8 +497,9 @@ export async function run(tests, { name, needUnlocked = false, before = () => {}
     await cleanup();
   }
   console.log(`\nEvidence: ${EVIDENCE}`);
+  console.log('Test containers on this Mac at the end of the run (names only, never opened): ' + (testContainers().join(', ') || 'none'));
   console.log(`${passed} passed, ${failed} failed, ${notRun} not run, ${passed + failed + notRun} total. Errors: ${failed + (restored ? 0 : 1)}`);
-  const code = !restored ? 6 : stopped ? 3 : failed ? 1 : 0;
-  console.log('Exit code: ' + code);
+  const code = !restored ? 6 : stopped ? 3 : failed ? 1 : testDataLeft.length ? 8 : 0;
+  console.log('Exit code: ' + code + (code === 8 ? ' (test data left behind; your own data is back)' : ''));
   process.exit(code);
 }

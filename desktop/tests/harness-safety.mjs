@@ -5,15 +5,23 @@
 // what to put back; a second restore after a complete one changes nothing;
 // and the signal handlers are installed before the app's data is moved
 // aside, so a Ctrl+C or a kill during the move is taken after it and
-// everything is put back (QA-G-24). Every case runs in a child process whose
-// HOME, TMPDIR and evidence folder lie inside that temporary folder, which is
-// removed at the end. No case runs the harness's run() or its driver, so no
-// app is launched and nothing on the Mac is touched.
+// everything is put back (QA-G-24). The cases named run-* run the harness's
+// run() itself, with tests of their own that launch nothing: a test copy's
+// container that macOS will not let the run remove is test data left
+// behind, exit code 8, while the same refusal on a folder of the person's own
+// still ends with 6; a run on a copy whose container is still there, and a
+// move aside that macOS refuses, do not start (DM-243). Every case runs in a
+// child process whose HOME, TMPDIR and evidence folder lie inside that
+// temporary folder, which is removed at the end. The driver never runs: a
+// stand-in in the child answers run()'s questions to it (Accessibility, the
+// screen's lock and idle time, the app's windows) and to pgrep (whether the
+// app is open) from the case's own state, so no app is launched and nothing
+// on the Mac is touched.
 //
 // Run from the repository root: node desktop/tests/harness-safety.mjs
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import childProcess, { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
@@ -33,8 +41,14 @@ const SIGNAL_SENT = 'signal-sent';
 // for it, in the child's own temporary folder.
 const DRIVER = 'plain-sight-drive-' + createHash('sha256').update(readFileSync(path.join(HERE, 'drive.swift'))).digest('hex').slice(0, 12);
 const BACKUP_ROOT = (home) => path.join(home, 'cover-story-delivery', 'desktop', 'appdata-backup');
+const LOCK = (home) => path.join(home, 'cover-story-delivery', 'desktop', '.gui-test.lock');
+const CONTAINERS = (home) => path.join(home, 'Library', 'Containers');
 const marker = (dir) => path.join(dir, 'marker');
 const real = (home, dir) => 'REAL ' + path.relative(home, dir);
+// A test copy's identifier, as testcopy.mjs makes one, and its data folders,
+// which the run makes, never the person.
+const TEST_COPY = 'com.pranavongole.plainsight.testcopy-1761000003';
+const isTestFolder = (dir) => /^com\.pranavongole\.plainsight\.(testcopy|sbprobe)-/.test(path.basename(dir));
 
 // ---------------------------------------------------------------------------
 // The child: one case against the harness, under the fake home.
@@ -49,14 +63,39 @@ if (process.argv[2] === '--child') {
     process.exit(2);
   }
   writeFileSync(path.join(os.tmpdir(), DRIVER), '');
-  // A hook around every move of a data folder, bound before the harness
-  // loads its own import of renameSync.
+  // A hook around every move and every removal of a data folder, bound
+  // before the harness loads its own imports of renameSync and rmSync.
   let onRename = null;
   const rename = fs.renameSync;
   fs.renameSync = (from, to) => { if (onRename) onRename(from, to); return rename(from, to); };
+  let onRemove = null;
+  const remove = fs.rmSync;
+  fs.rmSync = (target, options) => { if (onRemove) onRemove(target); return remove(target, options); };
+  // The stand-in for the driver and for pgrep: run() asks the driver whether
+  // this program may use Accessibility, whether the screen is locked and how
+  // long the Mac has been idle, and for the app's windows, and pgrep whether
+  // the app is open. It answers from `fake`, the case's state; every other
+  // program runs as it is (plutil reads a fake bundle's Info.plist).
+  const fake = { locked: false, idle: 600, windows: [] };
+  const started = Date.now();
+  const exec = childProcess.execFileSync;
+  childProcess.execFileSync = (file, args = [], options) => {
+    if (path.basename(String(file)) === DRIVER) {
+      const command = String(args[0]);
+      const answer = command === 'trusted' ? { ok: true, accessibility: true }
+        : command === 'session' ? { ok: true, locked: fake.locked, idle: fake.idle + (Date.now() - started) / 1000 }
+          : command === 'cgwindows' ? { ok: true, windows: fake.windows }
+            : { ok: false, error: 'the stand-in has no answer for ' + command };
+      return JSON.stringify(answer) + '\n';
+    }
+    if (file === 'pgrep') throw Object.assign(new Error('pgrep found no process'), { status: 1, stdout: '' });
+    return exec(file, args, options);
+  };
   syncBuiltinESMExports();
   const h = await import(pathToFileURL(HARNESS).href);
-  const dirs = h.DATA_DIRS;
+  // The person's own data folders hold their data before the run; a test
+  // copy's folders do not exist yet: its launch makes them.
+  const dirs = h.DATA_DIRS.filter((d) => !isTestFolder(d));
   console.log('DIRS ' + JSON.stringify(dirs.map((d) => path.relative(home, d))));
   for (const d of dirs) { mkdirSync(d, { recursive: true }); writeFileSync(marker(d), real(home, d)); }
   const intact = () => dirs.forEach((d) => assert.equal(existsSync(marker(d)) ? readFileSync(marker(d), 'utf8') : null, real(home, d), 'the data in ' + d + ' is as it was'));
@@ -139,7 +178,37 @@ if (process.argv[2] === '--child') {
       await new Promise((r) => setTimeout(r, 5000));
       console.log('THE HANDLER DID NOT END THE RUN');
       process.exit(9);
+    },
+    // DM-243: the run's own end. A test copy's launch makes its container
+    // (here a folder in the fake home), macOS App Data protection refuses its
+    // removal (here the hook, as EPERM), and run() ends the process itself.
+    async 'run-test-container-refused'() {
+      onRemove = (target) => { if (target === container) throw refused('rmdir', target); };
+      await runSuite([{ name: 'a launch of the test copy makes its container and writes into the app\'s folders', fn: async () => { testData(path.join(container, 'Data', 'Library', 'WebKit', 'WebsiteData')); testData(dirs[0]); } }]);
+    },
+    async 'run-own-folder-refused'() {
+      onRemove = (target) => { if (target === dirs[0]) throw refused('rmdir', target); };
+      await runSuite([{ name: 'a launch of the test copy makes its container and writes into the app\'s folders', fn: async () => { testData(path.join(container, 'Data', 'Library', 'WebKit', 'WebsiteData')); testData(dirs[0]); } }]);
+    },
+    async 'run-container-from-before'() {
+      mkdirSync(container, { recursive: true });
+      writeFileSync(marker(container), 'TEST DATA OF AN EARLIER RUN');
+      await runSuite([{ name: 'a test that must not run', fn: async () => { throw new Error('the run started over an earlier run\'s container'); } }]);
+    },
+    async 'run-backup-refused'() {
+      let moves = 0;
+      onRename = (from) => { moves += 1; if (moves === 2) throw refused('rename', from); };
+      await runSuite([{ name: 'a test that must not run', fn: async () => { throw new Error('the run started without its backup'); } }]);
     }
+  };
+  // For the run-* cases: the test copy's container, test data written where
+  // a launch would write it, macOS's refusal, and the suite's own call of run().
+  const container = h.APP_ID === h.ID ? null : path.join(CONTAINERS(home), h.APP_ID);
+  const testData = (dir) => { mkdirSync(dir, { recursive: true }); writeFileSync(marker(dir), 'TEST DATA'); };
+  const refused = (call, target) => Object.assign(new Error('EPERM: operation not permitted, ' + call + ' \'' + target + '\''), { code: 'EPERM' });
+  const runSuite = (tests) => {
+    mkdirSync(path.join(home, 'Downloads'), { recursive: true });
+    return h.run(tests, { name: 'release', needUnlocked: true });
   };
   try {
     await cases[which]();
@@ -156,14 +225,25 @@ if (process.argv[2] === '--child') {
 // ---------------------------------------------------------------------------
 const ROOT = mkdtempSync(path.join(os.tmpdir(), 'plain-sight-harness-safety-'));
 
-function runCase(id, onOutput = () => {}) {
+// A fake bundle under a test identifier, outside the fake home, for the
+// harness to read as PLAIN_SIGHT_APP (only its Info.plist is read).
+function fakeCopy(box, identifier) {
+  const app = path.join(box, 'bundle', 'Plain Sight test copy.app');
+  mkdirSync(path.join(app, 'Contents'), { recursive: true });
+  writeFileSync(path.join(app, 'Contents', 'Info.plist'), '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>' + identifier + '</string><key>CFBundleName</key><string>Plain Sight test copy</string></dict></plist>\n');
+  return app;
+}
+
+function runCase(id, onOutput = () => {}, { app = null } = {}) {
   const box = path.join(ROOT, id);
   const home = path.join(box, 'home');
   const tmp = path.join(box, 'tmp');
   const evidence = path.join(box, 'evidence');
   for (const d of [home, tmp, evidence]) mkdirSync(d, { recursive: true });
   const env = { ...process.env, HOME: home, TMPDIR: tmp, PLAIN_SIGHT_EVIDENCE: evidence, [BOX]: box };
-  delete env.PLAIN_SIGHT_E2E_DOWNLOADS;
+  // Nothing of the shell that runs npm test reaches the harness's settings.
+  for (const name of ['PLAIN_SIGHT_E2E_DOWNLOADS', 'PLAIN_SIGHT_APP', 'PLAIN_SIGHT_IDLE_MIN', 'PLAIN_SIGHT_ONLY', 'PLAIN_SIGHT_ALLOW_REAL_ID']) delete env[name];
+  if (app) env.PLAIN_SIGHT_APP = fakeCopy(box, app);
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child', id], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   const feed = (chunk) => { out += chunk; onOutput(out, child, box); };
@@ -173,10 +253,12 @@ function runCase(id, onOutput = () => {}) {
     const line = out.split('\n').find((l) => l.startsWith('DIRS '));
     const dirs = line ? JSON.parse(line.slice(5)).map((rel) => path.join(home, rel)) : [];
     resolve({
-      code, signal, out, dirs,
+      code, signal, out, dirs, home,
       intact: dirs.length > 0 && dirs.every((d) => existsSync(marker(d)) && readFileSync(marker(d), 'utf8') === real(home, d)),
       backups: existsSync(BACKUP_ROOT(home)) ? readdirSync(BACKUP_ROOT(home)) : [],
-      tmpFiles: readdirSync(tmp)
+      tmpFiles: readdirSync(tmp),
+      lock: existsSync(LOCK(home)),
+      containers: existsSync(CONTAINERS(home)) ? readdirSync(CONTAINERS(home)) : []
     });
   }));
 }
@@ -236,6 +318,49 @@ test('a signal during the move is taken after it: the backup finishes, everythin
   ended(r, 130);
   assert.match(r.out, /BACKUP DONE/, 'the backup finished before the signal was taken; the child\'s output:\n' + r.out);
   clean(r);
+});
+
+// DM-243: release-run-1 (26 October 2026) ended with exit 6 and "could not
+// clear the test data in .../Containers/com.pranavongole.plainsight.testcopy-
+// 1793065378 (EPERM)", though every folder of the person's came back.
+const esc = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+test('a test copy\'s container that macOS will not let the run remove is test data left behind: named, listed at the end by name, exit code 8, and the person\'s data is back (DM-243)', async () => {
+  const r = await runCase('run-test-container-refused', undefined, { app: TEST_COPY });
+  ended(r, 8);
+  const container = path.join(CONTAINERS(r.home), TEST_COPY);
+  assert.ok(r.out.includes('test data left behind: ' + container + ' (macOS refused to remove it; remove it by hand, see wave-g/probe/DESIGN.md, Leftovers)'), 'the leftover is named, with what to do; the child\'s output:\n' + r.out);
+  assert.match(r.out, new RegExp('^Test containers on this Mac at the end of the run \\(names only, never opened\\): ' + esc(TEST_COPY) + '$', 'm'), 'the summary lists it by name');
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 0$/m, 'a leftover is not counted as an error');
+  assert.match(r.out, /^Exit code: 8 \(test data left behind; your own data is back\)$/m);
+  assert.doesNotMatch(r.out, /Could not restore app data/, 'the person\'s data came back');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+  assert.ok(r.containers.includes(TEST_COPY), 'the container is left where it is: ' + JSON.stringify(r.containers));
+});
+test('the same refusal on a folder of the person\'s own app still ends the run with 6 and keeps that folder\'s data in the backup, named (DM-243)', async () => {
+  const r = await runCase('run-own-folder-refused', undefined, { app: TEST_COPY });
+  ended(r, 6);
+  assert.ok(r.out.includes('Could not restore app data: could not clear the test data in ' + r.dirs[0] + ' (EPERM)'), 'the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /test data left behind/, 'a folder of the person\'s is never taken for test data');
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 1$/m);
+  assert.equal(r.backups.length, 1, 'what was in that folder before the run waits in the backup');
+  for (const d of r.dirs.slice(1)) assert.equal(readFileSync(marker(d), 'utf8'), real(r.home, d), 'the other folders came back: ' + d);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('a run on a test copy whose container is still there from an earlier run does not start: nothing is moved, and the refusal names the container and app:testcopy (DM-243)', async () => {
+  const r = await runCase('run-container-from-before', undefined, { app: TEST_COPY });
+  ended(r, 4);
+  assert.match(r.out, new RegExp('^release: not started: the bundle under test, ' + esc(TEST_COPY) + ', has a container from an earlier run, .*npm run app:testcopy.*\\. Errors: 0$', 'm'), 'the child\'s output:\n' + r.out);
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+  assert.equal(readFileSync(marker(path.join(CONTAINERS(r.home), TEST_COPY)), 'utf8'), 'TEST DATA OF AN EARLIER RUN', 'the container is left as it was');
+});
+test('a move aside that macOS refuses ends the run as not started, with every folder in its place and the lock released (DM-243)', async () => {
+  const r = await runCase('run-backup-refused');
+  ended(r, 4);
+  assert.match(r.out, /^release: not started: could not move .+ aside \(EPERM\); everything was put back\. Errors: 0$/m, 'the child\'s output:\n' + r.out);
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
 });
 
 let passed = 0;
