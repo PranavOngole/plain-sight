@@ -346,6 +346,113 @@ test('the page answers the app\'s question before a quit: text to lose only when
   } finally { p.close(); }
 });
 
+// After a successful Save or Open in the app the quit question answers false
+// while the page still holds exactly that text, which a file on disk now
+// holds too (DM-236); a keystroke or Backspace makes it true again, and a
+// cancelled panel, a refused write and "Could not save" leave it true. The
+// folder Save and the .sight Save through the panel are the Delivery
+// Manager's AT-01 and AT-02 (dm-appstore-2783e5d/adv/dm-native-adv.mjs),
+// adopted with the answer the fix sets: before it, both answered true, and
+// the sheet said the text had not been saved right after "Saved".
+test('in the app a successful Save or Open answers the quit question with false until the text changes; a cancelled panel, a refused write and a failed save keep it true (DM-236; AT-01, AT-02)', async () => {
+  // AT-01: a folder Save.
+  {
+    const native = fakeNative({ saved: { name: 'Notes' } });
+    const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1' } });
+    try {
+      await p.settle(50);
+      p.type('words I just saved');
+      assert.equal(native.unsaved(), true, 'before the Save: text to lose');
+      p.$('#btn-save').click();
+      await p.settle(80);
+      assert.match(p.toast(), /^Saved .*\.txt in Notes$/, 'the folder write happened: ' + p.toast());
+      assert.equal(native.unsaved(), false, 'after a successful folder Save nothing would be lost');
+      p.press('Backspace');
+      assert.equal(native.unsaved(), true, 'Backspace after the Save: the text differs from the file');
+      p.type('d');
+      assert.equal(native.unsaved(), false, 'the same text again is the saved text');
+      p.type('!');
+      assert.equal(native.unsaved(), true, 'one more keystroke: unsaved again');
+      p.press('Escape');
+      assert.equal(native.unsaved(), false, 'Esc cleared the page: nothing to lose, as before');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+  // A refused folder write keeps it true.
+  {
+    const native = fakeNative({ saved: { name: 'Notes' }, failWrite: true });
+    const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1' } });
+    try {
+      await p.settle(50);
+      p.type('not written');
+      p.$('#btn-save').click();
+      await p.settle(80);
+      assert.equal(p.toast(), 'Could not write to the folder');
+      assert.equal(native.unsaved(), true, 'a refused folder write keeps the text unsaved');
+    } finally { p.close(); }
+  }
+  // A plain Save through the panel, then a cancelled one and a failed one.
+  for (const [options, expected, toast] of [[{}, false, 'Saved 2'], [{ cancelDownload: true }, true, ''], [{ failDownload: true }, true, 'Could not save']]) {
+    const native = fakeNative(options);
+    const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1', 'plainSight.saveMode': 'txt' } });
+    try {
+      await p.settle(50);
+      p.type('plain words');
+      p.$('#btn-save').click();
+      await p.settle(80);
+      assert.ok(p.toast().startsWith(toast), JSON.stringify(options) + ': toast ' + JSON.stringify(p.toast()));
+      assert.equal(native.unsaved(), expected, JSON.stringify(options) + ': the quit question');
+      if (!expected) { p.type('x'); assert.equal(native.unsaved(), true, 'a keystroke after the panel Save: unsaved again'); }
+    } finally { p.close(); }
+  }
+  // AT-02: the encrypted Save through the panel.
+  {
+    const native = fakeNative();
+    const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1' } });
+    try {
+      await p.settle(50);
+      p.type('words in a sight file');
+      p.$('#btn-save').click();
+      await p.settle(30);
+      p.$('#pw-input').value = 'a long enough password';
+      p.$('#pw-ok').click();
+      await p.settle(900);
+      assert.equal(p.toast(), 'Saved');
+      assert.match(native.calls.find((c) => c[0] === 'saveDownload')[1], /\.sight$/);
+      assert.equal(native.unsaved(), false, 'after a successful encrypted Save through the panel nothing would be lost');
+      p.type('x');
+      assert.equal(native.unsaved(), true);
+    } finally { p.close(); }
+  }
+  // Open of a plain note, then of a .sight file.
+  {
+    const native = fakeNative();
+    const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1' } });
+    try {
+      await p.settle(50);
+      chooseFile(p, new p.w.File(['opened from a note'], 'note.txt', { type: 'text/plain' }));
+      await p.settle(80);
+      assert.equal(p.toast(), 'Opened');
+      assert.equal(await p.real(), 'opened from a note');
+      assert.equal(native.unsaved(), false, 'the text matches the opened file');
+      p.type('!');
+      assert.equal(native.unsaved(), true, 'a keystroke after the Open: unsaved again');
+      p.press('Escape');
+      chooseFile(p, await sightFile(p.w, 'opened from a sight file', 'a phrase for the file'));
+      await p.settle(30);
+      p.$('#pw-input').value = 'a phrase for the file';
+      p.$('#pw-ok').click();
+      await p.settle(900);
+      assert.equal(p.toast(), 'Opened');
+      assert.equal(await p.real(), 'opened from a sight file');
+      assert.equal(native.unsaved(), false, 'the text matches the decrypted file');
+      p.type('!');
+      assert.equal(native.unsaved(), true);
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+});
+
 test('quitting erases the text and the screen like Esc', async () => {
   const native = fakeNative();
   const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1' } });

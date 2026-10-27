@@ -1281,6 +1281,11 @@
   // folder and a quit hook. No browser has it. The app keeps the folder's
   // path; the page only sees a { name } object in place of a handle.
   const native = window.PlainSightNative || null;
+  // In the app: the text as it was at the last successful Save or Open, so
+  // the question before a quit answers false while the page still holds
+  // exactly that text (DM-236). The web page keeps the browser's own prompt.
+  let savedText = null;
+  function markSaved(text) { if (native) savedText = text; }
 
   function folderSupported() { return Boolean(native) || typeof window.showDirectoryPicker === 'function'; }
 
@@ -1556,6 +1561,7 @@
       if (folderHandle !== handle) { toast('The folder changed; press Save again'); return; }
       try {
         const name = await folderWrite(plainContent(format, text), base, PLAIN_FORMATS[format].ext);
+        markSaved(text);
         toast('Saved ' + name + ' in ' + handle.name);
       } catch (err) {
         toast('Could not write to the folder');
@@ -1567,9 +1573,10 @@
       // A plain download (text, Markdown or Word), named by the moment, no
       // password. Where it lands is the browser's download setting.
       const name = momentBase() + PLAIN_FORMATS[mode].ext;
+      const text = real;   // the text at the click, which is what the file holds
       try {
-        const saved = await downloadText(plainContent(mode, real), name, PLAIN_FORMATS[mode].type);
-        if (saved !== null) toast('Saved ' + saved);   // null: the app's save panel was cancelled, so nothing to say
+        const saved = await downloadText(plainContent(mode, text), name, PLAIN_FORMATS[mode].type);
+        if (saved !== null) { markSaved(text); toast('Saved ' + saved); }   // null: the app's save panel was cancelled, so nothing to say
       } catch (err) {
         toast('Could not save');
       }
@@ -1579,9 +1586,11 @@
     const password = await askPassword('Choose a password for this file', 'The file cannot be opened without it. Longer is better.', 'Save');
     if (password === null) return;
     try {
+      const text = real;   // what exportEncrypted encrypts: the text as the password is confirmed
       const json = await exportEncrypted(password);
       const slug = cover.tabTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'draft';
       if ((await downloadText(json, slug + '-' + fileStamp() + FILE_EXT)) === null) return;   // the app's save panel was cancelled
+      markSaved(text);
       toast('Saved');
     } catch (err) {
       toast('Could not save');
@@ -1616,6 +1625,7 @@
     if (password === null) return;
     try {
       await importEncrypted(parsed, password);
+      markSaved(real);   // the page now holds exactly what the file holds
       toast('Opened');
     } catch (err) {
       toast(err && err.message === 'Cancelled' ? 'Open cancelled' : 'Wrong password or damaged file');
@@ -1640,6 +1650,7 @@
       if (ok === null) return;
     }
     replaceReal(text);
+    markSaved(text);   // the page now holds exactly what the note holds
     toast('Opened');
   }
 
@@ -1900,8 +1911,9 @@
       for (const el of document.querySelectorAll('[data-app]')) el.textContent = el.dataset.app;
       native.onQuit(() => { wipe(); return writeChain; });
       // Before it quits, the app asks whether a quit would lose text: text on
-      // the page that no open vault keeps. It then shows "Quit without saving?".
-      native.onUnsavedText(() => real.length > 0 && !vaultOpen());
+      // the page that no open vault keeps and that is not what the last Save
+      // or Open left on it (DM-236). It then shows "Quit without saving?".
+      native.onUnsavedText(() => real.length > 0 && !vaultOpen() && real !== savedText);
     }
     if (!storageGet(STORAGE.intro)) openIntro();
     else if (!cryptoAvailable()) toast(NO_CRYPTO_NOTICE);   // a return visit sees the notice too
