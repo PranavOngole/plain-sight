@@ -820,6 +820,7 @@
       vaultWrite(key, salt, iterations, text);
     }
     real = '';
+    savedText = null;        // in the app, the copy of the last saved text goes with it (QA-G-31)
     lockedTextSalts = null;
     resetCover();
     if (peeking) realEl.textContent = '';
@@ -1284,8 +1285,11 @@
   // In the app: the text as it was at the last successful Save or Open, so
   // the question before a quit answers false while the page still holds
   // exactly that text (DM-236). The web page keeps the browser's own prompt.
+  // A wipe (Esc, the ten-minute wipe, the quit) drops it with the text, and a
+  // Save or Open that a wipe overtook marks nothing when it lands, so nothing
+  // of the text stays in the page after Esc (QA-G-31).
   let savedText = null;
-  function markSaved(text) { if (native) savedText = text; }
+  function markSaved(text, wipes) { if (native && wipes === wipeCount) savedText = text; }
 
   function folderSupported() { return Boolean(native) || typeof window.showDirectoryPicker === 'function'; }
 
@@ -1554,6 +1558,7 @@
       // The text is the text on the page at the click, even if Esc follows
       // during the permission prompt.
       const text = real;
+      const wipes = wipeCount;
       const handle = folderHandle;
       const base = momentBase();   // named by the click, not by the end of the permission prompt
       const format = folderFormat();
@@ -1561,7 +1566,7 @@
       if (folderHandle !== handle) { toast('The folder changed; press Save again'); return; }
       try {
         const name = await folderWrite(plainContent(format, text), base, PLAIN_FORMATS[format].ext);
-        markSaved(text);
+        markSaved(text, wipes);
         toast('Saved ' + name + ' in ' + handle.name);
       } catch (err) {
         toast('Could not write to the folder');
@@ -1574,9 +1579,10 @@
       // password. Where it lands is the browser's download setting.
       const name = momentBase() + PLAIN_FORMATS[mode].ext;
       const text = real;   // the text at the click, which is what the file holds
+      const wipes = wipeCount;
       try {
         const saved = await downloadText(plainContent(mode, text), name, PLAIN_FORMATS[mode].type);
-        if (saved !== null) { markSaved(text); toast('Saved ' + saved); }   // null: the app's save panel was cancelled, so nothing to say
+        if (saved !== null) { markSaved(text, wipes); toast('Saved ' + saved); }   // null: the app's save panel was cancelled, so nothing to say
       } catch (err) {
         toast('Could not save');
       }
@@ -1587,10 +1593,11 @@
     if (password === null) return;
     try {
       const text = real;   // what exportEncrypted encrypts: the text as the password is confirmed
+      const wipes = wipeCount;
       const json = await exportEncrypted(password);
       const slug = cover.tabTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'draft';
       if ((await downloadText(json, slug + '-' + fileStamp() + FILE_EXT)) === null) return;   // the app's save panel was cancelled
-      markSaved(text);
+      markSaved(text, wipes);
       toast('Saved');
     } catch (err) {
       toast('Could not save');
@@ -1625,7 +1632,7 @@
     if (password === null) return;
     try {
       await importEncrypted(parsed, password);
-      markSaved(real);   // the page now holds exactly what the file holds
+      markSaved(real, wipes);   // the page now holds exactly what the file holds
       toast('Opened');
     } catch (err) {
       toast(err && err.message === 'Cancelled' ? 'Open cancelled' : 'Wrong password or damaged file');
@@ -1650,7 +1657,7 @@
       if (ok === null) return;
     }
     replaceReal(text);
-    markSaved(text);   // the page now holds exactly what the note holds
+    markSaved(text, wipes);   // the page now holds exactly what the note holds
     toast('Opened');
   }
 

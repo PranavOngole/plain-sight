@@ -26,7 +26,7 @@ const STAMP = /^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}$/;
 // A fake adapter with the same surface as desktop/adapter.js. It records
 // every call; files is the set of names already in the folder, so the
 // counter rule can be checked from the page's side.
-function fakeNative({ saved = null, pick = { name: 'Build_Test_1' }, failPick = false, failForget = false, failWrite = false, failDownload = false, cancelDownload = false, downloadAnswer = null } = {}) {
+function fakeNative({ saved = null, pick = { name: 'Build_Test_1' }, failPick = false, failForget = false, failWrite = false, failDownload = false, cancelDownload = false, downloadAnswer = null, writeGate = null } = {}) {
   const calls = [];
   const files = new Set();
   let quit = null;
@@ -46,6 +46,7 @@ function fakeNative({ saved = null, pick = { name: 'Build_Test_1' }, failPick = 
       forgetFolder: async () => { calls.push(['forgetFolder']); if (failForget) throw new Error('Could not forget the folder'); folder = null; },
       writeTextFile: async (base, ext, text) => {
         calls.push(['writeTextFile', base, ext, text]);
+        if (writeGate) await writeGate;   // a write still under way, until the test lets it land
         if (failWrite) throw new Error('disk full');
         let name = base + ext;
         for (let n = 2; files.has(name); n++) name = base + ' (' + n + ')' + ext;
@@ -448,6 +449,116 @@ test('in the app a successful Save or Open answers the quit question with false 
       assert.equal(native.unsaved(), false, 'the text matches the decrypted file');
       p.type('!');
       assert.equal(native.unsaved(), true);
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+});
+
+// QA-G-31: in the app the page kept the text of the last successful Save or
+// Open after Esc, the ten-minute wipe and the quit, since wipe() never
+// cleared it, so a full copy of the last saved text stayed in the page's
+// memory until the next Save, Open or the window closed. That copy lives
+// inside the page's script, out of a test's reach, so its absence is shown by
+// its one effect: after a wipe, the same words typed again are text a quit
+// would lose (QA-01's repro: Save "abc", Esc, type "abc"; true is the answer
+// the fix sets, false before it). A Save still being written when Esc comes
+// marks nothing when it lands, so it cannot bring the copy back after the
+// wipe either.
+test('in the app Esc, the ten-minute wipe and the quit keep no copy of the last saved text: the same words typed again would be lost, and a Save that lands after Esc marks nothing (QA-G-31)', async () => {
+  const loaded = async (native, storage = {}) => {
+    const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1', ...storage } });
+    await p.settle(50);
+    return p;
+  };
+  // QA-01's repro: a folder Save of "abc", Esc, then "abc" typed again.
+  {
+    const native = fakeNative({ saved: { name: 'Notes' } });
+    const p = await loaded(native);
+    try {
+      p.type('abc');
+      p.$('#btn-save').click();
+      await p.settle(80);
+      assert.match(p.toast(), /^Saved .*\.txt in Notes$/, 'the folder write happened: ' + p.toast());
+      assert.equal(native.unsaved(), false, 'right after the Save nothing would be lost');
+      p.press('Escape');
+      assert.equal(native.unsaved(), false, 'Esc emptied the page');
+      p.type('abc');
+      assert.equal(native.unsaved(), true, 'after Esc the page keeps no copy of the saved text: the same words typed again are text a quit would lose');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+  // The ten-minute wipe, after a plain Save through the panel.
+  {
+    const native = fakeNative();
+    const p = await loaded(native, { 'plainSight.saveMode': 'txt' });
+    try {
+      p.type('abc');
+      p.$('#btn-save').click();
+      await p.settle(80);
+      assert.equal(native.unsaved(), false, 'right after the panel Save nothing would be lost');
+      let now = p.w.Date.now();
+      p.w.Date.now = () => now;
+      const setHidden = (hidden) => {
+        Object.defineProperty(p.d, 'hidden', { get: () => hidden, configurable: true });
+        p.d.dispatchEvent(new p.w.Event('visibilitychange'));
+      };
+      setHidden(true);
+      now += 10 * 60 * 1000 + 1000;
+      setHidden(false);
+      assert.equal(p.toast(), 'Cleared after 10 minutes in the background');
+      p.type('abc');
+      assert.equal(native.unsaved(), true, 'the ten-minute wipe dropped the copy with the text');
+    } finally { p.close(); }
+  }
+  // The quit hook, which runs Esc before the app ends.
+  {
+    const native = fakeNative({ saved: { name: 'Notes' } });
+    const p = await loaded(native);
+    try {
+      p.type('abc');
+      p.$('#btn-save').click();
+      await p.settle(80);
+      assert.equal(native.unsaved(), false);
+      await native.quit();
+      p.type('abc');
+      assert.equal(native.unsaved(), true, 'the quit\'s wipe dropped the copy too');
+    } finally { p.close(); }
+  }
+  // A folder Save still being written when Esc comes: it lands after the wipe and marks nothing.
+  {
+    let land = null;
+    const native = fakeNative({ saved: { name: 'Notes' }, writeGate: new Promise((resolve) => { land = resolve; }) });
+    const p = await loaded(native);
+    try {
+      p.type('abc');
+      p.$('#btn-save').click();
+      await p.settle(30);
+      assert.equal(native.calls.filter((c) => c[0] === 'writeTextFile').length, 1, 'the write is under way');
+      p.press('Escape');
+      land();
+      await p.settle(80);
+      assert.match(p.toast(), /^Saved .*\.txt in Notes$/, 'the write landed after Esc: ' + p.toast());
+      p.type('abc');
+      assert.equal(native.unsaved(), true, 'a folder Save that lands after Esc keeps no copy of the text');
+    } finally { p.close(); }
+  }
+  // An encrypted Save whose key is still deriving when Esc comes: the file is written, and nothing is kept.
+  {
+    const native = fakeNative();
+    const p = await loaded(native);
+    try {
+      p.type('abc');
+      p.$('#btn-save').click();
+      await p.settle(30);
+      p.$('#pw-input').value = 'a long enough password';
+      p.$('#pw-ok').click();
+      await p.settle(30);   // the Save has taken the text and its key is deriving
+      p.press('Escape');
+      await p.settle(900);
+      assert.equal(p.toast(), 'Saved', 'the encrypted Save went on after Esc, as it always has');
+      assert.match(native.calls.find((c) => c[0] === 'saveDownload')[1], /\.sight$/);
+      p.type('abc');
+      assert.equal(native.unsaved(), true, 'an encrypted Save that lands after Esc keeps no copy of the text');
       assert.deepEqual(p.errors, []);
     } finally { p.close(); }
   }
