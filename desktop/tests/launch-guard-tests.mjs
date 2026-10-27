@@ -13,6 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { OVERRIDE, REAL_ID, SANDBOX, bundleFacts, bundleIdentifier, refusal, verdict, webDataFolder } from './launch-guard.mjs';
 import { MANIFEST, SIGNATURE, TEST_NAME, copyUnsigned, sameEntitlements, testIdentifier } from './testcopy.mjs';
 
@@ -124,6 +125,66 @@ test('the suites expect the app menu under the bundle\'s own name: "Plain Sight 
   assert.equal(appMenuTitle(facts), 'Plain Sight test copy', 'and the Quit and About items are looked for in that menu');
   assert.deepEqual(menuBarOf(bundleFacts(source, { codesign: codesignSaying('') })), ['Plain Sight', 'File', 'Edit', 'View', 'Window', 'Help'], 'the app\'s own bundle keeps "Plain Sight"');
   assert.deepEqual(menuBarOf(bundleFacts(fakeBundle('menu-renamed', REAL_ID, { name: 'Another Name' }), { codesign: codesignSaying('') }))[0], 'Another Name', 'the title is read from the bundle, not assumed');
+});
+
+// DM-242: the network watch (netwatch.mjs) tells which WebKit networking
+// process works for the app by the app's web data that process holds open.
+// Inside the sandbox WebKit keeps that data in the bundle's container, with
+// nothing under the identifier (sbprobe2-run-1, 26 October 2026, test
+// migrate), and the watch saw no networking process for the four sandboxed
+// launches of release-run-1, when it knew only the unsandboxed paths. The
+// lsof call is answered here by a text in its -Fn form, so nothing is
+// watched; the watch is imported only once it is sure to start watching only
+// when run as a script.
+const TESTS = path.dirname(fileURLToPath(import.meta.url));
+async function loadWatch() {
+  assert.match(readFileSync(path.join(TESTS, 'netwatch.mjs'), 'utf8'), /^if \(MAIN\) /m, 'netwatch.mjs starts its watch only when it is run as a script, so its matching can be tested');
+  return import('./netwatch.mjs');
+}
+const lsofNames = (...names) => 'p501\n' + names.map((name, i) => 'f' + i + '\nn' + name).join('\n') + '\n';
+const NETWORKING = '/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking';
+const answering = (text) => (pid) => (pid === 501 ? text : '');
+
+test('the network watch finds a sandboxed copy\'s WebKit networking process by the copy\'s container (DM-242)', async () => {
+  const { webDataPattern, worksForTheApp } = await loadWatch();
+  const id = testIdentifier(1793065378);
+  const pattern = webDataPattern({ identifier: id, sandboxed: true });
+  const ours = lsofNames('/', NETWORKING, '/Users/someone/Library/Containers/' + id + '/Data/Library/WebKit/WebsiteData/ResourceLoadStatistics/observations.db');
+  assert.equal(worksForTheApp(501, pattern, answering(ours)), true, 'the copy\'s own networking process, by ' + pattern);
+  assert.equal(worksForTheApp(502, pattern, answering(ours)), false, 'the lsof answer is the one for the process asked about');
+  const real = webDataPattern({ identifier: REAL_ID, sandboxed: true });
+  assert.equal(worksForTheApp(501, real, answering(lsofNames(NETWORKING, '/Users/someone/Library/Containers/' + REAL_ID + '/Data/Library/WebKit/WebsiteData/LocalStorage/localstorage.sqlite3'))), true, 'the sandboxed app itself, after the move, by its own container');
+});
+
+test('the network watch takes no other WebKit networking process for the app\'s: another app\'s container, another test copy\'s, the real app\'s, or the unsandboxed folder (DM-242)', async () => {
+  const { webDataPattern, worksForTheApp } = await loadWatch();
+  const id = testIdentifier(1793065378);
+  const pattern = webDataPattern({ identifier: id, sandboxed: true });
+  for (const other of [
+    '/Users/someone/Library/Containers/com.apple.Safari/Data/Library/WebKit/WebsiteData/observations.db',
+    '/Users/someone/Library/Containers/' + testIdentifier(1793000000) + '/Data/Library/WebKit/WebsiteData/observations.db',
+    '/Users/someone/Library/Containers/' + REAL_ID + '/Data/Library/WebKit/WebsiteData/observations.db',
+    '/Users/someone/Library/WebKit/' + id + '/WebsiteData/observations.db'
+  ]) assert.equal(worksForTheApp(501, pattern, answering(lsofNames('/', NETWORKING, other))), false, other + ' is not the copy\'s');
+  const real = webDataPattern({ identifier: REAL_ID, sandboxed: true });
+  assert.equal(worksForTheApp(501, real, answering(lsofNames(NETWORKING, '/Users/someone/Library/Containers/' + id + '/Data/Library/WebKit/WebsiteData/observations.db'))), false, 'a test copy\'s container is not the app\'s');
+});
+
+test('the network watch still finds the unsandboxed app\'s and a bare test build\'s networking process under Library/WebKit, with or without a bundle named (DM-242)', async () => {
+  const { webDataPattern, worksForTheApp } = await loadWatch();
+  for (const pattern of [webDataPattern({ identifier: REAL_ID, sandboxed: false }), webDataPattern()]) {
+    for (const name of ['com.pranavongole.plainsight', 'plain-sight']) {
+      assert.equal(worksForTheApp(501, pattern, answering(lsofNames('/', NETWORKING, '/Users/someone/Library/WebKit/' + name + '/WebsiteData/observations.db'))), true, name + ' by ' + pattern);
+    }
+    assert.equal(worksForTheApp(501, pattern, answering(lsofNames('/', NETWORKING, '/Users/someone/Library/WebKit/com.apple.Safari/WebsiteData/observations.db'))), false, 'another app\'s folder, by ' + pattern);
+  }
+  const copy = webDataPattern({ identifier: testIdentifier(1), sandboxed: false });
+  assert.equal(worksForTheApp(501, copy, answering(lsofNames(NETWORKING, '/Users/someone/Library/WebKit/' + testIdentifier(1) + '/WebsiteData/observations.db'))), true, 'an unsandboxed bundle under another identifier, by its own folder');
+});
+
+test('release.mjs hands the network watch the bundle it opens, so the watch matches that bundle\'s web data (DM-242)', () => {
+  const release = readFileSync(path.join(TESTS, 'release.mjs'), 'utf8');
+  assert.match(release, /spawn\(process\.execPath, \[path\.join\(DESKTOP, 'tests', 'netwatch\.mjs'\), '600', report, APP\]/, 'the watch is started with the bundle under test');
 });
 
 test('the copy script rewrites the identifier and the names, leaves the migration manifest and the old signature out, keeps the rest, and leaves the source as it was', () => {

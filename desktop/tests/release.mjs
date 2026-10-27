@@ -149,8 +149,10 @@ test('no network use was seen from the app or its web view during these launches
 await run(tests, {
   name: 'release',
   before: () => {
+    // The watch is handed the bundle, so it finds the networking process by
+    // that bundle's web data: its container when it is sandboxed (DM-242).
     const report = path.join(EVIDENCE, 'netwatch.json');
-    const child = spawn(process.execPath, [path.join(DESKTOP, 'tests', 'netwatch.mjs'), '600', report], { stdio: 'ignore' });
+    const child = spawn(process.execPath, [path.join(DESKTOP, 'tests', 'netwatch.mjs'), '600', report, APP], { stdio: 'ignore' });
     watch = { child, report };
   },
   after: async () => {
