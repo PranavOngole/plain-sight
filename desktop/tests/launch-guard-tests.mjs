@@ -9,8 +9,8 @@
 // Run from the repository root: node desktop/tests/launch-guard-tests.mjs
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -226,6 +226,54 @@ test('the network watch still finds the unsandboxed app\'s and a bare test build
 test('release.mjs hands the network watch the bundle it opens, so the watch matches that bundle\'s web data (DM-242)', () => {
   const release = readFileSync(path.join(TESTS, 'release.mjs'), 'utf8');
   assert.match(release, /spawn\(process\.execPath, \[path\.join\(DESKTOP, 'tests', 'netwatch\.mjs'\), '600', report, APP\]/, 'the watch is started with the bundle under test');
+});
+
+// QA-01's watch cases on 534f3cc (wave-g/qa/scripts/app/r7_netwatch_adv.mjs,
+// N17 to N17c and N21, with its expectations). N17 to N17c: the bundle's
+// identifier is taken literally in the watch's pattern, regular-expression
+// characters and dots included (DISH's breaks and QA-01's S39 removed the
+// escape and every case above still passed).
+test('the network watch takes the identifier literally: one with regular-expression characters matches only itself, and its dots match only dots (QA-01 N17 to N17c)', async () => {
+  const { webDataPattern, worksForTheApp } = await loadWatch();
+  const lsof = (...paths) => 'p4242\nfcwd\nn/\n' + paths.map((p, i) => 'f' + (i + 3) + '\nn' + p).join('\n') + '\n';
+  const cont = (id) => '/Users/someone/Library/Containers/' + id + '/Data/Library/WebKit/WebsiteData/Default/salt/LocalStorage/localstorage.sqlite3';
+  const works = (facts, text) => worksForTheApp(4242, webDataPattern(facts), () => text);
+  const odd = { identifier: 'com.x(y)+z[1]*', sandboxed: true };
+  assert.equal(works(odd, lsof(cont('com.x(y)+z[1]*'))), true, 'N17 an identifier with regular-expression characters matches itself');
+  assert.equal(works(odd, lsof(cont('com.xyyz1'))), false, 'N17b nothing a loose pattern would match: com.xyyz1');
+  assert.equal(works(odd, lsof(cont('comAx(y)+z[1]*'))), false, 'N17b nor comAx(y)+z[1]*');
+  assert.equal(works({ identifier: 'com.a.b', sandboxed: true }, lsof(cont('comXaXb'))), false, 'N17c the dots of an identifier are literal');
+});
+
+// The watch run as a script, as release.mjs runs it, with stand-ins for the
+// programs it lists processes with (pgrep, lsof, and nettop under script),
+// first on its PATH: whatever the watch does, it can list no process of this
+// Mac. codesign and plutil are the real ones.
+function watchEnv({ codesign = null } = {}) {
+  const bin = path.join(ROOT, 'watch-bin' + (codesign ? '-codesign' : ''));
+  if (!existsSync(bin)) {
+    mkdirSync(bin, { recursive: true });
+    for (const [name, body] of [['pgrep', 'exit 1'], ['lsof', 'exit 0'], ['script', 'exit 0'], ['nettop', 'exit 0'], ...(codesign ? [['codesign', codesign]] : [])]) {
+      writeFileSync(path.join(bin, name), '#!/bin/sh\n' + body + '\n');
+      chmodSync(path.join(bin, name), 0o755);
+    }
+  }
+  return { ...process.env, PATH: bin + ':' + process.env.PATH };
+}
+// N21: a bundle the watch cannot read ends it with exit code 2 and a report
+// that says so, before any process is listed; with exit 0 the release suite
+// would read the run as "no network use" (QA-01's S42).
+test('the network watch given a path with no bundle, or a bundle codesign cannot read, ends with exit code 2 and a report saying so, before it lists any process (QA-01 N21)', () => {
+  for (const [label, bundle] of [['a path with no bundle', path.join(ROOT, 'no-such-bundle.app')], ['an unsigned bundle', fakeBundle('watch-unsigned', testIdentifier(1761000010))]]) {
+    const report = path.join(ROOT, 'netwatch-' + label.replace(/\W+/g, '-') + '.json');
+    const r = spawnSync(process.execPath, [path.join(TESTS, 'netwatch.mjs'), '1', report, bundle], { encoding: 'utf8', env: watchEnv() });
+    let written = null;
+    try { written = JSON.parse(readFileSync(report, 'utf8')); } catch { written = null; }
+    assert.equal(r.status, 2, label + ': exit code 2; output: ' + r.stdout + r.stderr);
+    assert.match(r.stdout, /^netwatch: the bundle could not be read: /m, label + ': the watch says why');
+    assert.ok(written && /^the bundle could not be read: /.test(written.verdict), label + ': the report says so: ' + JSON.stringify(written));
+    assert.deepEqual([written.appPids, written.networkPids, written.samples], [[], [], 0], label + ': and lists no process');
+  }
 });
 
 test('the copy script rewrites the identifier and the names, leaves the migration manifest and the old signature out, keeps the rest, and leaves the source as it was', () => {

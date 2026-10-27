@@ -94,8 +94,13 @@ if (process.argv[2] === '--child') {
   syncBuiltinESMExports();
   const h = await import(pathToFileURL(HARNESS).href);
   // The person's own data folders hold their data before the run; a test
-  // copy's folders do not exist yet: its launch makes them.
-  const dirs = h.DATA_DIRS.filter((d) => !isTestFolder(d));
+  // copy's folders do not exist yet: its launch makes them. Two cases leave
+  // one place of the real identifier's empty, so that the run itself makes
+  // it there (QA-01's H8c and H8d).
+  const realContainer = path.join(home, 'Library', 'Containers', h.ID);
+  const realCookies = path.join(home, 'Library', 'HTTPStorages', h.ID + '.binarycookies');
+  const unseeded = { 'run-real-container-made': realContainer, 'run-real-cookies-made': realCookies }[which];
+  const dirs = h.DATA_DIRS.filter((d) => !isTestFolder(d) && d !== unseeded);
   console.log('DIRS ' + JSON.stringify(dirs.map((d) => path.relative(home, d))));
   for (const d of dirs) { mkdirSync(d, { recursive: true }); writeFileSync(marker(d), real(home, d)); }
   const intact = () => dirs.forEach((d) => assert.equal(existsSync(marker(d)) ? readFileSync(marker(d), 'utf8') : null, real(home, d), 'the data in ' + d + ' is as it was'));
@@ -184,11 +189,87 @@ if (process.argv[2] === '--child') {
     // removal (here the hook, as EPERM), and run() ends the process itself.
     async 'run-test-container-refused'() {
       onRemove = (target) => { if (target === container) throw refused('rmdir', target); };
-      await runSuite([{ name: 'a launch of the test copy makes its container and writes into the app\'s folders', fn: async () => { testData(path.join(container, 'Data', 'Library', 'WebKit', 'WebsiteData')); testData(dirs[0]); } }]);
+      await runSuite([launchMakesContainer]);
+    },
+    // QA-01's harness cases on 534f3cc (wave-g/qa/scripts/app/r7_harness_adv.mjs
+    // with r7_harness_child.mjs, H4 to H28), on this file's stand-in: QA-01
+    // made macOS's refusals real (chflags uchg for EPERM, an ACL "deny delete"
+    // for EACCES); here the hook answers with the same error codes. H4: the
+    // container refused with EACCES.
+    async 'run-test-container-eacces'() {
+      onRemove = (target) => { if (target === container) throw refused('rmdir', target, 'EACCES'); };
+      await runSuite([launchMakesContainer]);
+    },
+    // H5: a sandbox probe's container (the bundle under test carries an
+    // sbprobe- identifier), refused like a test copy's.
+    async 'run-probe-container-refused'() {
+      onRemove = (target) => { if (target === container) throw refused('rmdir', target); };
+      await runSuite([launchMakesContainer]);
+    },
+    // H6: a failed test and a leftover.
+    async 'run-leftover-and-failure'() {
+      onRemove = (target) => { if (target === container) throw refused('rmdir', target); };
+      await runSuite([launchMakesContainer, { name: 'a test that fails', fn: async () => { throw new Error('an assertion failed'); } }]);
+    },
+    // The Delivery Manager's AT-H3 (dm-appstore-534f3cc/adv, QA-01's H7): a
+    // stop and a leftover.
+    async 'run-leftover-and-stop'() {
+      onRemove = (target) => { if (target === container) throw refused('rmdir', target); };
+      await runSuite([launchMakesContainer, { name: 'a test the person interrupts', fn: async () => { throw new h.UserActivity('keyboard or mouse used during the run (idle 0.0 s)'); } }, laterTest]);
+    },
+    // H8b: a test copy's folder that was there before the run, which the run
+    // moved aside, is made again and refused on the way back.
+    async 'run-copy-caches-kept'() {
+      const caches = path.join(home, 'Library', 'Caches', h.APP_ID);
+      mkdirSync(caches, { recursive: true });
+      writeFileSync(marker(caches), 'OLD TEST DATA OF AN EARLIER RUN');
+      onRemove = (target) => { if (target === caches) throw refused('rmdir', target); };
+      await runSuite([{ name: 'the test copy\'s Caches folder is made again and macOS refuses its removal', fn: async () => { testData(caches); } }]);
+    },
+    // H8c: the real identifier's container, not there before the run, made by
+    // the run (the D-39 trap) and refused on removal.
+    async 'run-real-container-made'() {
+      onRemove = (target) => { if (target === realContainer) throw refused('rmdir', target); };
+      await runSuite([{ name: 'a run makes the real identifier\'s container and macOS refuses its removal', fn: async () => { testData(path.join(realContainer, 'Data')); } }]);
+    },
+    // H8d: the real identifier's cookie file, likewise: a name that starts
+    // with the real identifier and a dot is not a test identifier's.
+    async 'run-real-cookies-made'() {
+      onRemove = (target) => { if (target === realCookies) throw refused('unlink', target); };
+      await runSuite([{ name: 'a run makes the real identifier\'s cookie file and macOS refuses its removal', fn: async () => { mkdirSync(path.dirname(realCookies), { recursive: true }); writeFileSync(realCookies, 'CREATED BY THE RUN'); } }]);
+    },
+    // H13b: a locked screen at the start, in a suite that does not need it
+    // unlocked.
+    async 'run-locked-not-needed'() {
+      fake.locked = true;
+      await runSuite([{ name: 'a test that may run on a locked screen', fn: async () => { testData(dirs[0]); } }], { needUnlocked: false });
+    },
+    // H22, and the Delivery Manager's AT-H1: the screen locks during a run
+    // that needs it unlocked.
+    async 'run-locks-midway'() {
+      await runSuite([{ name: 'a test during which the screen locks', fn: async () => { testData(dirs[0]); fake.locked = true; h.drive('cgwindows', 4242); } }, laterTest]);
+    },
+    // H26: a window on-screen the whole wait, but never the one the wait wants.
+    async 'run-onscreen-unmatched'() {
+      fake.windows = [HELPER, DOC_ON];
+      await runSuite([{ name: 'a launch waits for two windows on screen', fn: async () => { testData(dirs[0]); await h.firstWindow(4242, (list) => list.filter((w) => w.onscreen).length >= 2 && list, 'two windows', 700); } }]);
+    },
+    // The Delivery Manager's AT-H2 (DISH-G-70 R1): on-screen, then lost
+    // before the wait is met.
+    async 'run-onscreen-then-lost'() {
+      fake.windows = [HELPER, { ...DOC_ON, x: 230, y: 60 }, { ...DOC_ON, x: 260, y: 90 }];
+      setTimeout(() => { fake.windows = [HELPER, { ...DOC_ON, onscreen: false, x: 230, y: 60 }]; }, 250);
+      await runSuite([firstLaunch]);
+    },
+    // H28 (DISH-G-70 R2): a window of the document's size on another layer,
+    // off-screen, is not the document window.
+    async 'run-big-window-other-layer'() {
+      fake.windows = [HELPER, { height: 747, layer: 25, onscreen: false, width: 980, x: 230, y: 60 }];
+      await runSuite([firstLaunch]);
     },
     async 'run-own-folder-refused'() {
       onRemove = (target) => { if (target === dirs[0]) throw refused('rmdir', target); };
-      await runSuite([{ name: 'a launch of the test copy makes its container and writes into the app\'s folders', fn: async () => { testData(path.join(container, 'Data', 'Library', 'WebKit', 'WebsiteData')); testData(dirs[0]); } }]);
+      await runSuite([launchMakesContainer]);
     },
     async 'run-container-from-before'() {
       mkdirSync(container, { recursive: true });
@@ -220,11 +301,15 @@ if (process.argv[2] === '--child') {
       await runSuite([firstLaunch]);
     },
     async 'run-onscreen'() {
-      fake.windows = [HELPER, { height: 744, layer: 0, onscreen: true, width: 980, x: 790, y: 324 }];
+      fake.windows = [HELPER, DOC_ON];
       await runSuite([firstLaunch]);
     }
   };
   const HELPER = { height: 500, layer: 0, onscreen: false, width: 500, x: 0, y: 940 };
+  const DOC_ON = { height: 744, layer: 0, onscreen: true, width: 980, x: 790, y: 324 };
+  // A launch of the test copy: its container, and test data in the app's folders.
+  const launchMakesContainer = { name: 'a launch of the test copy makes its container and writes into the app\'s folders', fn: async () => { testData(path.join(container, 'Data', 'Library', 'WebKit', 'WebsiteData')); testData(dirs[0]); } };
+  const laterTest = { name: 'a later test', fn: async () => { throw new Error('a test ran after the stop'); } };
   // A launch's first wait, as e2e.mjs waits for its window, after writing
   // test data where the app would.
   const firstLaunch = {
@@ -239,10 +324,10 @@ if (process.argv[2] === '--child') {
   // a launch would write it, macOS's refusal, and the suite's own call of run().
   const container = h.APP_ID === h.ID ? null : path.join(CONTAINERS(home), h.APP_ID);
   const testData = (dir) => { mkdirSync(dir, { recursive: true }); writeFileSync(marker(dir), 'TEST DATA'); };
-  const refused = (call, target) => Object.assign(new Error('EPERM: operation not permitted, ' + call + ' \'' + target + '\''), { code: 'EPERM' });
-  const runSuite = (tests) => {
+  const refused = (call, target, code = 'EPERM') => Object.assign(new Error(code + ': ' + (code === 'EACCES' ? 'permission denied' : 'operation not permitted') + ', ' + call + ' \'' + target + '\''), { code });
+  const runSuite = (tests, { needUnlocked = true } = {}) => {
     mkdirSync(path.join(home, 'Downloads'), { recursive: true });
-    return h.run(tests, { name: 'release', needUnlocked: true });
+    return h.run(tests, { name: 'release', needUnlocked });
   };
   try {
     await cases[which]();
@@ -430,6 +515,115 @@ test('a launch whose document window is on-screen ends the first wait with the w
   ended(r, 0);
   assert.match(r.out, /^FIRST WINDOW \[\{"height":744,"layer":0,"onscreen":true,"width":980,"x":790,"y":324\}\]$/m, 'the child\'s output:\n' + r.out);
   assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 0$/m);
+  clean(r);
+});
+
+// QA-G-36 and DISH-G-70: guards of round 7 that no case above holds. QA-01's
+// harness cases on 534f3cc (wave-g/qa/scripts/app/r7_harness_adv.mjs, H4 to
+// H28, with its expectations), the Delivery Manager's AT-H1 to AT-H4
+// (dm-appstore-534f3cc/adv/tests534/desktop/tests/dm-harness-adv-534.mjs)
+// and DISH-G-70's breaks R1 to R7: each case below goes red on a break of
+// harness.mjs that the cases above let through.
+const PROBE = 'com.pranavongole.plainsight.sbprobe-1761000009';
+test('a test copy\'s container that macOS refuses with EACCES is test data left behind as well: exit code 8 (QA-01 H4, DISH-G-70 R3)', async () => {
+  const r = await runCase('run-test-container-eacces', undefined, { app: TEST_COPY });
+  ended(r, 8);
+  assert.ok(r.out.includes('test data left behind: ' + path.join(CONTAINERS(r.home), TEST_COPY) + ' (macOS refused to remove it;'), 'the child\'s output:\n' + r.out);
+  assert.match(r.out, /^Exit code: 8 \(test data left behind; your own data is back\)$/m);
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('a sandbox probe\'s container (sbprobe-) that macOS keeps is test data left behind too: exit code 8, listed by name (QA-01 H5, DISH-G-70 R6)', async () => {
+  const r = await runCase('run-probe-container-refused', undefined, { app: PROBE });
+  ended(r, 8);
+  assert.ok(r.out.includes('test data left behind: ' + path.join(CONTAINERS(r.home), PROBE) + ' (macOS refused to remove it;'), 'the child\'s output:\n' + r.out);
+  assert.match(r.out, new RegExp('^Test containers on this Mac at the end of the run \\(names only, never opened\\): ' + esc(PROBE) + '$', 'm'), 'the summary lists it by name; the child\'s output:\n' + r.out);
+  clean(r);
+});
+test('a failed test with test data left behind ends with 1, not 8, and the leftover is still named (QA-01 H6, the Delivery Manager\'s AT-H4, DISH-G-70 R7)', async () => {
+  const r = await runCase('run-leftover-and-failure', undefined, { app: TEST_COPY });
+  ended(r, 1);
+  assert.ok(r.out.includes('test data left behind: ' + path.join(CONTAINERS(r.home), TEST_COPY)), 'the child\'s output:\n' + r.out);
+  assert.match(r.out, /^1 passed, 1 failed, 0 not run, 2 total\. Errors: 1$/m);
+  assert.match(r.out, /^Exit code: 1$/m);
+  clean(r);
+});
+test('a stop with test data left behind ends with 3, not 8, and the leftover is still named (the Delivery Manager\'s AT-H3, QA-01 H7, DISH-G-70 R7)', async () => {
+  const r = await runCase('run-leftover-and-stop', undefined, { app: TEST_COPY });
+  ended(r, 3);
+  assert.ok(r.out.includes('test data left behind: ' + path.join(CONTAINERS(r.home), TEST_COPY)), 'the child\'s output:\n' + r.out);
+  assert.match(r.out, /^skip - a later test \(not run: keyboard or mouse used during the run/m, 'the test after the stop is not run');
+  assert.match(r.out, /^1 passed, 0 failed, 2 not run, 3 total\. Errors: 0$/m);
+  assert.match(r.out, /^Exit code: 3$/m);
+  clean(r);
+});
+test('a test copy\'s folder that was there before the run, which the run moved aside and macOS refuses on the way back, is no leftover: exit code 6, its earlier data kept in the backup (QA-01 H8b, DISH-G-70 R4)', async () => {
+  const r = await runCase('run-copy-caches-kept', undefined, { app: TEST_COPY });
+  ended(r, 6);
+  const caches = path.join(r.home, 'Library', 'Caches', TEST_COPY);
+  assert.ok(r.out.includes('Could not restore app data: could not clear the test data in ' + caches + ' (EPERM)'), 'the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /test data left behind/, 'what was there before the run is never taken for a leftover');
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 1$/m);
+  assert.equal(r.backups.length, 1, 'the backup is kept');
+  const backup = path.join(BACKUP_ROOT(r.home), r.backups[0]);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(backup, 'moved.json'), 'utf8')), [caches], 'moved.json lists the folder whose earlier data waits there');
+  assert.equal(readFileSync(marker(path.join(backup, Buffer.from(caches).toString('base64url'))), 'utf8'), 'OLD TEST DATA OF AN EARLIER RUN', 'and that data is in the backup');
+  assert.ok(r.intact, 'the person\'s folders came back');
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('the real identifier\'s container, made by the run and refused on removal, is never test data left behind: exit code 6, loud (QA-01 H8c: the D-39 trap must not pass for a leftover)', async () => {
+  const r = await runCase('run-real-container-made', undefined, { app: TEST_COPY });
+  ended(r, 6);
+  assert.ok(r.out.includes('Could not restore app data: could not clear the test data in ' + path.join(CONTAINERS(r.home), 'com.pranavongole.plainsight') + ' (EPERM)'), 'the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /test data left behind/);
+  assert.doesNotMatch(r.out, /^Exit code: 8/m);
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 1$/m);
+  assert.ok(r.intact, 'the person\'s folders came back');
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('the real identifier\'s cookie file, made by the run and refused on removal, is never test data left behind either: a name that starts with the real identifier and a dot is not a test identifier (QA-01 H8d)', async () => {
+  const r = await runCase('run-real-cookies-made', undefined, { app: TEST_COPY });
+  ended(r, 6);
+  assert.ok(r.out.includes('Could not restore app data: could not clear the test data in ' + path.join(r.home, 'Library', 'HTTPStorages', 'com.pranavongole.plainsight.binarycookies') + ' (EPERM)'), 'the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /test data left behind/);
+  assert.doesNotMatch(r.out, /^Exit code: 8/m);
+  assert.ok(r.intact, 'the person\'s folders came back');
+});
+test('a locked screen at the start does not keep a suite that does not need it unlocked from running: the run starts and passes (QA-01 H13b)', async () => {
+  const r = await runCase('run-locked-not-needed');
+  ended(r, 0);
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 0$/m, 'the child\'s output:\n' + r.out);
+  clean(r);
+});
+test('the screen locking during a run that needs it unlocked stops the run: exit code 3, the later test not run, the data back, the lock released (QA-01 H22, the Delivery Manager\'s AT-H1, DM-246 HL1)', async () => {
+  const r = await runCase('run-locks-midway');
+  ended(r, 3);
+  assert.match(r.out, /^stop - a test during which the screen locks \(the screen locked during the run\)$/m, 'the child\'s output:\n' + r.out);
+  assert.match(r.out, /^skip - a later test \(not run: the screen locked during the run\)$/m);
+  assert.match(r.out, /^0 passed, 0 failed, 2 not run, 2 total\. Errors: 0$/m);
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('a window on-screen for the whole first wait that never meets it is the app\'s failure, not a locked screen: exit code 1 (QA-01 H26, DISH-G-70 R1)', async () => {
+  const r = await runCase('run-onscreen-unmatched');
+  ended(r, 1);
+  assert.match(r.out, /^FAIL - a launch waits for two windows on screen$/m, 'the child\'s output:\n' + r.out);
+  assert.match(r.out, /timed out after 700 ms waiting for two windows/, 'the wait\'s own timeout is the failure');
+  assert.doesNotMatch(r.out, /every window is off-screen/);
+  clean(r);
+});
+test('a window on-screen and then lost before the first wait is met is a failure as well, not a not-run stop (the Delivery Manager\'s AT-H2, DISH-G-70 R1)', async () => {
+  const r = await runCase('run-onscreen-then-lost');
+  ended(r, 1);
+  assert.match(r.out, /^FAIL - a launch waits for its first window$/m, 'the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /every window is off-screen/);
+  clean(r);
+});
+test('a window of the document\'s size on another layer, off-screen, is not the document window: the app\'s failure, exit code 1 (QA-01 H28, DISH-G-70 R2)', async () => {
+  const r = await runCase('run-big-window-other-layer');
+  ended(r, 1);
+  assert.match(r.out, /^FAIL - a launch waits for its first window$/m, 'the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /every window is off-screen/);
   clean(r);
 });
 
