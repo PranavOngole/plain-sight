@@ -584,6 +584,34 @@ test('makeTestCopy refuses a copy whose identifier is not this copy\'s test iden
   assert.equal(left, false, 'no copy is left');
 });
 
+// QA-G-39 (QA-01's P1.5l and P1.5f in wave-g/qa/scripts/app/r8_infra_adv.mjs,
+// each with a signing stand-in or a read-back that changes the copy after it
+// is signed): a good test copy under another test identifier than its
+// stamp's passes the launch guard, and freshStart would then register the
+// wrong folders for the run's end, so that copy's container would be neither
+// cleared nor named as left behind (QA-01's K55); and a copy that reads back
+// with fewer entitlements than the original's is not the app under test
+// either (the case above has one more).
+test('makeTestCopy refuses a copy under another test identifier than its stamp\'s, which the launch guard lets through, and removes it (QA-G-39; QA-01\'s P1.5l)', () => {
+  const other = testIdentifier(999);
+  const { failure, copy, left } = readBack('readback-other-test-id', 1761000025, () => ({
+    sign: (made) => execFileSync('plutil', ['-replace', 'CFBundleIdentifier', '-string', other, path.join(made, 'Contents', 'Info.plist')])
+  }));
+  assert.ok(failure, 'a copy under ' + other + ' is refused');
+  assert.equal(failure.message, 'the identifier is ' + other, 'with that one problem');
+  assert.equal(failure.removal, 'the unfinished copy was removed: ' + copy);
+  assert.equal(left, false, 'no copy is left');
+});
+test('makeTestCopy refuses a copy whose signature reads back with fewer entitlements than the original\'s, and removes it (QA-G-39; QA-01\'s P1.5f)', () => {
+  const { failure, copy, left } = readBack('readback-fewer', 1761000026, (source) => ({
+    readFacts: (app) => bundleFacts(app, { codesign: codesignSaying(app === source ? sandboxed : plist({ [SANDBOX]: true })) })
+  }));
+  assert.ok(failure, 'a copy with the sandbox entitlement alone is refused');
+  assert.match(failure.message, /^the entitlements differ from the original's: \{"com\.apple\.security\.app-sandbox":true\} against \{[^;]*\}$/, 'with that one problem: ' + failure.message);
+  assert.equal(failure.removal, 'the unfinished copy was removed: ' + copy);
+  assert.equal(left, false, 'no copy is left');
+});
+
 // DISH-G-81 G5: the copy script's own report (main()) of a copy the
 // read-back refused gives the removal's outcome on a line of its own: the
 // copy was removed, or it could not be and is to be removed by hand. With
