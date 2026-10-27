@@ -34,9 +34,9 @@
 // 7 before the run when it refuses the bundle. A run without the
 // Accessibility permission for the program running it does not start and
 // ends with 1; a run stopped by Ctrl+C or a kill puts everything back and
-// ends with 130. The last lines of a run list any test data left behind and
-// every test container on the Mac by name (never opened), the summary and
-// the exit code.
+// ends with 130. The last lines of a run that starts list any test data left
+// behind and every test container on the Mac by name (never opened), the
+// summary and the exit code.
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, webcrypto } from 'node:crypto';

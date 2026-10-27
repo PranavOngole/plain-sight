@@ -288,7 +288,7 @@ if (process.argv[2] === '--child') {
       await runSuite([{ name: 'a test that must not run', fn: async () => { throw new Error('the run started on a locked screen'); } }]);
     },
     // A launch's window listed only off-screen for the whole first wait, as
-    // on 26 October with the screen locked (release-run-1's listings: AppKit's
+    // on 26 October with the screen locked (e2e-run-1's listings: AppKit's
     // 500 by 500 helper and the 980 by 747 document window, both off-screen).
     async 'run-offscreen'() {
       fake.windows = [HELPER, { height: 747, layer: 0, onscreen: false, width: 980, x: 230, y: 60 }];
