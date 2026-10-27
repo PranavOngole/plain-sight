@@ -21,12 +21,21 @@ const unhandled = [];
 process.on('unhandledRejection', (err) => { unhandled.push(String(err && err.message ? err.message : err)); });
 const HTML = readFileSync(path.join(ROOT, 'index.html'), 'utf8');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Waits until fn() holds, for at most ms.
+async function until(fn, what, ms = 3000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    if (fn()) return;
+    await sleep(5);
+  }
+  throw new Error('timed out after ' + ms + ' ms waiting for ' + what);
+}
 const STAMP = /^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}$/;
 
 // A fake adapter with the same surface as desktop/adapter.js. It records
 // every call; files is the set of names already in the folder, so the
 // counter rule can be checked from the page's side.
-function fakeNative({ saved = null, pick = { name: 'Build_Test_1' }, failPick = false, failForget = false, failWrite = false, failDownload = false, cancelDownload = false, downloadAnswer = null, writeGate = null } = {}) {
+function fakeNative({ saved = null, pick = { name: 'Build_Test_1' }, failPick = false, failForget = false, failWrite = false, failDownload = false, cancelDownload = false, downloadAnswer = null, writeGate = null, downloadGate = null } = {}) {
   const calls = [];
   const files = new Set();
   let quit = null;
@@ -56,6 +65,7 @@ function fakeNative({ saved = null, pick = { name: 'Build_Test_1' }, failPick = 
       // As the app does (folder.rs): the save panel's name, or null when it was cancelled (D-49).
       saveDownload: async (name, text) => {
         calls.push(['saveDownload', name, text]);
+        if (downloadGate) await downloadGate;   // the save panel still open, until the test lets it answer
         if (failDownload) throw new Error('Could not save the file: Operation not permitted');
         if (cancelDownload) return null;
         return downloadAnswer || name;
@@ -542,23 +552,31 @@ test('in the app Esc, the ten-minute wipe and the quit keep no copy of the last 
       assert.equal(native.unsaved(), true, 'a folder Save that lands after Esc keeps no copy of the text');
     } finally { p.close(); }
   }
-  // An encrypted Save whose key is still deriving when Esc comes: the file is written, and nothing is kept.
-  {
-    const native = fakeNative();
-    const p = await loaded(native);
+  // A Save through the panel, plain and encrypted, whose panel is still open
+  // when Esc comes: the file is written once the panel answers, and nothing
+  // is kept. (The panel is held open here, since the key of an encrypted
+  // Save derives in a few milliseconds on a fast Mac: a wait would let the
+  // Save land before Esc.)
+  for (const mode of ['txt', 'sight']) {
+    let answer = null;
+    const native = fakeNative({ downloadGate: new Promise((resolve) => { answer = resolve; }) });
+    const p = await loaded(native, { 'plainSight.saveMode': mode });
     try {
       p.type('abc');
       p.$('#btn-save').click();
-      await p.settle(30);
-      p.$('#pw-input').value = 'a long enough password';
-      p.$('#pw-ok').click();
-      await p.settle(30);   // the Save has taken the text and its key is deriving
+      if (mode === 'sight') {
+        await p.settle(30);
+        p.$('#pw-input').value = 'a long enough password';
+        p.$('#pw-ok').click();
+      }
+      await until(() => native.calls.some((c) => c[0] === 'saveDownload'), 'the save panel, ' + mode);
       p.press('Escape');
-      await p.settle(900);
-      assert.equal(p.toast(), 'Saved', 'the encrypted Save went on after Esc, as it always has');
-      assert.match(native.calls.find((c) => c[0] === 'saveDownload')[1], /\.sight$/);
+      assert.equal(await p.real(), '', mode + ': Esc emptied the page while the panel was open');
+      answer();
+      await p.settle(80);
+      assert.equal(p.toast(), mode === 'sight' ? 'Saved' : 'Saved ' + native.calls.find((c) => c[0] === 'saveDownload')[1], mode + ': the Save went on after Esc, as it always has');
       p.type('abc');
-      assert.equal(native.unsaved(), true, 'an encrypted Save that lands after Esc keeps no copy of the text');
+      assert.equal(native.unsaved(), true, mode + ': a Save through the panel that lands after Esc keeps no copy of the text');
       assert.deepEqual(p.errors, []);
     } finally { p.close(); }
   }
