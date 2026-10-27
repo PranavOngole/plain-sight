@@ -484,6 +484,13 @@
   // The hidden buffer. It lives only in this closure. It is written to the
   // page only while peeking, and nothing on window returns it.
   let real = '';
+  // How many times the hidden buffer has changed. Every change goes through
+  // setReal: a typed character, Backspace, a replace by Open or by the vault,
+  // and the wipe. In the app the question before a quit compares it with the
+  // count at the last Save or Open (savedAt, below), so the page needs no copy
+  // of the text to answer it (QA-G-33).
+  let edits = 0;
+  function setReal(text) { real = text; edits += 1; }
 
   // ------------------------------------------------------------------
   // Cover text
@@ -782,7 +789,7 @@
   // ------------------------------------------------------------------
   function typeChar(ch) {
     if (peeking) endPeek();   // the real text never stays on screen while typing continues
-    real += ch;
+    setReal(real + ch);
     if (pendingTypo) { undoStep(); afterCorrection = true; }   // the correcting keystroke: the wrong letter goes away
     else advanceCover();
     updateHeader();
@@ -797,7 +804,7 @@
 
   function backspace() {
     if (peeking) endPeek();
-    if (real.length) real = real.slice(0, -lastCharLength(real));   // one character, never half an emoji (QA-F-04)
+    if (real.length) setReal(real.slice(0, -lastCharLength(real)));   // one character, never half an emoji (QA-F-04)
     if (steps.length) undoStep();
     updateHeader();
     vaultScheduleSave();
@@ -819,8 +826,8 @@
       vaultLock();
       vaultWrite(key, salt, iterations, text);
     }
-    real = '';
-    savedText = null;        // in the app, the copy of the last saved text goes with it (QA-G-31)
+    setReal('');
+    savedAt = null;          // in the app, the mark of the last Save or Open goes with the text (QA-G-31)
     lockedTextSalts = null;
     resetCover();
     if (peeking) realEl.textContent = '';
@@ -1055,7 +1062,7 @@
 
   // Replaces the hidden buffer with text and rebuilds the screen to match.
   function replaceReal(text) {
-    real = text;
+    setReal(text);
     lockedTextSalts = null;   // Open, or the chord, replaced the page: it no longer holds the copy plus more (QA-G-02)
     rebuildCoverForLength(real.length);
     if (peeking) realEl.textContent = real;
@@ -1282,14 +1289,17 @@
   // folder and a quit hook. No browser has it. The app keeps the folder's
   // path; the page only sees a { name } object in place of a handle.
   const native = window.PlainSightNative || null;
-  // In the app: the text as it was at the last successful Save or Open, so
-  // the question before a quit answers false while the page still holds
-  // exactly that text (DM-236). The web page keeps the browser's own prompt.
-  // A wipe (Esc, the ten-minute wipe, the quit) drops it with the text, and a
-  // Save or Open that a wipe overtook marks nothing when it lands, so nothing
-  // of the text stays in the page after Esc (QA-G-31).
-  let savedText = null;
-  function markSaved(text, wipes) { if (native && wipes === wipeCount) savedText = text; }
+  // In the app: the count of edits at which the page's text was what a file
+  // on disk now holds, from the last successful Save or Open, so the question
+  // before a quit answers false until the text changes again (DM-236). It is
+  // a count, never the text: the page keeps no copy of the text (QA-G-33). A
+  // Save marks the count it took at the click, so words typed while the file
+  // is written are still unsaved when it lands (DM-245); a Save or Open that
+  // a wipe (Esc, the ten-minute wipe, the quit) overtook marks nothing, and
+  // the wipe drops the mark (QA-G-31). The web page keeps the browser's own
+  // prompt.
+  let savedAt = null;
+  function markSaved(at, wipes) { if (native && wipes === wipeCount) savedAt = at; }
 
   function folderSupported() { return Boolean(native) || typeof window.showDirectoryPicker === 'function'; }
 
@@ -1558,6 +1568,7 @@
       // The text is the text on the page at the click, even if Esc follows
       // during the permission prompt.
       const text = real;
+      const at = edits;
       const wipes = wipeCount;
       const handle = folderHandle;
       const base = momentBase();   // named by the click, not by the end of the permission prompt
@@ -1566,7 +1577,7 @@
       if (folderHandle !== handle) { toast('The folder changed; press Save again'); return; }
       try {
         const name = await folderWrite(plainContent(format, text), base, PLAIN_FORMATS[format].ext);
-        markSaved(text, wipes);
+        markSaved(at, wipes);
         toast('Saved ' + name + ' in ' + handle.name);
       } catch (err) {
         toast('Could not write to the folder');
@@ -1579,10 +1590,11 @@
       // password. Where it lands is the browser's download setting.
       const name = momentBase() + PLAIN_FORMATS[mode].ext;
       const text = real;   // the text at the click, which is what the file holds
+      const at = edits;
       const wipes = wipeCount;
       try {
         const saved = await downloadText(plainContent(mode, text), name, PLAIN_FORMATS[mode].type);
-        if (saved !== null) { markSaved(text, wipes); toast('Saved ' + saved); }   // null: the app's save panel was cancelled, so nothing to say
+        if (saved !== null) { markSaved(at, wipes); toast('Saved ' + saved); }   // null: the app's save panel was cancelled, so nothing to say
       } catch (err) {
         toast('Could not save');
       }
@@ -1592,12 +1604,12 @@
     const password = await askPassword('Choose a password for this file', 'The file cannot be opened without it. Longer is better.', 'Save');
     if (password === null) return;
     try {
-      const text = real;   // what exportEncrypted encrypts: the text as the password is confirmed
+      const at = edits;   // the count for the text exportEncrypted encrypts: the text as the password is confirmed
       const wipes = wipeCount;
       const json = await exportEncrypted(password);
       const slug = cover.tabTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'draft';
       if ((await downloadText(json, slug + '-' + fileStamp() + FILE_EXT)) === null) return;   // the app's save panel was cancelled
-      markSaved(text, wipes);
+      markSaved(at, wipes);
       toast('Saved');
     } catch (err) {
       toast('Could not save');
@@ -1632,7 +1644,7 @@
     if (password === null) return;
     try {
       await importEncrypted(parsed, password);
-      markSaved(real, wipes);   // the page now holds exactly what the file holds
+      markSaved(edits, wipes);   // the page now holds exactly what the file holds
       toast('Opened');
     } catch (err) {
       toast(err && err.message === 'Cancelled' ? 'Open cancelled' : 'Wrong password or damaged file');
@@ -1657,7 +1669,7 @@
       if (ok === null) return;
     }
     replaceReal(text);
-    markSaved(text, wipes);   // the page now holds exactly what the note holds
+    markSaved(edits, wipes);   // the page now holds exactly what the note holds
     toast('Opened');
   }
 
@@ -1918,9 +1930,10 @@
       for (const el of document.querySelectorAll('[data-app]')) el.textContent = el.dataset.app;
       native.onQuit(() => { wipe(); return writeChain; });
       // Before it quits, the app asks whether a quit would lose text: text on
-      // the page that no open vault keeps and that is not what the last Save
-      // or Open left on it (DM-236). It then shows "Quit without saving?".
-      native.onUnsavedText(() => real.length > 0 && !vaultOpen() && real !== savedText);
+      // the page that no open vault keeps and that changed since the last
+      // Save or Open (DM-236), told by the count of edits, not by a copy of
+      // the text (QA-G-33). It then shows "Quit without saving?".
+      native.onUnsavedText(() => real.length > 0 && !vaultOpen() && edits !== savedAt);
     }
     if (!storageGet(STORAGE.intro)) openIntro();
     else if (!cryptoAvailable()) toast(NO_CRYPTO_NOTICE);   // a return visit sees the notice too

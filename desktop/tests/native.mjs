@@ -76,13 +76,13 @@ function fakeNative({ saved = null, pick = { name: 'Build_Test_1' }, failPick = 
   };
 }
 
-async function loadPage({ native = null, storage = {} } = {}) {
+async function loadPage({ native = null, storage = {}, html = HTML } = {}) {
   const errors = [];
   const downloads = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on('jsdomError', (e) => errors.push('jsdomError: ' + e.message));
   virtualConsole.on('error', (...args) => errors.push('console.error: ' + args.join(' ')));
-  const dom = new JSDOM(HTML, {
+  const dom = new JSDOM(html, {
     runScripts: 'dangerously',
     url: 'http://localhost/',
     pretendToBeVisual: true,
@@ -130,6 +130,16 @@ async function loadPage({ native = null, storage = {} } = {}) {
 
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
+
+// The page with one line added after the declaration of the quit question's
+// mark, so a test can read the mark through the window: a count of edits, or
+// null. Only the tests load it; the page itself has no such line, and nothing
+// on window reads its state (README, "Your text is one variable in memory").
+const MARK = '  let savedAt = null;\n';
+function withMarkReader() {
+  assert.equal(HTML.split(MARK).length, 2, 'index.html declares the mark once: ' + JSON.stringify(MARK));
+  return HTML.replace(MARK, MARK + '  window.__testSavedAt = () => savedAt;\n');
+}
 
 // The page's Open button, as the file panel would answer it.
 function chooseFile(p, file) {
@@ -358,11 +368,13 @@ test('the page answers the app\'s question before a quit: text to lose only when
 });
 
 // After a successful Save or Open in the app the quit question answers false
-// while the page still holds exactly that text, which a file on disk now
-// holds too (DM-236); a keystroke or Backspace makes it true again, and a
-// cancelled panel, a refused write and "Could not save" leave it true. The
-// folder Save and the .sight Save through the panel are the Delivery
-// Manager's AT-01 and AT-02 (dm-appstore-2783e5d/adv/dm-native-adv.mjs),
+// until the text changes, since a file on disk then holds that text too
+// (DM-236); a keystroke or Backspace makes it true again, and so does typing
+// back to the saved words, since the page counts its edits instead of
+// keeping a copy of the saved text (QA-G-33: a needless question, the safe
+// direction); a cancelled panel, a refused write and "Could not save" leave
+// it true. The folder Save and the .sight Save through the panel are the
+// Delivery Manager's AT-01 and AT-02 (dm-appstore-2783e5d/adv/dm-native-adv.mjs),
 // adopted with the answer the fix sets: before it, both answered true, and
 // the sheet said the text had not been saved right after "Saved".
 test('in the app a successful Save or Open answers the quit question with false until the text changes; a cancelled panel, a refused write and a failed save keep it true (DM-236; AT-01, AT-02)', async () => {
@@ -381,7 +393,7 @@ test('in the app a successful Save or Open answers the quit question with false 
       p.press('Backspace');
       assert.equal(native.unsaved(), true, 'Backspace after the Save: the text differs from the file');
       p.type('d');
-      assert.equal(native.unsaved(), false, 'the same text again is the saved text');
+      assert.equal(native.unsaved(), true, 'typed back to the saved words, the text has still changed since the Save: the page counts edits, not the saved text, so a quit asks (QA-G-33)');
       p.type('!');
       assert.equal(native.unsaved(), true, 'one more keystroke: unsaved again');
       p.press('Escape');
@@ -467,16 +479,18 @@ test('in the app a successful Save or Open answers the quit question with false 
 // QA-G-31: in the app the page kept the text of the last successful Save or
 // Open after Esc, the ten-minute wipe and the quit, since wipe() never
 // cleared it, so a full copy of the last saved text stayed in the page's
-// memory until the next Save, Open or the window closed. That copy lives
-// inside the page's script, out of a test's reach, so its absence is shown by
-// its one effect: after a wipe, the same words typed again are text a quit
-// would lose (QA-01's repro: Save "abc", Esc, type "abc"; true is the answer
-// the fix sets, false before it). A Save still being written when Esc comes
-// marks nothing when it lands, so it cannot bring the copy back after the
-// wipe either.
+// memory until the next Save, Open or the window closed. Since QA-G-33 the
+// page keeps no copy at all, only a count of its edits at the last Save or
+// Open, which the wipe drops; the cases below keep their intent: after a
+// wipe, the same words typed again are text a quit would lose (QA-01's
+// repro: Save "abc", Esc, type "abc"; true is the answer the fix sets, false
+// before it). A Save still being written when Esc comes marks nothing when it
+// lands: the mark, read through the test's own copy of the page with one
+// line added (withMarkReader), stays null. Through the question alone that
+// rule cannot show, since the wipe also moves the count on.
 test('in the app Esc, the ten-minute wipe and the quit keep no copy of the last saved text: the same words typed again would be lost, and a Save that lands after Esc marks nothing (QA-G-31)', async () => {
-  const loaded = async (native, storage = {}) => {
-    const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1', ...storage } });
+  const loaded = async (native, storage = {}, html = HTML) => {
+    const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1', ...storage }, html });
     await p.settle(50);
     return p;
   };
@@ -538,7 +552,7 @@ test('in the app Esc, the ten-minute wipe and the quit keep no copy of the last 
   {
     let land = null;
     const native = fakeNative({ saved: { name: 'Notes' }, writeGate: new Promise((resolve) => { land = resolve; }) });
-    const p = await loaded(native);
+    const p = await loaded(native, {}, withMarkReader());
     try {
       p.type('abc');
       p.$('#btn-save').click();
@@ -548,6 +562,7 @@ test('in the app Esc, the ten-minute wipe and the quit keep no copy of the last 
       land();
       await p.settle(80);
       assert.match(p.toast(), /^Saved .*\.txt in Notes$/, 'the write landed after Esc: ' + p.toast());
+      assert.equal(p.w.__testSavedAt(), null, 'the folder Save that landed after Esc marked nothing');
       p.type('abc');
       assert.equal(native.unsaved(), true, 'a folder Save that lands after Esc keeps no copy of the text');
     } finally { p.close(); }
@@ -560,7 +575,7 @@ test('in the app Esc, the ten-minute wipe and the quit keep no copy of the last 
   for (const mode of ['txt', 'sight']) {
     let answer = null;
     const native = fakeNative({ downloadGate: new Promise((resolve) => { answer = resolve; }) });
-    const p = await loaded(native, { 'plainSight.saveMode': mode });
+    const p = await loaded(native, { 'plainSight.saveMode': mode }, withMarkReader());
     try {
       p.type('abc');
       p.$('#btn-save').click();
@@ -575,11 +590,142 @@ test('in the app Esc, the ten-minute wipe and the quit keep no copy of the last 
       answer();
       await p.settle(80);
       assert.equal(p.toast(), mode === 'sight' ? 'Saved' : 'Saved ' + native.calls.find((c) => c[0] === 'saveDownload')[1], mode + ': the Save went on after Esc, as it always has');
+      assert.equal(p.w.__testSavedAt(), null, mode + ': the Save through the panel that landed after Esc marked nothing');
       p.type('abc');
       assert.equal(native.unsaved(), true, mode + ': a Save through the panel that lands after Esc keeps no copy of the text');
       assert.deepEqual(p.errors, []);
     } finally { p.close(); }
   }
+});
+
+// QA-G-33: the page kept a full copy of the text of the last Save or Open to
+// answer the quit question; it outlived Backspace to an empty page, a
+// partial deletion kept it whole, and the ten-minute wipe never arms on an
+// empty page, so the copy could stay in memory until the quit (QA-01,
+// r7_wk_adv.mjs D1 to D3). The page now keeps a count of its edits instead:
+// a Save marks the count it took at its click, an Open the count after the
+// replace, and a quit asks whenever the count moved since. QA-01's repro:
+// Save "abc", Backspace three times, type "abc": true (534f3cc said false).
+// Words typed while a Save is still being written stay unsaved when it lands,
+// on all three Save paths: the mark is the count at the click, not at the
+// landing (QA-G-35; the Delivery Manager's AT-D2 and AT-D3, DM-245).
+test('in the app the quit question counts edits and keeps no copy of the saved text: Save "abc", three Backspaces and "abc" again is text a quit would lose, and words typed while a Save is written stay unsaved after it lands (QA-G-33, QA-G-35, DM-245)', async () => {
+  const loaded = async (native, storage = {}, html = HTML) => {
+    const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1', ...storage }, html });
+    await p.settle(50);
+    return p;
+  };
+  // QA-01's repro, through a folder Save.
+  {
+    const native = fakeNative({ saved: { name: 'Notes' } });
+    const p = await loaded(native);
+    try {
+      p.type('abc');
+      p.$('#btn-save').click();
+      await p.settle(80);
+      assert.match(p.toast(), /^Saved .*\.txt in Notes$/, 'the folder write happened: ' + p.toast());
+      assert.equal(native.unsaved(), false, 'right after the Save nothing would be lost');
+      for (let i = 0; i < 3; i++) p.press('Backspace');
+      assert.equal(await p.real(), '', 'three Backspaces emptied the page');
+      assert.equal(native.unsaved(), false, 'an empty page has nothing to lose');
+      p.type('abc');
+      assert.equal(native.unsaved(), true, 'the saved words typed again after Backspace to an empty page are text a quit would lose: the page kept no copy to compare them with');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+  // The mark itself, read through the test's own copy of the page: a count
+  // after the Save and after the Backspaces, never the text, and null after Esc.
+  {
+    const native = fakeNative({ saved: { name: 'Notes' } });
+    const p = await loaded(native, {}, withMarkReader());
+    try {
+      p.type('abc');
+      p.$('#btn-save').click();
+      await p.settle(80);
+      assert.equal(typeof p.w.__testSavedAt(), 'number', 'after the Save the mark is a count of edits, not the text: ' + JSON.stringify(p.w.__testSavedAt()));
+      for (let i = 0; i < 3; i++) p.press('Backspace');
+      assert.equal(typeof p.w.__testSavedAt(), 'number', 'and still a count once Backspace has emptied the page');
+      p.press('Escape');
+      assert.equal(p.w.__testSavedAt(), null, 'Esc drops the mark');
+    } finally { p.close(); }
+  }
+  // A partial deletion, through a panel Save: three Backspaces, then the letters typed back.
+  {
+    const native = fakeNative();
+    const p = await loaded(native, { 'plainSight.saveMode': 'txt' });
+    try {
+      p.type('abcdef');
+      p.$('#btn-save').click();
+      await p.settle(80);
+      assert.equal(native.unsaved(), false, 'right after the panel Save nothing would be lost');
+      for (let i = 0; i < 3; i++) p.press('Backspace');
+      assert.equal(native.unsaved(), true, 'half the text deleted: text a quit would lose');
+      p.type('def');
+      assert.equal(native.unsaved(), true, 'typed back to the saved words: the question is still asked, the safe direction');
+    } finally { p.close(); }
+  }
+  // Words typed while a folder write is still under way (writeGate).
+  {
+    let land = null;
+    const native = fakeNative({ saved: { name: 'Notes' }, writeGate: new Promise((resolve) => { land = resolve; }) });
+    const p = await loaded(native);
+    try {
+      p.type('abc');
+      p.$('#btn-save').click();
+      await until(() => native.calls.some((c) => c[0] === 'writeTextFile'), 'the folder write');
+      p.type('Z');
+      land();
+      await p.settle(80);
+      assert.match(p.toast(), /^Saved .*\.txt in Notes$/, 'the write landed: ' + p.toast());
+      assert.equal(native.calls.find((c) => c[0] === 'writeTextFile')[3], 'abc', 'the file holds the text at the click');
+      assert.equal(native.unsaved(), true, 'folder: the Z typed while the write was under way is not in the file, so a quit would lose it');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+  // The same with the save panel still open, plain and encrypted (downloadGate).
+  for (const mode of ['txt', 'sight']) {
+    let answer = null;
+    const native = fakeNative({ downloadGate: new Promise((resolve) => { answer = resolve; }) });
+    const p = await loaded(native, { 'plainSight.saveMode': mode });
+    try {
+      p.type('abc');
+      p.$('#btn-save').click();
+      if (mode === 'sight') {
+        await p.settle(30);
+        p.$('#pw-input').value = 'a long enough password';
+        p.$('#pw-ok').click();
+      }
+      await until(() => native.calls.some((c) => c[0] === 'saveDownload'), 'the save panel, ' + mode);
+      p.type('Z');
+      answer();
+      await p.settle(80);
+      const call = native.calls.find((c) => c[0] === 'saveDownload');
+      assert.equal(p.toast(), mode === 'sight' ? 'Saved' : 'Saved ' + call[1], mode + ': the Save landed');
+      if (mode === 'txt') assert.equal(call[2], 'abc', 'txt: the file holds the text at the click');
+      assert.equal(native.unsaved(), true, mode + ': the Z typed while the save panel was open is not in the file, so a quit would lose it');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+});
+
+// QA-G-33, read in the page's source: no second copy of the hidden text. No
+// savedText is left; the hidden buffer is written only by setReal, which
+// counts each change; the count moves only there; and the quit question's
+// mark is set from a count (the count at a Save's click, or after an Open's
+// replace) and dropped by the wipe, never set from the text.
+test('the page keeps no second copy of the hidden text: no savedText, every change to the buffer counted by setReal, and the quit question\'s mark is a count, never the text (QA-G-33)', () => {
+  assert.equal(/\bsavedText\b/.test(HTML), false, 'index.html holds no savedText (onUnsavedText, the adapter\'s name, is another word)');
+  const script = HTML.slice(HTML.indexOf('<script>'), HTML.indexOf('</script>'));
+  const lineAt = (index) => script.slice(script.lastIndexOf('\n', index) + 1, script.indexOf('\n', index)).replace(/\s*\/\/.*$/, '').trim();
+  const writes = (name) => [...script.matchAll(new RegExp('(?<![.\\w$])' + name + '\\s*(?:\\+\\+|--|[-+*/]?=(?!=))', 'g'))].map((m) => lineAt(m.index));
+  const SET_REAL = 'function setReal(text) { real = text; edits += 1; }';
+  assert.deepEqual(writes('real'), ["let real = '';", SET_REAL], 'the hidden buffer is written only by setReal');
+  assert.deepEqual(writes('edits'), ['let edits = 0;', SET_REAL], 'the count moves only with the buffer');
+  const MARK_FN = 'function markSaved(at, wipes) { if (native && wipes === wipeCount) savedAt = at; }';
+  assert.deepEqual(writes('savedAt'), ['savedAt = null;', 'let savedAt = null;', MARK_FN], 'the mark is set only by markSaved and dropped by the wipe');
+  assert.deepEqual([...script.matchAll(/markSaved\(([^)]*)\)/g)].map((m) => m[1]), ['at, wipes', 'at, wipes', 'at, wipes', 'at, wipes', 'edits, wipes', 'edits, wipes'], 'the mark takes a count: a Save\'s count at its click, an Open\'s after the replace');
+  assert.equal(script.split('const at = edits;').length - 1, 3, 'each of the three Saves takes the count at its click');
+  assert.ok(script.includes('native.onUnsavedText(() => real.length > 0 && !vaultOpen() && edits !== savedAt);'), 'the quit question compares counts');
 });
 
 test('quitting erases the text and the screen like Esc', async () => {
