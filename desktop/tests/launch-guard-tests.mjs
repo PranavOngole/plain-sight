@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { OVERRIDE, REAL_ID, SANDBOX, bundleFacts, bundleIdentifier, refusal, verdict, webDataFolder } from './launch-guard.mjs';
-import { MANIFEST, SIGNATURE, TEST_NAME, copyUnsigned, sameEntitlements, testIdentifier } from './testcopy.mjs';
+import { MANIFEST, SIGNATURE, TEST_NAME, copyUnsigned, makeTestCopy, sameEntitlements, testIdentifier } from './testcopy.mjs';
 
 const ROOT = mkdtempSync(path.join(os.tmpdir(), 'plain-sight-launch-guard-'));
 
@@ -495,6 +495,115 @@ test('the read-back compares the entitlements exactly: the same keys and values 
   assert.equal(sameEntitlements(THREE, { ...THREE, [SANDBOX]: false }), false, 'a changed value');
   assert.equal(sameEntitlements({}, {}), true, 'none on both sides');
   assert.equal(sameEntitlements({ a: ['x', 'y'] }, { a: ['y', 'x'] }), false, 'an array keeps its order');
+});
+
+// DISH-G-81 G1 to G4, and the Delivery Manager's DM-251: makeTestCopy's
+// read-back refuses a copy unless it has this copy's test identifier, the
+// test name, no migration manifest and exactly the original's entitlements,
+// and the launch guard lets it through. Only the guard's refusal was held by
+// a test (M247f), so with any one of the other four checks removed every
+// suite passed (DISH's G1 to G4; for the entitlements also the Delivery
+// Manager's TC6, the copy compared with itself). One case per check, each
+// through an injected copy or readFacts that gets exactly that one thing
+// wrong: the copy is refused with that one problem, and removed.
+const readBack = (tag, stamp, options) => {
+  const source = fakeBundle('source-' + tag, REAL_ID, { manifest: true, signature: true });
+  const destination = path.join(ROOT, tag);
+  const copy = path.join(destination, TEST_NAME + '.app');
+  let failure = null;
+  try {
+    makeTestCopy(source, destination, stamp, { readFacts: (app) => bundleFacts(app, { codesign: codesignSaying(sandboxed) }), readEntitlements: () => sandboxed, sign: () => {}, ...options(source) });
+  } catch (err) { failure = err; }
+  return { failure, copy, left: existsSync(copy) };
+};
+// A copy as copyUnsigned makes it, with one more change to its Info.plist.
+const copyThen = (key, value) => (source, destination, stamp) => {
+  const made = copyUnsigned(source, destination, stamp);
+  execFileSync('plutil', ['-replace', key, '-string', value, path.join(made, 'Contents', 'Info.plist')]);
+  return made;
+};
+test('makeTestCopy refuses a copy that still holds the migration manifest, and removes it (DISH-G-81 G1)', () => {
+  const { failure, copy, left } = readBack('readback-manifest', 1761000021, () => ({
+    copy: (source, destination, stamp) => { const made = copyUnsigned(source, destination, stamp); writeFileSync(path.join(made, MANIFEST), plist({ Move: 'fake' })); return made; }
+  }));
+  assert.ok(failure, 'a copy that still holds the migration manifest is refused');
+  assert.equal(failure.message, 'the migration manifest is still in the copy', 'with that one problem');
+  assert.equal(failure.removal, 'the unfinished copy was removed: ' + copy);
+  assert.equal(left, false, 'no copy is left');
+});
+test('makeTestCopy refuses a copy under another name than the test name, and removes it (DISH-G-81 G2)', () => {
+  const { failure, copy, left } = readBack('readback-name', 1761000022, () => ({ copy: copyThen('CFBundleName', 'Plain Sight') }));
+  assert.ok(failure, 'a copy named "Plain Sight" is refused');
+  assert.equal(failure.message, 'the name is Plain Sight', 'with that one problem');
+  assert.equal(failure.removal, 'the unfinished copy was removed: ' + copy);
+  assert.equal(left, false, 'no copy is left');
+});
+// The Delivery Manager's AT-T1 (dm-appstore-a3387d9/adv/tc/
+// dm-maketestcopy-adv.mjs): the copy's signature reads back with one more
+// entitlement, com.apple.security.network.client, as a signing step that
+// picked up the probe's entitlements would give it; the suites would then run
+// on a copy that is not the app under test.
+test('makeTestCopy refuses a copy whose signature reads back with entitlements other than the original\'s (one more, network.client), and removes it (DISH-G-81 G3; the Delivery Manager\'s AT-T1, DM-251)', () => {
+  const { failure, copy, left } = readBack('readback-entitlements', 1761000023, (source) => ({
+    readFacts: (app) => bundleFacts(app, { codesign: codesignSaying(app === source ? sandboxed : plist({ ...THREE, 'com.apple.security.network.client': true })) })
+  }));
+  assert.ok(failure, 'a copy with one more entitlement is refused');
+  assert.match(failure.message, /^the entitlements differ from the original's: \{.*"com\.apple\.security\.network\.client":true.*\} against \{[^;]*\}$/, 'with that one problem: ' + failure.message);
+  assert.equal(failure.removal, 'the unfinished copy was removed: ' + copy);
+  assert.equal(left, false, 'no copy is left');
+});
+test('makeTestCopy refuses a copy whose identifier is not this copy\'s test identifier, and removes it (DISH-G-81 G4)', () => {
+  const { failure, copy, left } = readBack('readback-identifier', 1761000024, () => ({ copy: copyThen('CFBundleIdentifier', 'com.pranavongole.plainsight.notatest') }));
+  assert.ok(failure, 'a copy under an identifier that is not a test identifier is refused, though the launch guard would let it through');
+  assert.equal(failure.message, 'the identifier is com.pranavongole.plainsight.notatest', 'with that one problem');
+  assert.equal(failure.removal, 'the unfinished copy was removed: ' + copy);
+  assert.equal(left, false, 'no copy is left');
+});
+
+// DISH-G-81 G5: the copy script's own report (main()) of a copy the
+// read-back refused gives the removal's outcome on a line of its own: the
+// copy was removed, or it could not be and is to be removed by hand. With
+// that line dropped every suite passed. The script runs here as
+// `npm run app:testcopy` runs it, on a fake bundle, with a stand-in codesign
+// first on its PATH (ditto and plutil are the real ones): the stand-in reads
+// the copy's signature back with the real identifier, so the launch guard
+// refuses the copy, and it signs nothing. In the second run a file of the
+// source is marked immutable (chflags uchg), which ditto carries into the
+// copy, so the removal cannot finish.
+test('the copy script reports a copy the read-back refused with the removal\'s outcome: removed, or, when the removal failed too, the copy to remove by hand (DISH-G-81 G5)', () => {
+  const bin = path.join(ROOT, 'cli-bin');
+  mkdirSync(bin, { recursive: true });
+  const entitlements = path.join(ROOT, 'cli-entitlements.plist');
+  writeFileSync(entitlements, sandboxed);
+  writeFileSync(path.join(bin, 'codesign'), '#!/bin/sh\ncase "$1" in\n  -dv) echo "Identifier=' + REAL_ID + '" >&2; exit 0 ;;\n  -d) cat "' + entitlements + '"; exit 0 ;;\n  --force|--verify) exit 0 ;;\nesac\nexit 1\n');
+  chmodSync(path.join(bin, 'codesign'), 0o755);
+  const script = (tag, immutable) => {
+    const source = fakeBundle('cli-' + tag, REAL_ID, { manifest: true, signature: true });
+    const destination = path.join(ROOT, 'cli-' + tag + '-copies');
+    const copy = path.join(destination, TEST_NAME + '.app');
+    if (immutable) execFileSync('chflags', ['uchg', path.join(source, 'Contents', 'Resources', 'icon.icns')]);
+    try {
+      const env = { ...process.env, PATH: bin + ':' + process.env.PATH, PLAIN_SIGHT_APP: source };
+      const r = spawnSync(process.execPath, [path.join(TESTS, 'testcopy.mjs'), destination], { encoding: 'utf8', env });
+      return { r, lines: r.stdout.trim().split('\n'), copy, left: existsSync(copy) };
+    } finally {
+      execFileSync('chflags', ['-R', 'nouchg', source]);
+      if (existsSync(destination)) execFileSync('chflags', ['-R', 'nouchg', destination]);
+    }
+  };
+  const refused = /^testcopy: the launch guard would refuse the copy: .* is sandboxed under the real bundle identifier com\.pranavongole\.plainsight .*\. Errors: 1$/;
+  const removed = script('removed', false);
+  assert.equal(removed.r.status, 1, 'exit code 1; output: ' + removed.r.stdout + removed.r.stderr);
+  assert.match(removed.lines[0], refused, 'the refusal, with its Errors line');
+  assert.equal(removed.lines[1], 'the unfinished copy was removed: ' + removed.copy, 'then the removal, on a line of its own');
+  assert.equal(removed.lines.length, 2, 'and nothing else: ' + removed.r.stdout);
+  assert.equal(removed.left, false, 'no copy is left');
+  const kept = script('kept', true);
+  assert.equal(kept.r.status, 1, 'exit code 1; output: ' + kept.r.stdout + kept.r.stderr);
+  assert.match(kept.lines[0], refused, 'the refusal, with its Errors line');
+  assert.match(kept.lines[1] || '', /^the unfinished copy could not be removed \([^)]+\): remove it by hand: /, 'then why the removal failed: ' + kept.r.stdout);
+  assert.ok((kept.lines[1] || '').endsWith('remove it by hand: ' + kept.copy), 'and the copy to remove by hand');
+  assert.equal(kept.left, true, 'what macOS kept is still there, as the report says');
 });
 
 let passed = 0;

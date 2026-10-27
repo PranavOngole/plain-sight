@@ -121,6 +121,23 @@ if (process.argv[2] === '--child') {
       assert.throws(() => h.clearTestData(), /not moved aside/, 'refused');
       intact();
     },
+    // DISH-G-81 F2: freshStart makes a fresh copy only while the app's data
+    // is moved aside, since the copy's folders join that backup's restore:
+    // before the move aside and after the restore it throws, and the copy
+    // script is never asked.
+    'fresh-start-phases'() {
+      const asked = [];
+      const makeCopy = (source, destination, stamp) => { asked.push(stamp); return { made: { app: path.join(destination, 'Plain Sight test copy.app'), identifier: 'com.pranavongole.plainsight.testcopy-' + stamp, sandboxed: true } }; };
+      const facts = { app: '/nowhere/Plain Sight test copy.app', identifier: TEST_COPY, sandboxed: true };
+      assert.throws(() => h.freshStart(facts, { makeCopy, now: () => 1761000050000 }), /the app data is not moved aside \(untouched\), so no fresh copy is made/, 'refused before the move aside');
+      h.backupAppData();
+      h.restoreAppData();
+      intact();
+      assert.throws(() => h.freshStart(facts, { makeCopy, now: () => 1761000050000 }), /the app data is not moved aside \(restored\), so no fresh copy is made/, 'refused after the restore');
+      assert.deepEqual(asked, [], 'the copy script was never asked');
+      assert.equal(existsSync(path.join(process.env.PLAIN_SIGHT_EVIDENCE, 'fresh-copies')), false, 'and nothing was made in the evidence folder');
+      assert.deepEqual(backups(), [], 'no backup folder');
+    },
     'restore-while-moving'() {
       let moves = 0;
       let refusal = null;
@@ -616,6 +633,12 @@ test('a clear of the test data before any backup is refused and changes nothing 
   const r = await runCase('clear-before-backup');
   ended(r, 0);
   assert.match(r.out, /RESULT ok/);
+  clean(r);
+});
+test('freshStart makes no fresh copy before the app\'s data is moved aside or after it is put back: it throws, and the copy script is never asked (DISH-G-81 F2)', async () => {
+  const r = await runCase('fresh-start-phases');
+  ended(r, 0);
+  assert.match(r.out, /RESULT ok/, 'the child\'s output:\n' + r.out);
   clean(r);
 });
 test('a restore asked for while the backup is incomplete is refused and names what to put back, decoded, and from where (QA-01 X2)', async () => {

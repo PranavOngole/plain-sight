@@ -381,6 +381,21 @@ test('the real-key suite never clears a sandboxed copy\'s data mid-run: each tes
   assert.match(text, /^  const dir = webDataFolder\(HOME, current\);$/m, 'the vault\'s record is looked for in the launched bundle\'s web data');
 });
 
+// DISH-G-81 G7: app.mjs's instances() finds the running copies of every
+// bundle the run opened, the bundle under test and each fresh copy (DM-247).
+// Looking in the bundle under test only, a launch of a fresh copy would never
+// find its process and its copies would never be ended; only a GUI run would
+// show that, so the loop is pinned here.
+test('the real-key suite looks for running copies in every bundle the run opened, so a fresh copy\'s process is found and ended (DM-247, DISH-G-81 G7)', () => {
+  const text = read(path.join(DESKTOP, 'tests'), 'app.mjs');
+  assert.match(text, /^const opened = \[BUNDLE\.app\];$/m, 'the run starts with the bundle under test');
+  const start = text.indexOf('function instances() {');
+  assert.ok(start >= 0, 'app.mjs has instances()');
+  const body = text.slice(start, text.indexOf('\n}\n', start));
+  assert.ok(body.includes('\n  for (const bundle of opened) {\n'), 'instances() looks in every bundle the run opened');
+  assert.ok(body.includes("execFileSync('pgrep', ['-f', path.join(bundle, 'Contents/MacOS/plain-sight')]"), 'by each bundle\'s own executable');
+});
+
 // DM-241: macOS titles the app menu with the bundle's name, which is "Plain
 // Sight test copy" on the copy the two suites run on, while the items keep
 // the app's own words ("About Plain Sight", "Quit Plain Sight"). So neither
