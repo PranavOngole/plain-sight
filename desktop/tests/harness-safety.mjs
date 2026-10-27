@@ -185,7 +185,7 @@ if (process.argv[2] === '--child') {
     },
     async 'handlers-before-backup'() {
       let seen = null;
-      onRename = () => { if (!seen) seen = ['SIGINT', 'SIGTERM', 'SIGHUP'].map((s) => process.listenerCount(s)); };
+      onRename = () => { if (!seen) seen = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'].map((s) => process.listenerCount(s)); };
       h.watchSignalsThenBackup(cleanup);
       onRename = null;
       assert.notEqual(seen, null, 'a folder was moved');
@@ -316,6 +316,15 @@ if (process.argv[2] === '--child') {
         { name: 'a short test', fn: async () => { testData(dirs[0]); console.log('IN TEST'); await new Promise((r) => setTimeout(r, 1000)); } },
         { name: 'a test after the signal', fn: async () => { console.log('TEST AFTER THE SIGNAL'); } }
       ], { after: slowAfter });
+    },
+    // QA-01's observation 2 (its P3.8 in r8_infra_adv.mjs): SIGQUIT, which
+    // Ctrl+backslash sends, was not handled, so it ended the run at once with
+    // the data in appdata-backup and the lock left. It is handled as SIGINT is.
+    async 'run-sigquit'() {
+      await runSuite([
+        { name: 'a test during which SIGQUIT comes', fn: async () => { testData(dirs[0]); console.log('IN TEST'); await new Promise((r) => setTimeout(r, 1000)); } },
+        { name: 'a test after the signal', fn: async () => { console.log('TEST AFTER THE SIGNAL'); } }
+      ]);
     },
     // PO-R8-1: the cleanup runs once and every caller waits for that one; no
     // case showed the once, so with each caller running a cleanup of its own
@@ -874,6 +883,19 @@ test('the cleanup runs once: a Ctrl+C while the run\'s own cleanup waits in afte
   const putBack = lines.filter((l) => l.startsWith('PUT BACK ')).map((l) => l.slice('PUT BACK '.length)).sort();
   assert.deepEqual(putBack, r.dirs.map((d) => path.relative(r.home, d)).sort(), 'every folder was put back from the backup, once');
   assert.equal(lines.filter((l) => l === deferred).length, 2, 'both signals were reported and deferred');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+
+// QA-01's observation 2 (its P3.8): a SIGQUIT during a test, as Ctrl+backslash
+// sends it, ended the run by the signal itself, with the data aside and the
+// lock left; it is handled now, as a Ctrl+C is.
+test('a SIGQUIT (Ctrl+backslash) during a test is handled as a Ctrl+C is: the data back, the lock released, no later test, exit code 130 (QA-01\'s observation 2 and P3.8)', async () => {
+  let sent = false;
+  const r = await runCase('run-sigquit', (out, child) => { if (!sent && out.includes('IN TEST')) { sent = true; child.kill('SIGQUIT'); } });
+  assert.ok(sent, 'the signal was sent during the test; the child\'s output:\n' + r.out);
+  ended(r, 130);
+  assert.doesNotMatch(r.out, /TEST AFTER THE SIGNAL/, 'no test starts after it');
   clean(r);
   assert.equal(r.lock, false, 'the lock is released');
 });

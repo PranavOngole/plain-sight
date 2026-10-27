@@ -38,7 +38,8 @@
 // 5 (another GUI run holds the lock), and launch-guard.mjs ends a suite with
 // 7 before the run when it refuses the bundle. A run without the
 // Accessibility permission for the program running it does not start and
-// ends with 1; a run stopped by Ctrl+C or a kill puts everything back and
+// ends with 1; a run stopped by a signal (SIGINT from Ctrl+C, SIGQUIT from
+// Ctrl+backslash, SIGTERM or SIGHUP) puts everything back and
 // ends with 130, and a signal that comes while the run is putting things back,
 // or a second one, waits for that to finish and is reported, not obeyed
 // (DM-248). Once a signal has come or the cleanup has begun, nothing launches
@@ -448,8 +449,11 @@ export function restoreAppData() {
 // a cleanup that ever ran with the backup incomplete is refused by
 // restoreAppData, which clears nothing and names what to put back. Exported
 // for the harness checks, which run it against a fake home.
-// Once a signal has come, or once the run's own cleanup has begun, a further
-// SIGINT, SIGTERM or SIGHUP is reported and waits: the run ends with 130 only
+// SIGQUIT (Ctrl+backslash) is handled as SIGINT is; before round 9 it ended
+// the run at once, with the data aside and the lock left (QA-01's observation
+// 2). Once a signal has come, or once the run's own cleanup has begun, a
+// further SIGINT, SIGTERM, SIGHUP or SIGQUIT is reported and waits: the run
+// ends with 130 only
 // after the app's data is back and the lock released. Before, a Ctrl+C while
 // the cleanup waited for the app to quit (or a second Ctrl+C) ended the run at
 // once, with the data still aside and the lock left (DM-248).
@@ -468,7 +472,7 @@ export function refuseLaunchWhileEnding(what) {
   if (signalled || cleaningUp) throw new RunEnding(what + ' was not launched: the run is ending (' + (signalled ? signalled + ' came' : 'its cleanup has begun') + '), so nothing may start again (DM-249)');
 }
 export function watchSignalsThenBackup(cleanup, { name = 'the run' } = {}) {
-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']) {
     process.on(signal, () => {
       if (signalled || cleaningUp) {
         note(signal + ' while the run puts everything back: it waits for that');
