@@ -21,7 +21,10 @@
 // - is read back: the script ends with an error, and removes the copy, unless
 //   the identifier is the test identifier, the name is the test name, the
 //   manifest is gone, the entitlements are exactly the original's and the
-//   launch guard (tests/launch-guard.mjs) lets it through.
+//   launch guard (tests/launch-guard.mjs) lets it through;
+// - is removed, with the error naming the step, when any step after the
+//   ditto fails, so a copy that still carries the real identifier is never
+//   left behind (QA-G-32); a path the script did not make is never removed.
 // It prints the copy's path last, for PLAIN_SIGHT_APP=<path>. The original is
 // never changed: a bundle sandboxed under the real identifier stays the D-39
 // trap and is deleted once test:bundle has checked it. Nothing here opens
@@ -32,7 +35,7 @@
 // The plist rewriting is unit-tested on a fake bundle (launch-guard-tests.mjs);
 // the signing, the verification and the read-back need a real bundle.
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,24 +48,40 @@ export const MANIFEST = 'Contents/Resources/container-migration.plist';
 export const SIGNATURE = 'Contents/_CodeSignature';
 export const testIdentifier = (stamp) => REAL_ID + '.testcopy-' + stamp;
 
-const plutilHas = (file, key) => spawnSync('plutil', ['-extract', key, 'raw', '-o', '-', file]).status === 0;
-const plutilSet = (file, key, value) => execFileSync('plutil', ['-replace', key, '-string', value, file]);
+// plutil with its complaint kept for the error, the one call the tests hand in.
+const plutilRun = (args) => execFileSync('plutil', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const reasonOf = (err) => String((err && err.stderr) || (err && err.message) || err).trim();
 
 // The copy before it is signed: ditto, the identifier and the name rewritten,
-// the manifest and the old signature removed. Returns the copy's path. Never
-// writes over anything at the destination.
-export function copyUnsigned(source, destination, stamp) {
+// the manifest and the old signature removed. Returns the copy's path, which
+// is fixed first and must not exist: nothing at the destination is ever
+// written over. On a failure after the ditto, this call removes the copy it
+// made and the error names the step, so no copy under the real identifier,
+// sandboxed and signed as the original, is ever left behind (QA-G-32); a path
+// it did not make is never removed.
+export function copyUnsigned(source, destination, stamp, { plutil = plutilRun } = {}) {
   if (!existsSync(path.join(source, 'Contents', 'Info.plist'))) throw new Error('no app bundle at ' + source + ' (npm run app:build makes one)');
   const copy = path.join(destination, TEST_NAME + '.app');
   if (existsSync(copy)) throw new Error(copy + ' exists already; remove it or name another destination');
   mkdirSync(destination, { recursive: true });
-  execFileSync('ditto', [source, copy]);
   const info = path.join(copy, 'Contents', 'Info.plist');
-  plutilSet(info, 'CFBundleIdentifier', testIdentifier(stamp));
-  plutilSet(info, 'CFBundleName', TEST_NAME);
-  if (plutilHas(info, 'CFBundleDisplayName')) plutilSet(info, 'CFBundleDisplayName', TEST_NAME);
-  rmSync(path.join(copy, MANIFEST), { force: true });
-  rmSync(path.join(copy, SIGNATURE), { recursive: true, force: true });
+  const has = (key) => { try { plutil(['-extract', key, 'raw', '-o', '-', info]); return true; } catch { return false; } };
+  let step = 'copy ' + source + ' with ditto';
+  try {
+    execFileSync('ditto', [source, copy]);
+    for (const [key, value] of [['CFBundleIdentifier', testIdentifier(stamp)], ['CFBundleName', TEST_NAME], ['CFBundleDisplayName', TEST_NAME]]) {
+      if (key === 'CFBundleDisplayName' && !has(key)) continue;
+      step = 'set ' + key + ' in ' + info;
+      plutil(['-replace', key, '-string', value, info]);
+    }
+    step = 'remove the migration manifest from ' + copy;
+    rmSync(path.join(copy, MANIFEST), { force: true });
+    step = 'remove the old signature from ' + copy;
+    rmSync(path.join(copy, SIGNATURE), { recursive: true, force: true });
+  } catch (err) {
+    rmSync(copy, { recursive: true, force: true });
+    throw new Error('could not ' + step + ' (' + reasonOf(err) + '); the unfinished copy, which may still carry the real identifier, was removed: ' + copy);
+  }
   return copy;
 }
 

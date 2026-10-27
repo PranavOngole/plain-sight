@@ -207,6 +207,35 @@ test('the copy script rewrites the identifier and the names, leaves the migratio
   assert.throws(() => copyUnsigned(path.join(ROOT, 'absent.app'), destination, 1), /no app bundle/, 'a missing source is named');
 });
 
+// QA-G-32: the copy script left a bundle named "Plain Sight test copy.app"
+// under the real identifier, sandboxed and signed as the original, when it
+// failed between the ditto and the rewrite of the identifier (QA-01 made
+// Info.plist unwritable): the script's catch saw no copy path. A failure
+// after the ditto now removes the copy this call made and names the step; a
+// path the call did not make is never removed. plutil is handed in, failing
+// at the identifier.
+test('the copy script never leaves a copy under the real identifier: a step that fails after the ditto removes the copy it made and names the step, and a path it did not make is left alone (QA-G-32)', () => {
+  const source = fakeBundle('source-failing', REAL_ID, { manifest: true, signature: true });
+  const destination = path.join(ROOT, 'destination-failing');
+  const copy = path.join(destination, TEST_NAME + '.app');
+  const failing = (args) => {
+    if (args[0] === '-replace' && args[1] === 'CFBundleIdentifier') throw Object.assign(new Error('Command failed: plutil ' + args.join(' ')), { stderr: 'Info.plist: (You don\'t have permission to save the file.)' });
+    return execFileSync('plutil', args, { encoding: 'utf8' });
+  };
+  let message = null;
+  try { copyUnsigned(source, destination, 1761000004, { plutil: failing }); } catch (err) { message = err.message; }
+  assert.notEqual(message, null, 'the copy ends with an error when plutil cannot rewrite the identifier');
+  assert.match(message, /CFBundleIdentifier/, 'the error names the step: ' + message);
+  assert.match(message, /permission to save/, 'and plutil\'s reason: ' + message);
+  assert.match(message, /removed/, 'and says the unfinished copy was removed: ' + message);
+  assert.equal(existsSync(copy), false, 'no copy is left, so none under the real identifier');
+  assert.equal(read(path.join(source, 'Contents/Info.plist'), 'CFBundleIdentifier'), REAL_ID, 'the source is as it was');
+  mkdirSync(path.join(copy, 'Contents'), { recursive: true });
+  writeFileSync(path.join(copy, 'Contents', 'kept'), 'made by someone else');
+  assert.throws(() => copyUnsigned(source, destination, 1761000004, { plutil: failing }), /exists already/, 'an existing copy stops the script before the ditto');
+  assert.equal(readFileSync(path.join(copy, 'Contents', 'kept'), 'utf8'), 'made by someone else', 'and a path the call did not make is left as it was');
+});
+
 test('the read-back compares the entitlements exactly: the same keys and values in any order pass, a missing, extra or changed one fails', () => {
   const reordered = { 'com.apple.security.files.bookmarks.app-scope': true, 'com.apple.security.files.user-selected.read-write': true, [SANDBOX]: true };
   assert.equal(sameEntitlements(THREE, reordered), true);
