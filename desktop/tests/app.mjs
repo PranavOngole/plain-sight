@@ -14,8 +14,16 @@ import { webcrypto } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DESKTOP, EVIDENCE, HOME, NotRun, alive, clearTestData, decryptRecord, drive, driveRaw, note, run, sleep, until } from './harness.mjs';
+import { launchable, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
+// Before anything else, and before the harness's run() moves any data aside:
+// a bundle sandboxed under the real identifier is refused (DM-240, ledger
+// D-39) unless PLAIN_SIGHT_ALLOW_REAL_ID=1; until the move of the app's data
+// this suite runs on a copy under a test identifier (npm run app:testcopy,
+// then PLAIN_SIGHT_APP=<the copy>). The facts read here also say where the
+// bundle's web data lives: in its container when it is sandboxed.
+const BUNDLE = launchable('app', APP);
 let app = null;   // { pid }
 let frontBefore = -1;
 
@@ -389,11 +397,12 @@ test('Cmd+Q with text on the page asks "Quit without saving?": Return cancels an
 
 // The vault in the release app (AC-3.3, DM-223): turned on in the intro, the
 // text typed and Cmd+Q pressed at once, the vault's record found in the release
-// app's own web data folder, and the phrase with the chord reopening it after
-// a relaunch.
+// app's own web data folder (inside its container when it is sandboxed), and
+// the phrase with the chord reopening it after a relaunch.
 const VAULT_PHRASE = 'release vault phrase 2026';
+const WEB_DATA = webDataFolder(HOME, BUNDLE);
 function vaultRecordInReleaseData() {
-  const dir = path.join(HOME, 'Library/WebKit/com.pranavongole.plainsight');
+  const dir = WEB_DATA;
   const out = execFileSync('python3', ['-c', `
 import os, sqlite3, sys
 found = []
@@ -422,7 +431,7 @@ test('the vault in the release app keeps the text typed just before Cmd+Q, in it
   await keys.press('cmd+q');   // at once, before the autosave runs
   await until(() => !alive(app.pid), 'the app to quit', 10000);
   app = null;
-  assert.equal(vaultRecordInReleaseData(), 1, 'one vault record, in ~/Library/WebKit/com.pranavongole.plainsight');
+  assert.equal(vaultRecordInReleaseData(), 1, 'one vault record, in ' + WEB_DATA);
   await launch();
   await keys.type(VAULT_PHRASE);
   await keys.press('cmd+e');

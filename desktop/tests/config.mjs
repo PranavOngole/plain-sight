@@ -305,6 +305,36 @@ test('the bundle check refuses a built Info.plist that holds NSAppTransportSecur
   }
 });
 
+// The launch guard's wiring (DM-240, ledger D-39): the guard itself is tested
+// on fake bundles in launch-guard-tests.mjs; here, that both suites that open
+// a bundle run it at module level, before any launch and before the
+// harness's run() (so before any data is moved aside), that the harness
+// moves a test copy's data aside with the app's own, and that the copy script
+// and the guard's tests are wired in.
+test('both suites that open a bundle run the launch guard before any launch and before run(), the harness moves the test copy\'s data aside too, and the copy script is wired in (DM-240, D-39)', async () => {
+  const tests = path.join(DESKTOP, 'tests');
+  for (const file of ['release.mjs', 'app.mjs']) {
+    const text = read(tests, file);
+    assert.match(text, /^import \{ launchable, webDataFolder \} from '\.\/launch-guard\.mjs';$/m, file + ' takes the guard from launch-guard.mjs');
+    const guard = text.indexOf("const BUNDLE = launchable('");
+    const open = text.indexOf("execFileSync('open'");
+    const started = text.indexOf('await run(tests');
+    assert.ok(guard >= 0, file + ' runs the guard');
+    assert.ok(open > guard && started > guard, file + ' runs the guard before it opens the bundle and before run()');
+    assert.equal(/Library\/WebKit\/com\.pranavongole\.plainsight|Library\/WebKit', ID\)/.test(text), false, file + ' takes the web data folder from the bundle, not from the real identifier');
+  }
+  const harness = read(tests, 'harness.mjs');
+  assert.match(harness, /^export const APP_ID = \(process\.env\.PLAIN_SIGHT_APP && bundleIdentifier\(process\.env\.PLAIN_SIGHT_APP\)\) \|\| ID;$/m, 'the harness reads the bundle under test');
+  assert.match(harness, /\.\.\.\(APP_ID === ID \? \[\] : dataFoldersOf\(APP_ID\)\)/, 'and moves its data folders aside with the app\'s own');
+  assert.equal(JSON.parse(read(DESKTOP, 'package.json')).scripts['app:testcopy'], 'node tests/testcopy.mjs', 'the copy script has its npm script');
+  assert.match(JSON.parse(read(ROOT, 'package.json')).scripts.test, /node desktop\/tests\/launch-guard-tests\.mjs/, 'the guard\'s tests run in npm test');
+  const { MANIFEST, TEST_NAME, testIdentifier } = await import('./testcopy.mjs');
+  const { REAL_ID } = await import('./launch-guard.mjs');
+  assert.equal(MANIFEST, 'Contents/Resources/container-migration.plist', 'the copy loses the migration manifest');
+  assert.ok(testIdentifier(1).startsWith(REAL_ID + '.testcopy-') && testIdentifier(1) !== REAL_ID, 'the copy gets a test identifier of its own');
+  assert.notEqual(TEST_NAME, 'Plain Sight', 'and a name of its own');
+});
+
 test('the web deployment allowlist is unchanged (DR-10)', () => {
   const lines = read(ROOT, '.vercelignore').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
   assert.deepEqual(lines, ['*', '!index.html', '!covers', '!covers/**', '!vercel.json']);

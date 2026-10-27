@@ -14,11 +14,19 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { DESKTOP, EVIDENCE, HOME, ID, NotRun, alive, drive, note, run, sleep, until } from './harness.mjs';
+import { DESKTOP, EVIDENCE, HOME, NotRun, alive, drive, note, run, sleep, until } from './harness.mjs';
+import { launchable, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
+// Before anything else, and before the harness's run() moves any data aside:
+// a bundle sandboxed under the real identifier is refused (DM-240, ledger
+// D-39) unless PLAIN_SIGHT_ALLOW_REAL_ID=1; until the move of the app's data
+// this suite runs on a copy under a test identifier (npm run app:testcopy,
+// then PLAIN_SIGHT_APP=<the copy>). The facts read here also say where the
+// bundle's web data lives: in its container when it is sandboxed.
+const BUNDLE = launchable('release', APP);
 const EXE = path.join(APP, 'Contents/MacOS/plain-sight');
-const WEB_DATA = path.join(HOME, 'Library/WebKit', ID);
+const WEB_DATA = webDataFolder(HOME, BUNDLE);
 let app = null;
 let watch = null;
 const launched = [];
@@ -72,7 +80,7 @@ test('the sealed release app opens through LaunchServices as a double-click does
   assert.equal(documentWindows().length, 1);
   await sleep(6000);
   assert.ok(alive(app.pid), 'still running after several seconds');
-  assert.ok(existsSync(WEB_DATA), 'WebKit keeps the page data in ' + WEB_DATA);
+  assert.ok(existsSync(WEB_DATA), 'WebKit keeps the page data in ' + WEB_DATA + (BUNDLE.sandboxed ? ' (inside the container)' : ''));
 });
 
 test('its menu bar is the app\'s own and holds only standard items', async () => {

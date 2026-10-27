@@ -18,11 +18,19 @@ import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, rea
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { bundleIdentifier } from './launch-guard.mjs';
 
 export const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const DESKTOP = path.resolve(HERE, '..');
 export const ROOT = path.resolve(DESKTOP, '..');
 export const ID = 'com.pranavongole.plainsight';
+// The bundle under test, when there is one (PLAIN_SIGHT_APP, read by
+// release.mjs and app.mjs): a copy under a test identifier (tests/testcopy.mjs,
+// DM-240) keeps its data under that identifier, so its folders are moved
+// aside and put back like the app's own. A path that is no readable bundle
+// counts as the app's own identifier here; the suite's launch guard then
+// refuses it with its own message before anything is moved.
+export const APP_ID = (process.env.PLAIN_SIGHT_APP && bundleIdentifier(process.env.PLAIN_SIGHT_APP)) || ID;
 export const HOME = os.homedir();
 // Where the app's downloads land: the real Downloads folder for the release
 // app, or the folder named in PLAIN_SIGHT_E2E_DOWNLOADS, which the test build
@@ -142,22 +150,28 @@ export async function stopApp(app) {
 // The app's data folders: moved aside before the run, put back after.
 // ---------------------------------------------------------------------------
 const BACKUP_ROOT = path.join(HOME, 'cover-story-delivery', 'desktop', 'appdata-backup');
-export const DATA_DIRS = [
-  `Library/WebKit/${ID}`,
-  `Library/Application Support/${ID}`,
-  `Library/Caches/${ID}`,
-  `Library/HTTPStorages/${ID}`,
-  `Library/HTTPStorages/${ID}.binarycookies`,
-  `Library/Saved Application State/${ID}.savedState`,
-  // An executable run outside a bundle keeps its WebKit data under its own name.
-  'Library/WebKit/plain-sight',
-  'Library/Caches/plain-sight',
+// The folders an app with this bundle identifier keeps its data in.
+const dataFoldersOf = (id) => [
+  `Library/WebKit/${id}`,
+  `Library/Application Support/${id}`,
+  `Library/Caches/${id}`,
+  `Library/HTTPStorages/${id}`,
+  `Library/HTTPStorages/${id}.binarycookies`,
+  `Library/Saved Application State/${id}.savedState`,
   // The sandboxed app (D-37) keeps all of its data in its container. macOS
   // asks the person at the Mac before a program outside the sandbox opens
   // another app's container (Apple, "Accessing files from the macOS App
   // Sandbox"), unless that program has Full Disk Access, so moving it aside
   // can put that question on screen.
-  `Library/Containers/${ID}`
+  `Library/Containers/${id}`
+];
+export const DATA_DIRS = [
+  ...dataFoldersOf(ID),
+  // An executable run outside a bundle keeps its WebKit data under its own name.
+  'Library/WebKit/plain-sight',
+  'Library/Caches/plain-sight',
+  // The test copy's folders too, when the bundle under test is one (DM-240).
+  ...(APP_ID === ID ? [] : dataFoldersOf(APP_ID))
 ].map((p) => path.join(HOME, p));
 let backupDir = null;
 // The data folders that were there before the run. The run moves each of them
