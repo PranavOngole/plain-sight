@@ -5,6 +5,7 @@
 // Run with: npm test   (exit code 0 only when every test passes)
 
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { headersFor } from '../tools/vercel-headers.mjs';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
@@ -77,7 +78,7 @@ process.on('unhandledRejection', (reason) => {
   for (const errors of openErrors) errors.push(text);
 });
 
-async function loadPage({ random = () => 1, storage = {}, inject = true, folder = null, slowEncrypt = 0, failDerive = 0, slowDerive = 0, noSubtle = false, userAgent = undefined, brave = false, cssSupports = false } = {}) {
+async function loadPage({ random = () => 1, storage = {}, inject = true, folder = null, slowEncrypt = 0, failDerive = 0, slowDerive = 0, noSubtle = false, userAgent = undefined, brave = false, cssSupports = false, maskComputed = true, refuseKeys = [] } = {}) {
   const errors = [];
   openErrors.add(errors);
   const downloads = [];
@@ -95,7 +96,16 @@ async function loadPage({ random = () => 1, storage = {}, inject = true, folder 
       if (userAgent) Object.defineProperty(window.navigator, 'userAgent', { value: userAgent, configurable: true });
       if (brave) Object.defineProperty(window.navigator, 'brave', { value: { isBrave: async () => true }, configurable: true });
       // jsdom has no CSS.supports; with cssSupports the page sees a browser that can mask a text field.
-      if (cssSupports) Object.defineProperty(window, 'CSS', { value: { supports: () => true }, configurable: true });
+      if (cssSupports) {
+        Object.defineProperty(window, 'CSS', { value: { supports: () => true }, configurable: true });
+        // jsdom computes no vendor property: a masked field reports the mask as applied, or not with maskComputed false.
+        const computed = window.getComputedStyle.bind(window);
+        window.getComputedStyle = (el, pseudo) => {
+          const cs = computed(el, pseudo);
+          if (el.classList && el.classList.contains('masked')) Object.defineProperty(cs, 'webkitTextSecurity', { value: maskComputed ? 'disc' : '', configurable: true });
+          return cs;
+        };
+      }
       // Deterministic typos: Math.random() === 1 means "never a typo".
       window.Math.random = random;
       // jsdom has no crypto.subtle, URL.createObjectURL or navigator.clipboard.
@@ -111,6 +121,15 @@ async function loadPage({ random = () => 1, storage = {}, inject = true, folder 
         configurable: true
       });
       for (const [k, v] of Object.entries(storage)) window.localStorage.setItem(k, v);
+      // A browser that refuses to store some keys (storage full or blocked), from the first script on: setItem throws for them.
+      if (refuseKeys.length) {
+        const proto = Object.getPrototypeOf(window.localStorage);
+        const original = proto.setItem;
+        proto.setItem = function (key, value) {
+          if (refuseKeys.includes(key)) { const e = new window.Error('quota'); e.name = 'QuotaExceededError'; throw e; }
+          return original.call(this, key, value);
+        };
+      }
       // A fake File System Access API: a directory picker that hands back a
       // folder whose files are recorded in folder.written.
       if (folder) {
@@ -640,7 +659,7 @@ test('Save writes a .sight with a 16-byte salt, 12-byte IV and data; Open restor
     assert.equal(await p.readReal(), 'hello world', 'every refusal left the buffer alone');
     // Nothing on the console object touches the buffer.
     assert.deepEqual(Object.keys(p.w.PlainSight).sort(), ['coverFailed', 'coverId', 'coverIds', 'coverText', 'ready', 'selectedCoverId', 'setCover', 'version']);
-    assert.equal(p.w.PlainSight.version, '1.3.10');
+    assert.equal(p.w.PlainSight.version, '1.3.11');
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
 });
@@ -2879,9 +2898,16 @@ test('the phrase and password fields keep the browser\'s password manager out: n
       assert.equal(el.getAttribute('autocorrect'), 'off');
       assert.equal(el.getAttribute('autocapitalize'), 'off');
       assert.equal(el.type, 'text', id + ' is a masked text field, which no password manager treats as a password');
-      assert.match(el.getAttribute('style') || '', /-webkit-text-security:\s*disc/, id + ' masks what is typed');
+      assert.ok(el.classList.contains('masked'), id + ' carries the mask class');
+      assert.ok(el.matches('.card input.secret'), id + ' keeps the page\'s field styling, which no longer depends on the type');
       assert.equal(q.$(id).type, 'password', id + ' stays a password field where the browser cannot mask a text field');
+      assert.ok(q.$(id).matches('.card input.secret'));
     }
+    const css = p.$('style').textContent;
+    assert.match(css, /\.secret\.masked\s*\{[^}]*-webkit-text-security:\s*disc/, 'the mask lives in the stylesheet');
+    assert.match(css, /\.card input\.secret\s*\{/, 'the field rule selects the class');
+    assert.ok(!/input\[type="password"\]/.test(css), 'no rule depends on the password type any more');
+    assert.ok(p.$('#vault-phrase').matches('.vault input.secret:disabled'), 'the disabled phrase field keeps its disabled look');
     assert.deepEqual(p.errors, []);
     assert.deepEqual(q.errors, []);
   } finally { p.close(); q.close(); }
@@ -3021,6 +3047,199 @@ test('without encryption, the 10-minute wipe leaves the intro\'s no-encryption n
     assert.equal(p.$('#vault-on').disabled, true);
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
+});
+
+test('where the browser says it can mask a text field but the mask does not reach the field, the phrase and password fields stay password fields', async () => {
+  const p = await loadPage({ cssSupports: true, maskComputed: false });
+  try {
+    for (const id of ['#vault-phrase', '#pw-input']) {
+      assert.equal(p.$(id).type, 'password', id + ' fell back to a password field');
+      assert.ok(!p.$(id).classList.contains('masked'), id + ' carries no mask class');
+    }
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('an intro left open with nothing typed anywhere does not arm the 10-minute wipe', async () => {
+  const p = await loadPage({ storage: { 'plainSight.introSeen': '1' } });
+  try {
+    p.$('#btn-help').click();                // open, the phrase field empty, the buffer empty
+    const realNow = p.w.Date.now();
+    let fakeNow = realNow;
+    p.w.Date.now = () => fakeNow;
+    const setHidden = (h) => {
+      Object.defineProperty(p.d, 'hidden', { get: () => h, configurable: true });
+      p.d.dispatchEvent(new p.w.Event('visibilitychange'));
+    };
+    setHidden(true);
+    fakeNow += TEN_MINUTES + 1000;
+    setHidden(false);
+    assert.equal(p.toast(), '', 'nothing to clear, so no wipe and no toast');
+    assert.equal(p.$('#intro').hidden, false, 'the intro is still open');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('device vault: a phrase change of a copy made at another count saves under the page\'s own count', async () => {
+  const record = await encryptVaultRecord('old words', 'correct horse battery staple', 1000);
+  const p = await loadPage({ storage: { 'plainSight.vault': record, 'plainSight.introSeen': '1' } });
+  try {
+    p.type('correct horse battery staple');
+    p.unlockChord();
+    await sleep(900);
+    assert.ok(p.d.body.classList.contains('vault-open'));
+    p.$('#btn-help').click();
+    p.$('#vault-phrase').value = 'a brand new phrase here';
+    p.start();                               // the phrase change derives a new key at the page's count
+    await sleep(900);
+    const saved = JSON.parse(p.storageDump()['plainSight.vault']);
+    assert.equal(saved.iterations, 310000, 'the new copy states the count its key was made with');
+    assert.equal(await decryptVault(saved, 'a brand new phrase here'), 'old words');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('device vault: the save at Esc states the count the key was made with, for a copy made at another count', async () => {
+  const record = await encryptVaultRecord('old words', 'correct horse battery staple', 1000);
+  const p = await loadPage({ storage: { 'plainSight.vault': record, 'plainSight.introSeen': '1' } });
+  try {
+    p.type('correct horse battery staple');
+    p.unlockChord();
+    await sleep(900);
+    assert.ok(p.d.body.classList.contains('vault-open'));
+    p.type(' then Esc');
+    p.press('Escape');                       // the Esc save runs under the key derived at 1,000 rounds
+    await sleep(600);
+    const saved = JSON.parse(p.storageDump()['plainSight.vault']);
+    assert.equal(saved.iterations, 1000, 'the saved record states the count the key was made with');
+    assert.equal(await decryptVault(saved, 'correct horse battery staple'), 'old words then Esc');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('device vault: a refused autosave updates an open intro\'s status: locked, with the earlier copy still on the device', async () => {
+  const p = await loadPage();
+  const proto = Object.getPrototypeOf(p.w.localStorage);
+  const original = proto.setItem;
+  try {
+    p.start();
+    p.type('kept once');
+    await p.vaultOn('correct horse battery staple');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);  // the first copy is stored
+    p.type(' then refused');                 // an autosave is due 1.5 s on
+    p.$('#btn-help').click();
+    assert.match(p.$('#vault-status').textContent, /^The vault is open and saving as you type/);
+    proto.setItem = function (key, value) {
+      if (key === 'plainSight.vault') { const e = new p.w.Error('quota'); e.name = 'QuotaExceededError'; throw e; }
+      return original.call(this, key, value);
+    };
+    await sleep(VAULT_SAVE_DELAY_MS + 400);  // the autosave is refused under the open intro
+    assert.equal(p.toast(), 'The copy could not be kept on this device: storage is full or blocked');
+    assert.ok(!p.d.body.classList.contains('vault-open'), 'locked');
+    assert.match(p.$('#vault-status').textContent, /^A saved copy is on this device/, 'the status follows the lock; the earlier copy is still there');
+    assert.deepEqual(p.errors, []);
+  } finally { proto.setItem = original; p.close(); }
+});
+
+test('device vault: an older key\'s refused autosave does not lock a vault re-keyed meanwhile', async () => {
+  const p = await loadPage({ slowEncrypt: (n) => (n === 1 ? 1500 : 0) });   // the autosave after the setup is the second encryption
+  const proto = Object.getPrototypeOf(p.w.localStorage);
+  const original = proto.setItem;
+  try {
+    p.start();
+    p.type('old words');
+    await p.vaultOn('correct horse battery staple');
+    p.type(' and more');                     // an autosave under the first key is due 1.5 s on and then encrypts for 1.5 s
+    await sleep(VAULT_SAVE_DELAY_MS + 200);
+    p.$('#btn-help').click();
+    p.$('#vault-phrase').value = 'a brand new phrase here';
+    p.start();                               // a phrase change: the new key derives while the old autosave still encrypts
+    await sleep(500);
+    assert.ok(p.d.body.classList.contains('vault-open'), 'open under the new phrase while the old save still encrypts');
+    let refused = 0;
+    proto.setItem = function (key, value) {
+      if (key === 'plainSight.vault' && refused === 0) { refused += 1; const e = new p.w.Error('quota'); e.name = 'QuotaExceededError'; throw e; }   // the next vault write is refused, once
+      return original.call(this, key, value);
+    };
+    await sleep(1200);                       // the old key's save is refused; the new phrase's first write follows and lands
+    assert.equal(refused, 1, 'the old key\'s save was the one refused');
+    assert.equal(p.toast(), 'The copy could not be kept on this device: storage is full or blocked');
+    assert.ok(p.d.body.classList.contains('vault-open'), 'the re-keyed vault is not locked by an older key\'s refusal');
+    assert.equal(await decryptVault(JSON.parse(p.storageDump()['plainSight.vault']), 'a brand new phrase here'), 'old words and more');
+    assert.deepEqual(p.errors, []);
+  } finally { proto.setItem = original; p.close(); }
+});
+
+test('device vault: a locked tab\'s refused Esc save says so and throws nothing', async () => {
+  const p = await loadPage({ slowEncrypt: (n) => (n === 1 ? 1500 : 0) });   // the Esc save is the second encryption
+  const proto = Object.getPrototypeOf(p.w.localStorage);
+  const original = proto.setItem;
+  try {
+    p.start();
+    p.type('old words');
+    await p.vaultOn('correct horse battery staple');
+    p.press('Escape');                       // locks; the Esc save encrypts slowly
+    await sleep(300);
+    proto.setItem = function (key, value) {
+      if (key === 'plainSight.vault') { const e = new p.w.Error('quota'); e.name = 'QuotaExceededError'; throw e; }
+      return original.call(this, key, value);
+    };
+    await sleep(1600);                       // the Esc save is refused in a locked tab
+    assert.equal(p.toast(), 'The copy could not be kept on this device: storage is full or blocked');
+    assert.ok(!p.d.body.classList.contains('vault-open'), 'still locked');
+    assert.equal(await decryptVault(JSON.parse(p.storageDump()['plainSight.vault']), 'correct horse battery staple'), 'old words', 'the earlier copy stays');
+    assert.deepEqual(p.errors, [], 'nothing thrown on the way');
+  } finally { proto.setItem = original; p.close(); }
+});
+
+test('the folder note says that plain files are indexed, previewed, backed up and, in a synced folder, uploaded', async () => {
+  const p = await loadPage();
+  try {
+    assert.match(p.$('#folder-note').textContent, /the computer indexes, previews and backs it up like any document; a synced folder uploads it/);
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('the one-time key migration keeps the old key when the new one cannot be written', async () => {
+  const p = await loadPage({ storage: { 'coverStory.customText': 'old custom text' } });
+  try {
+    assert.equal(p.storageDump()['plainSight.customText'], 'old custom text', 'migrated when storage works');
+    assert.equal(p.storageDump()['coverStory.customText'], undefined, 'the old key goes once the new one holds the value');
+  } finally { p.close(); }
+  // The browser refuses the write under one new key: that old key must stay for next time, and the other pair still moves.
+  const q = await loadPage({ storage: { 'coverStory.customText': 'old custom text', 'coverStory.cover': 'paper' }, refuseKeys: ['plainSight.customText'] });
+  try {
+    assert.equal(q.storageDump()['coverStory.customText'], 'old custom text', 'the old key is kept when the new write is refused');
+    assert.equal(q.storageDump()['plainSight.customText'], undefined, 'nothing under the new key');
+    assert.equal(q.storageDump()['plainSight.cover'], 'paper', 'the pair whose write works still migrates');
+    assert.equal(q.storageDump()['coverStory.cover'], undefined, 'and its old key goes');
+    assert.deepEqual(q.errors, []);
+  } finally { q.close(); }
+  const r = await loadPage({ storage: { 'coverStory.cover': 'paper' } });
+  try {
+    assert.equal(r.storageDump()['plainSight.cover'], 'paper');
+    assert.deepEqual(r.errors, []);
+  } finally { r.close(); }
+});
+
+test('the header policy served from vercel.json keeps its shape: nothing but the page\'s own origin and its two inline scripts by hash, no framing, and the other headers as documented', async () => {
+  const headers = headersFor(HTML);
+  const get = (k) => (headers.find((h) => h.key === k) || {}).value;
+  const csp = get('Content-Security-Policy');
+  assert.ok(csp.startsWith("default-src 'none'; "), 'everything is refused by default');
+  const scriptSrc = csp.split('; ').find((d) => d.startsWith('script-src '));
+  assert.match(scriptSrc, /^script-src 'self'( 'sha256-[A-Za-z0-9+/=]{44}'){2}$/, 'the page\'s own origin and exactly two inline script hashes, nothing else');
+  assert.ok(!/unsafe-inline/.test(scriptSrc), 'no inline script other than the two');
+  for (const d of ["style-src 'unsafe-inline'", 'img-src data:', "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'"]) assert.ok(csp.split('; ').includes(d), 'policy keeps ' + d);
+  assert.equal(get('X-Frame-Options'), 'DENY');
+  assert.equal(get('X-Content-Type-Options'), 'nosniff');
+  assert.equal(get('Referrer-Policy'), 'no-referrer');
+  assert.equal(get('Permissions-Policy'), 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+  assert.equal(get('Cross-Origin-Opener-Policy'), 'same-origin');
+  assert.equal(get('Cross-Origin-Resource-Policy'), 'same-origin');
+  assert.equal(headers.length, 7, 'seven headers, no more');
+  const meta = HTML.match(/http-equiv="Content-Security-Policy"[^>]*content="([^"]+)"/)[1];
+  assert.equal(meta, "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'", 'the meta policy is unchanged');
 });
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 {
   "name": "plain-sight",
-  "version": "1.3.10",
+  "version": "1.3.11",
   "description": "A static page where typing shows a plausible document being written while the real keystrokes go into a hidden buffer. No server, no analytics, no network calls. Optional encrypted vault on the device.",
   "private": true,
   "type": "module",
