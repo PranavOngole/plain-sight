@@ -10,9 +10,12 @@
 // container would be made, and macOS would not migrate his vault later
 // (D-39). So each suite reads the bundle first, before the harness's run()
 // moves anything aside: the identifier from Contents/Info.plist (through
-// plutil) and the entitlements from the bundle's signature (codesign -d
-// --entitlements - --xml), and refuses a bundle that carries
-// com.apple.security.app-sandbox true under the real identifier.
+// plutil) and from the bundle's signature (codesign -dv, its Identifier=
+// line), and the entitlements from the signature (codesign -d
+// --entitlements - --xml), and refuses a sandboxed bundle (the entitlement
+// com.apple.security.app-sandbox present with any value but false) when
+// either identifier is the real one, in any case and with spaces around it
+// (QA-01's observations 2 to 4 on 867d639).
 // PLAIN_SIGHT_ALLOW_REAL_ID=1 lifts the refusal, for the deliberate run after
 // the move. A sandboxed copy under a test identifier (tests/testcopy.mjs,
 // `npm run app:testcopy`) passes, and so does an unsandboxed bundle under the
@@ -20,9 +23,10 @@
 // Info.plist, or a signature codesign cannot read, is refused too: nothing
 // unknown is opened.
 //
-// The codesign call is one injectable function, so the unit tests
-// (tests/launch-guard-tests.mjs) hand in a property list text and sign
-// nothing.
+// The codesign calls go through one injectable function (codesignRead,
+// asked for the entitlements or the identifier), so the unit tests
+// (tests/launch-guard-tests.mjs) hand in a property list text and an
+// identifier and sign nothing.
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -48,6 +52,29 @@ export function codesignEntitlements(app) {
   return shown.stdout;
 }
 
+// The identifier the bundle's signature carries, from the Identifier= line
+// codesign -dv prints (on stderr). A bundle can name a test identifier in its
+// Info.plist and carry the real one in its signature; which of the two names
+// the container then is not known here, so the guard refuses either (QA-01
+// observation 3).
+export function codesignIdentifier(app) {
+  const shown = spawnSync('codesign', ['-dv', app], { encoding: 'utf8' });
+  if (shown.status !== 0) throw new Error('codesign could not read the signature of ' + app + ': ' + String(shown.stderr || '').trim());
+  const line = String(shown.stderr || '').split('\n').find((l) => l.startsWith('Identifier='));
+  if (!line) throw new Error('codesign named no identifier in the signature of ' + app);
+  return line.slice('Identifier='.length);
+}
+
+// The one codesign function the tests replace: what the signature holds,
+// its entitlements or its identifier.
+export const codesignRead = (app, request) => (request === 'identifier' ? codesignIdentifier(app) : codesignEntitlements(app));
+
+// The real identifier in any case and with spaces around it, so a variant
+// such as Com.PranavOngole.PlainSight is refused like the real one (QA-01
+// observation 2; whether macOS would give such a bundle the real container
+// is not known here).
+const isRealId = (id) => typeof id === 'string' && id.trim().toLowerCase() === REAL_ID;
+
 // The bundle's identifier from its Info.plist, or null when there is no
 // readable bundle at the path (the harness reads this at import; the suite's
 // guard then gives its own message).
@@ -59,19 +86,25 @@ export function bundleIdentifier(app) {
 }
 
 // What the guard reads of a bundle: its identifier and name (Info.plist), the
-// entitlements its signature carries, and whether they put it in the App
-// Sandbox. Throws, with a plain reason, for anything that is not a readable
-// signed bundle.
-export function bundleFacts(app, { codesign = codesignEntitlements } = {}) {
+// identifier and the entitlements its signature carries, and whether they
+// put it in the App Sandbox: the sandbox entitlement present with any value
+// but false, so a string "true" or an integer 1 counts too (QA-01
+// observation 4). Throws, with a plain reason, for anything that is not a
+// readable signed bundle.
+export function bundleFacts(app, { codesign = codesignRead } = {}) {
   const info = path.join(app, 'Contents', 'Info.plist');
   if (!existsSync(info)) throw new Error('no app bundle at ' + app + ' (there is no Contents/Info.plist)');
   let plist;
   try { plist = plistOf(info); } catch (err) { throw new Error('plutil could not read ' + info + ': ' + String(err && err.stderr ? err.stderr : err).trim()); }
   const identifier = plist.CFBundleIdentifier;
   if (typeof identifier !== 'string' || !identifier) throw new Error(info + ' names no CFBundleIdentifier');
-  const xml = String(codesign(app));
+  const xml = String(codesign(app, 'entitlements'));
   const entitlements = xml.trim() ? plistFromText(xml) : {};
-  return { app, identifier, name: String(plist.CFBundleName || ''), entitlements, sandboxed: entitlements[SANDBOX] === true };
+  const signed = codesign(app, 'identifier');
+  return {
+    app, identifier, signatureIdentifier: typeof signed === 'string' ? signed : null, name: String(plist.CFBundleName || ''), entitlements,
+    sandboxed: Object.hasOwn(entitlements, SANDBOX) && entitlements[SANDBOX] !== false
+  };
 }
 
 // The app menu's title as macOS shows it: the bundle's CFBundleName. On a
@@ -85,11 +118,14 @@ export const appMenuTitle = (facts) => facts.name;
 export const menuBarOf = (facts) => [appMenuTitle(facts), 'File', 'Edit', 'View', 'Window', 'Help'];
 
 // null when the bundle may be opened, else the reason it may not: a bundle
-// sandboxed under the real identifier, unless the override is exactly "1".
+// sandboxed under the real identifier, in its Info.plist or its signature,
+// unless the override is exactly "1".
 export function refusal(facts, env = process.env) {
-  if (!(facts.sandboxed && facts.identifier === REAL_ID)) return null;
+  if (!facts.sandboxed) return null;
+  const under = [['Info.plist', facts.identifier], ['signature', facts.signatureIdentifier]].filter(([, id]) => isRealId(id));
+  if (!under.length) return null;
   if (env[OVERRIDE] === '1') return null;
-  return facts.app + ' is sandboxed under the real bundle identifier ' + REAL_ID + '. The first time such a bundle opens, macOS creates the app\'s real container and brings the app\'s data into it, once; with the data moved aside for a test run that would leave an empty container and block the later move (ledger D-39), so this suite does not open it. Make a copy under a test identifier with `npm run app:testcopy` in desktop/ (tests/testcopy.mjs) and run the suite with PLAIN_SIGHT_APP=<the copy it prints>. Only for the deliberate run after the move of the app\'s data, ' + OVERRIDE + '=1 lifts this refusal. Delete the real-identifier bundle once test:bundle has checked it.';
+  return facts.app + ' is sandboxed under the real bundle identifier ' + REAL_ID + ' (' + under.map(([where, id]) => where + ' ' + JSON.stringify(id)).join(', ') + '). The first time such a bundle opens, macOS creates the app\'s real container and brings the app\'s data into it, once; with the data moved aside for a test run that would leave an empty container and block the later move (ledger D-39), so this suite does not open it. Make a copy under a test identifier with `npm run app:testcopy` in desktop/ (tests/testcopy.mjs) and run the suite with PLAIN_SIGHT_APP=<the copy it prints>. Only for the deliberate run after the move of the app\'s data, ' + OVERRIDE + '=1 lifts this refusal. Delete the real-identifier bundle once test:bundle has checked it.';
 }
 
 // The verdict on a path: its facts and null, or the reason it may not be

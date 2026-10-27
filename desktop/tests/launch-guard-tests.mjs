@@ -40,7 +40,9 @@ function fakeBundle(tag, identifier, { manifest = false, signature = false, disp
 }
 const THREE = { [SANDBOX]: true, 'com.apple.security.files.user-selected.read-write': true, 'com.apple.security.files.bookmarks.app-scope': true };
 const sandboxed = plist(THREE);
-const codesignSaying = (xml) => () => xml;
+// The codesign answers the guard asks for: the signature's entitlements, and
+// the identifier the signature carries (none named here unless given).
+const codesignSaying = (xml, identifier = null) => (app, request) => (request === 'identifier' ? identifier : xml);
 const read = (file, key) => execFileSync('plutil', ['-extract', key, 'raw', '-o', '-', file], { encoding: 'utf8' }).trim();
 
 const tests = [];
@@ -100,6 +102,45 @@ test('the real codesign call: a sandboxed system app under its own identifier is
   const { facts, why } = verdict(unsigned, { env: {} });
   assert.equal(facts, null);
   assert.match(why, /codesign could not read/, why);
+});
+
+// QA-01's observations on the guard (its report, section 17.5, items 2 to 4):
+// the identifier was compared as an exact string, read from Info.plist only,
+// and only a boolean true was taken for the sandbox.
+test('the real identifier is refused in any case and with spaces around it, and a longer identifier is not taken for it (QA-01 observation 2)', () => {
+  for (const id of ['Com.PranavOngole.PlainSight', 'COM.PRANAVONGOLE.PLAINSIGHT', REAL_ID + ' ', ' ' + REAL_ID, '\t' + REAL_ID + '\n']) {
+    const app = fakeBundle('variant-' + Buffer.from(id).toString('hex'), id);
+    const { facts, why } = verdict(app, { codesign: codesignSaying(sandboxed), env: {} });
+    assert.equal(facts.identifier, id, 'the plist holds ' + JSON.stringify(id));
+    assert.equal(typeof why, 'string', JSON.stringify(id) + ', sandboxed, is refused');
+  }
+  assert.equal(verdict(fakeBundle('longer', REAL_ID + '.other'), { codesign: codesignSaying(sandboxed), env: {} }).why, null, 'com.pranavongole.plainsight.other is another app');
+});
+
+test('the signature\'s identifier counts too: a sandboxed bundle whose signature names the real identifier is refused whatever its Info.plist says (QA-01 observation 3)', () => {
+  const id = testIdentifier(1761000005);
+  const app = fakeBundle('signed-real', id);
+  const facts = bundleFacts(app, { codesign: codesignSaying(sandboxed, REAL_ID) });
+  assert.deepEqual([facts.identifier, facts.signatureIdentifier], [id, REAL_ID], 'the guard reads both identifiers');
+  const why = refusal(facts, {});
+  assert.equal(typeof why, 'string', 'refused');
+  assert.match(why, /signature/, 'the refusal says where the real identifier is: ' + why);
+  assert.equal(refusal(bundleFacts(app, { codesign: codesignSaying(sandboxed, ' Com.PranavOngole.PlainSight') }), {}) === null, false, 'in any case there too');
+  assert.equal(refusal(bundleFacts(app, { codesign: codesignSaying(sandboxed, id) }), {}), null, 'a signature under the test identifier passes');
+  assert.equal(refusal(bundleFacts(app, { codesign: codesignSaying('', REAL_ID) }), {}), null, 'without the sandbox the real identifier in the signature is the app as it runs today');
+  assert.equal(bundleFacts('/System/Applications/Calculator.app').signatureIdentifier, 'com.apple.calculator', 'the real codesign call reads a signature\'s identifier');
+});
+
+test('any sandbox entitlement that is present and not false counts as sandboxed: the strings "true" and "false", the integer 1 (QA-01 observation 4)', () => {
+  const app = fakeBundle('odd-sandbox', REAL_ID);
+  for (const [label, value] of [['the string "true"', '<string>true</string>'], ['the integer 1', '<integer>1</integer>'], ['the string "false", which is not the boolean false', '<string>false</string>']]) {
+    const xml = plist({}).replace('<dict></dict>', '<dict><key>' + SANDBOX + '</key>' + value + '</dict>');
+    const facts = bundleFacts(app, { codesign: codesignSaying(xml) });
+    assert.equal(facts.sandboxed, true, label + ' counts as sandboxed');
+    assert.equal(typeof refusal(facts, {}), 'string', label + ': refused under the real identifier');
+  }
+  assert.equal(bundleFacts(app, { codesign: codesignSaying(plist({ [SANDBOX]: false })) }).sandboxed, false, 'the boolean false is no sandbox');
+  assert.equal(bundleFacts(app, { codesign: codesignSaying(plist({ 'com.apple.security.files.bookmarks.app-scope': true })) }).sandboxed, false, 'no sandbox entitlement is no sandbox');
 });
 
 test('the web data folder follows the bundle: the identifier under Library/WebKit outside the sandbox, the container inside it', () => {
