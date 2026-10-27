@@ -117,6 +117,23 @@ if (process.argv[2] === '--child') {
       intact();
       assert.deepEqual(backups(), [], 'no backup folder');
     },
+    // QA-G-40 K32 (QA-01's P2.3; the Delivery Manager's AT-H5b): two fresh
+    // copies asked for in the same millisecond, before either is launched (so
+    // no folder of the first exists yet), get two stamps: the second takes
+    // the next one, from the stamp the first took.
+    'fresh-start-twice'() {
+      h.backupAppData();
+      const asked = [];
+      const makeCopy = (source, destination, stamp) => { asked.push(stamp); return { made: { app: path.join(destination, 'Plain Sight test copy.app'), identifier: 'com.pranavongole.plainsight.testcopy-' + stamp, sandboxed: true } }; };
+      const facts = { app: '/nowhere/Plain Sight test copy.app', identifier: TEST_COPY, sandboxed: true };
+      const first = h.freshStart(facts, { makeCopy, now: () => 1761000060000 });
+      const second = h.freshStart(facts, { makeCopy, now: () => 1761000060000 });
+      assert.deepEqual(asked, [1761000060000, 1761000060001], 'the second copy takes the next stamp: ' + JSON.stringify(asked));
+      assert.notEqual(first.identifier, second.identifier, 'two identifiers, so two containers of their own');
+      h.restoreAppData();
+      intact();
+      assert.deepEqual(backups(), [], 'no backup folder');
+    },
     'clear-before-backup'() {
       assert.throws(() => h.clearTestData(), /not moved aside/, 'refused');
       intact();
@@ -530,7 +547,8 @@ if (process.argv[2] === '--child') {
     return h.run(tests, { name: 'release', needUnlocked, ...(after ? { after } : {}) });
   };
   // An after() that takes a while, as the suites' do while the app quits.
-  const slowAfter = async () => { console.log('IN AFTER'); await new Promise((r) => setTimeout(r, 3000)); console.log('AFTER DONE'); };
+  // It says whether the run's lock is still held as it starts (QA-G-40).
+  const slowAfter = async () => { console.log('IN AFTER'); console.log('LOCK HELD ' + existsSync(LOCK(home))); await new Promise((r) => setTimeout(r, 3000)); console.log('AFTER DONE'); };
   // DM-249: the stand-in app (the parent's STANDIN), started through the
   // harness's spawnApp as e2e.mjs starts the test build. `current` is the app
   // a test launched last, as e2e.mjs's `app` is, and e2eAfter is e2e.mjs's
@@ -657,6 +675,12 @@ test('freshStart makes no fresh copy before the app\'s data is moved aside or af
   assert.match(r.out, /RESULT ok/, 'the child\'s output:\n' + r.out);
   clean(r);
 });
+test('two fresh copies asked for in the same millisecond, before either is launched, get two stamps and two identifiers (QA-G-40 K32; QA-01\'s P2.3, the Delivery Manager\'s AT-H5b)', async () => {
+  const r = await runCase('fresh-start-twice');
+  ended(r, 0);
+  assert.match(r.out, /RESULT ok/, 'the child\'s output:\n' + r.out);
+  clean(r);
+});
 test('a restore asked for while the backup is incomplete is refused and names what to put back, decoded, and from where (QA-01 X2)', async () => {
   const r = await runCase('restore-while-moving');
   ended(r, 0);
@@ -774,7 +798,16 @@ test('a launch whose document window is on-screen ends the first wait with the w
 // appdata-backup and the lock file stayed (the Delivery Manager's AT-H6 and
 // AT-H7 showed it under this file's fake home). They are adopted here with
 // the answer the fix sets: the signal waits for the restore and the lock
-// release, is reported, and the run then ends with 130.
+// release, is reported, and the run then ends with 130. In each, after() runs
+// and ends once, with the run's lock still held as it starts (QA-G-40: QA-01's
+// K43, each caller with a cleanup of its own, and K41, the lock dropped before
+// after(); its P3.2a and P3.2c).
+const onceWithTheLock = (r) => {
+  const lines = r.out.split('\n');
+  assert.equal(lines.filter((l) => l === 'IN AFTER').length, 1, 'after() ran once; the child\'s output:\n' + r.out);
+  assert.equal(lines.filter((l) => l === 'AFTER DONE').length, 1, 'and ended once');
+  assert.deepEqual(lines.filter((l) => l.startsWith('LOCK HELD ')), ['LOCK HELD true'], 'the run\'s lock was held when after() started');
+};
 test('a Ctrl+C while the run\'s own cleanup waits for the app to quit waits for that cleanup: the data back, the lock released, the signal reported, exit code 130 (DM-248; the Delivery Manager\'s AT-H6)', async () => {
   let sent = false;
   const r = await runCase('run-signal-during-cleanup', (out, child) => {
@@ -786,6 +819,7 @@ test('a Ctrl+C while the run\'s own cleanup waits for the app to quit waits for 
   ended(r, 130);
   assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
   assert.match(r.out, /^release: SIGINT came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the signal is reported');
+  onceWithTheLock(r);
   clean(r);
   assert.equal(r.lock, false, 'the lock is released');
 });
@@ -800,6 +834,7 @@ test('a second Ctrl+C, after a first one during a test started the cleanup, is r
   ended(r, 130);
   assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
   assert.match(r.out, /^release: SIGINT came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the second signal is reported');
+  onceWithTheLock(r);
   clean(r);
   assert.equal(r.lock, false, 'the lock is released');
 });
@@ -814,6 +849,7 @@ test('SIGTERM during a test and then SIGHUP during the cleanup, as a watcher\'s 
   ended(r, 130);
   assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
   assert.match(r.out, /^release: SIGHUP came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the SIGHUP is reported');
+  onceWithTheLock(r);
   assert.doesNotMatch(r.out, /TEST AFTER THE SIGNAL/, 'no test starts once a signal has come');
   clean(r);
   assert.equal(r.lock, false, 'the lock is released');
