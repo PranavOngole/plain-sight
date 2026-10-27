@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -277,6 +277,61 @@ test('the copy script never leaves a copy under the real identifier: a step that
   assert.equal(readFileSync(path.join(copy, 'Contents', 'kept'), 'utf8'), 'made by someone else', 'and a path the call did not make is left as it was');
 });
 
+// QA-G-32, the residual: when removing the unfinished copy failed too,
+// rmSync's own error (ENOTEMPTY) replaced the step's, and the script could
+// not say what had happened or what was left. QA-01's repro (r7_guard_adv.mjs
+// E5): the source's Info.plist marked immutable (chflags uchg), which ditto
+// carries into the copy, so plutil cannot rewrite the identifier and the
+// removal cannot take that file. The error now keeps plutil's reason, gives
+// the removal's and names the copy to remove by hand. The flags are cleared
+// in the end, so the temporary folder can go.
+test('when the unfinished copy cannot be removed either, the error keeps the step\'s own reason, gives the removal\'s and names the copy to remove by hand (QA-G-32)', () => {
+  const source = fakeBundle('source-immutable', REAL_ID, { manifest: true });
+  const destination = path.join(ROOT, 'destination-immutable');
+  const copy = path.join(destination, TEST_NAME + '.app');
+  execFileSync('chflags', ['uchg', path.join(source, 'Contents', 'Info.plist')]);
+  try {
+    let message = null;
+    try { copyUnsigned(source, destination, 1761000006); } catch (err) { message = err.message; }
+    assert.notEqual(message, null, 'the copy ends with an error');
+    assert.ok(message.startsWith('could not set CFBundleIdentifier in ' + path.join(copy, 'Contents', 'Info.plist') + ' ('), 'the error names the step that failed first: ' + message);
+    assert.match(message, /; the unfinished copy could not be removed \([^)]+\): remove it by hand: /, 'and says the removal failed, with its reason: ' + message);
+    assert.ok(message.endsWith('remove it by hand: ' + copy), 'and names the copy to remove: ' + message);
+    assert.equal(message.indexOf('ENOTEMPTY') > message.indexOf('could not be removed'), message.includes('ENOTEMPTY'), 'the removal\'s ENOTEMPTY, if any, is given as the removal\'s reason, not as the cause: ' + message);
+    assert.equal(existsSync(path.join(copy, 'Contents', 'Info.plist')), true, 'what macOS kept is still there, as the error says');
+    assert.equal(existsSync(path.join(copy, 'Contents', 'MacOS', 'plain-sight')), false, 'and nothing else of the copy: no executable to launch');
+  } finally {
+    execFileSync('chflags', ['-R', 'nouchg', source]);
+    if (existsSync(destination)) execFileSync('chflags', ['-R', 'nouchg', destination]);
+  }
+});
+
+// QA-G-34: existsSync follows links, so a symbolic link at the copy's path
+// that leads nowhere passed the "exists already" check, the ditto failed and
+// the cleanup removed the link: a path the script did not make (QA-01's
+// r7_guard_adv.mjs E8c). The check reads the path itself (lstatSync), so the
+// link stops the copy before the ditto and stays.
+test('a symbolic link at the copy\'s path, even one that leads nowhere, stops the copy before the ditto and is left where it is (QA-G-34)', () => {
+  const source = fakeBundle('source-dangling', REAL_ID);
+  const destination = path.join(ROOT, 'destination-dangling');
+  const copy = path.join(destination, TEST_NAME + '.app');
+  mkdirSync(destination, { recursive: true });
+  symlinkSync(path.join(ROOT, 'nowhere-target.app'), copy);
+  assert.throws(() => copyUnsigned(source, destination, 1761000007), /exists already/, 'refused before the ditto');
+  assert.equal(lstatSync(copy).isSymbolicLink(), true, 'the link is still there');
+  assert.equal(readlinkSync(copy), path.join(ROOT, 'nowhere-target.app'), 'and still leads where it led');
+  assert.equal(existsSync(path.join(ROOT, 'nowhere-target.app')), false, 'nothing was copied through it');
+  // A link that appears at the path only during the copy is never removed
+  // either: the cleanup reads the path itself too. ditto is handed in, and
+  // fails after a link took the copy's place.
+  const later = path.join(ROOT, 'destination-link-later');
+  const linked = (from, to) => { symlinkSync(path.join(ROOT, 'elsewhere.app'), to); throw new Error('ditto: ' + to + ': File exists'); };
+  let message = null;
+  try { copyUnsigned(source, later, 1761000008, { ditto: linked }); } catch (err) { message = err.message; }
+  assert.match(String(message), /^could not copy .* with ditto \(ditto: .*File exists\); .* is a symbolic link this call did not make, left as it is$/, 'the error says the link was left: ' + message);
+  assert.equal(lstatSync(path.join(later, TEST_NAME + '.app')).isSymbolicLink(), true, 'the link is still there');
+});
+
 test('the read-back compares the entitlements exactly: the same keys and values in any order pass, a missing, extra or changed one fails', () => {
   const reordered = { 'com.apple.security.files.bookmarks.app-scope': true, 'com.apple.security.files.user-selected.read-write': true, [SANDBOX]: true };
   assert.equal(sameEntitlements(THREE, reordered), true);
@@ -302,6 +357,7 @@ try {
     }
   }
 } finally {
+  try { execFileSync('chflags', ['-R', 'nouchg', ROOT]); } catch { /* nothing flagged is left */ }
   rmSync(ROOT, { recursive: true, force: true });
 }
 console.log(`\n${passed} passed, ${failed} failed, ${tests.length} total. Errors: ${failed}`);

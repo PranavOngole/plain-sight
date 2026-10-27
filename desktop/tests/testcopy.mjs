@@ -22,9 +22,14 @@
 //   the identifier is the test identifier, the name is the test name, the
 //   manifest is gone, the entitlements are exactly the original's and the
 //   launch guard (tests/launch-guard.mjs) lets it through;
-// - is removed, with the error naming the step, when any step after the
-//   ditto fails, so a copy that still carries the real identifier is never
-//   left behind (QA-G-32); a path the script did not make is never removed.
+// - is removed, with the error naming the step, when the ditto or any step
+//   after it fails, so a copy that still carries the real identifier is not
+//   left behind (QA-G-32); when even that removal fails (a file macOS keeps,
+//   such as one marked immutable with chflags uchg), the error keeps the
+//   step's own reason, gives the removal's and names the path to remove by
+//   hand. A path the script did not make is never removed: anything already
+//   at the copy's path, a symbolic link included, even one that leads
+//   nowhere, stops the script before the ditto (QA-G-34).
 // It prints the copy's path last, for PLAIN_SIGHT_APP=<path>. The original is
 // never changed: a bundle sandboxed under the real identifier stays the D-39
 // trap and is deleted once test:bundle has checked it. Nothing here opens
@@ -36,7 +41,7 @@
 // the signing, the verification and the read-back need a real bundle.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,27 +53,34 @@ export const MANIFEST = 'Contents/Resources/container-migration.plist';
 export const SIGNATURE = 'Contents/_CodeSignature';
 export const testIdentifier = (stamp) => REAL_ID + '.testcopy-' + stamp;
 
-// plutil with its complaint kept for the error, the one call the tests hand in.
+// plutil with its complaint kept for the error, and ditto: the two calls the
+// tests hand in.
 const plutilRun = (args) => execFileSync('plutil', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const dittoRun = (source, copy) => execFileSync('ditto', [source, copy]);
 const reasonOf = (err) => String((err && err.stderr) || (err && err.message) || err).trim();
+
+// What is at a path, without following a symbolic link: existsSync follows
+// links, so a link that leads nowhere would pass for nothing there (QA-G-34).
+const entryAt = (p) => { try { return lstatSync(p); } catch { return null; } };
 
 // The copy before it is signed: ditto, the identifier and the name rewritten,
 // the manifest and the old signature removed. Returns the copy's path, which
-// is fixed first and must not exist: nothing at the destination is ever
-// written over. On a failure after the ditto, this call removes the copy it
-// made and the error names the step, so no copy under the real identifier,
-// sandboxed and signed as the original, is ever left behind (QA-G-32); a path
-// it did not make is never removed.
-export function copyUnsigned(source, destination, stamp, { plutil = plutilRun } = {}) {
+// is fixed first and must not exist, as a link either: nothing at the
+// destination is ever written over or removed. On a failure of the ditto or
+// any step after it, this call removes the copy it made and the error names
+// the step, so no copy under the real identifier, sandboxed and signed as the
+// original, is left behind (QA-G-32); when the removal itself fails, the
+// error keeps the step's reason and names the copy to remove by hand.
+export function copyUnsigned(source, destination, stamp, { plutil = plutilRun, ditto = dittoRun } = {}) {
   if (!existsSync(path.join(source, 'Contents', 'Info.plist'))) throw new Error('no app bundle at ' + source + ' (npm run app:build makes one)');
   const copy = path.join(destination, TEST_NAME + '.app');
-  if (existsSync(copy)) throw new Error(copy + ' exists already; remove it or name another destination');
+  if (entryAt(copy)) throw new Error(copy + ' exists already; remove it or name another destination');
   mkdirSync(destination, { recursive: true });
   const info = path.join(copy, 'Contents', 'Info.plist');
   const has = (key) => { try { plutil(['-extract', key, 'raw', '-o', '-', info]); return true; } catch { return false; } };
   let step = 'copy ' + source + ' with ditto';
   try {
-    execFileSync('ditto', [source, copy]);
+    ditto(source, copy);
     for (const [key, value] of [['CFBundleIdentifier', testIdentifier(stamp)], ['CFBundleName', TEST_NAME], ['CFBundleDisplayName', TEST_NAME]]) {
       if (key === 'CFBundleDisplayName' && !has(key)) continue;
       step = 'set ' + key + ' in ' + info;
@@ -79,8 +91,18 @@ export function copyUnsigned(source, destination, stamp, { plutil = plutilRun } 
     step = 'remove the old signature from ' + copy;
     rmSync(path.join(copy, SIGNATURE), { recursive: true, force: true });
   } catch (err) {
-    rmSync(copy, { recursive: true, force: true });
-    throw new Error('could not ' + step + ' (' + reasonOf(err) + '); the unfinished copy, which may still carry the real identifier, was removed: ' + copy);
+    const cause = 'could not ' + step + ' (' + reasonOf(err) + ')';
+    const made = entryAt(copy);
+    if (!made) throw new Error(cause + '; nothing was left at ' + copy);
+    // Never a link: one at the path before the ditto stopped the call above,
+    // so a link here is someone else's, and stays.
+    if (made.isSymbolicLink()) throw new Error(cause + '; ' + copy + ' is a symbolic link this call did not make, left as it is');
+    try {
+      rmSync(copy, { recursive: true, force: true });
+    } catch (removal) {
+      throw new Error(cause + '; the unfinished copy could not be removed (' + reasonOf(removal) + '): remove it by hand: ' + copy);
+    }
+    throw new Error(cause + '; the unfinished copy, which may still carry the real identifier, was removed: ' + copy);
   }
   return copy;
 }
