@@ -3,7 +3,7 @@
 // id, the Apple Distribution signing identity and the provisioning profile.
 //
 // Run from desktop/:
-//   npm run appstore:config -- --team <TEAMID> --identity "Apple Distribution: <name> (<TEAMID>)" --profile <path> [--build <n>] [--force]
+//   npm run appstore:config -- --team <TEAMID> --identity "Apple Distribution: <name> (<TEAMID>)" --profile <path> --build <n> [--force]
 //
 // Into src-tauri/, next to tauri.conf.json (or into --out <folder>, which the
 // tests use), it writes:
@@ -11,8 +11,9 @@
 //   tauri.conf.json for the store build: the signing identity, the minimum
 //   macOS of the everyday build (12.0), the App Store entitlements file, the
 //   profile copied into the app as Contents/embedded.provisionprofile under
-//   its absolute path, and with --build the build number
-//   (bundle.macOS.bundleVersion);
+//   its absolute path, and the build number given with --build
+//   (bundle.macOS.bundleVersion): 1 for the first store build and a higher
+//   number for every later upload (DM-252);
 // - Entitlements.appstore.plist: every entitlement of Entitlements.plist,
 //   read from that file each time (so one added there later carries over),
 //   plus com.apple.application-identifier (<TEAMID>.<the identifier in
@@ -25,12 +26,12 @@
 // letters or digits; an identity that is not "Apple Distribution: <name>
 // (<TEAMID>)"; a profile whose name does not end in .provisionprofile, that
 // lies inside the repository (as given or once its links are followed), that
-// does not exist or that is not a file; a build number that is not a whole
-// number from 1; an output folder that does not exist; an output file that
-// exists already (unless --force) or that is no plain file; and anything it
-// cannot read. The two files are written under temporary names and then
-// renamed into place. No dependency: the property lists go through macOS's
-// plutil. Tested by tests/appstore-config-tests.mjs.
+// does not exist or that is not a file; no build number, or one that is not
+// a whole number from 1; an output folder that does not exist; an output
+// file that exists already (unless --force) or that is no plain file; and
+// anything it cannot read. The two files are written under temporary names
+// and then renamed into place. No dependency: the property lists go through
+// macOS's plutil. Tested by tests/appstore-config-tests.mjs.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -46,14 +47,19 @@ export const APPLICATION_IDENTIFIER = 'com.apple.application-identifier';
 export const TEAM_IDENTIFIER = 'com.apple.developer.team-identifier';
 const IDENTITY_PREFIX = 'Apple Distribution: ';
 const PROFILE_EXTENSION = '.provisionprofile';
-const USAGE = 'npm run appstore:config -- --team <TEAMID> --identity "Apple Distribution: <name> (<TEAMID>)" --profile <path> [--build <n>] [--force]';
+const USAGE = 'npm run appstore:config -- --team <TEAMID> --identity "Apple Distribution: <name> (<TEAMID>)" --profile <path> --build <n> [--force]';
 
 // A refusal: the command stops with this message and writes nothing.
 export class Refusal extends Error {}
 const refuse = (message) => { throw new Refusal(message); };
 
-// The command line: --team, --identity and --profile, each once; --build and
+// The command line: --team, --identity, --profile and --build, each once;
 // --out at most once; --force alone. Paths are taken from the current folder.
+// The build number has no default (DM-252): a store build without one takes
+// its CFBundleVersion from the version, 1.0.0 (Tauri's App Store guide, Build
+// and upload), which Apple reads as the same build as 1 (CFBundleVersion:
+// "missing integers in the format are interpreted as zeros"), so a first
+// re-upload with --build 1 would repeat the first upload's build.
 export function parseArgs(argv, { cwd = process.cwd() } = {}) {
   const values = {};
   let force = false;
@@ -68,11 +74,12 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     values[key] = argv[i];
   }
   for (const key of ['team', 'identity', 'profile']) if (!values[key]) refuse('--' + key + ' is missing; usage: ' + USAGE);
+  if (!Object.hasOwn(values, 'build')) refuse('--build is missing: give --build 1 for the first store build and a higher number for every later upload (without it the build would carry the version, 1.0.0, which Apple counts as the same build as 1); usage: ' + USAGE);
   return {
     team: values.team,
     identity: values.identity,
     profile: path.resolve(cwd, values.profile),
-    build: Object.hasOwn(values, 'build') ? values.build : null,
+    build: values.build,
     out: Object.hasOwn(values, 'out') ? path.resolve(cwd, values.out) : TAURI,
     force
   };
@@ -97,7 +104,7 @@ export function plan(options, { entitlementsFile = path.join(TAURI, 'Entitlement
   if (inside(profile, repository) || inside(profile, repositoryReal) || (profileReal && (inside(profileReal, repository) || inside(profileReal, repositoryReal)))) refuse('the profile lies inside the repository (' + repository + '); keep it outside, as step 4 says: ' + profile);
   if (!existsSync(profile)) refuse('there is no profile at ' + profile);
   if (!statSync(profile).isFile()) refuse('the profile is not a file: ' + profile);
-  if (build !== null && !/^[1-9][0-9]*$/.test(build)) refuse('the build number must be a whole number from 1, such as 1 or 2: ' + JSON.stringify(build));
+  if (typeof build !== 'string' || !/^[1-9][0-9]*$/.test(build)) refuse('the build number must be a whole number from 1, such as 1 or 2: ' + JSON.stringify(build));
   const outEntry = existsSync(out) ? statSync(out) : null;
   if (!outEntry || !outEntry.isDirectory()) refuse('there is no folder at ' + out);
   const configPath = path.join(out, CONFIG_NAME);
@@ -117,8 +124,7 @@ export function plan(options, { entitlementsFile = path.join(TAURI, 'Entitlement
   try { entitlements = plistJson(entitlementsFile); } catch (err) { refuse('could not read ' + entitlementsFile + ' as a property list (' + String((err && err.stderr) || err.message).trim() + ')'); }
   if (!entitlements || typeof entitlements !== 'object' || Array.isArray(entitlements)) refuse(entitlementsFile + ' holds no dictionary of entitlements');
   for (const key of [APPLICATION_IDENTIFIER, TEAM_IDENTIFIER]) if (Object.hasOwn(entitlements, key)) refuse(entitlementsFile + ' already holds ' + key + ', which only the App Store entitlements may hold');
-  const macOS = { signingIdentity: identity, minimumSystemVersion: minimum, entitlements: './' + ENTITLEMENTS_NAME, files: { 'embedded.provisionprofile': profile } };
-  if (build !== null) macOS.bundleVersion = build;
+  const macOS = { signingIdentity: identity, minimumSystemVersion: minimum, entitlements: './' + ENTITLEMENTS_NAME, files: { 'embedded.provisionprofile': profile }, bundleVersion: build };
   const storeEntitlements = { ...entitlements, [APPLICATION_IDENTIFIER]: team + '.' + identifier, [TEAM_IDENTIFIER]: team };
   let plist;
   try {
@@ -144,7 +150,7 @@ function main() {
   try {
     const written = write(plan(parseArgs(process.argv.slice(2))));
     for (const target of written) console.log('written: ' + target);
-    console.log('Both hold this Mac\'s path to the profile and the team\'s identifiers and are not committed (desktop/.gitignore). Build with: npx tauri build --bundles app --config src-tauri/' + CONFIG_NAME);
+    console.log('Both hold this Mac\'s path to the profile and the team\'s identifiers and are not committed (desktop/.gitignore). Build with: npx tauri build --bundles app --config src-tauri/' + CONFIG_NAME + '. Before every later upload, run this again with a higher --build and --force.');
   } catch (err) {
     // A refusal names what to change; any other error (a write the disk
     // refused, say) is reported as plainly, and its temporary files are gone.

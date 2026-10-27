@@ -14,7 +14,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { APPLICATION_IDENTIFIER, CONFIG_NAME, ENTITLEMENTS_NAME, REPOSITORY, TAURI, TEAM_IDENTIFIER, parseArgs, plan, write } from '../tools/appstore-config.mjs';
+import { APPLICATION_IDENTIFIER, CONFIG_NAME, ENTITLEMENTS_NAME, REPOSITORY, Refusal, TAURI, TEAM_IDENTIFIER, parseArgs, plan, write } from '../tools/appstore-config.mjs';
 
 const DESKTOP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TOOL = path.join(DESKTOP, 'tools', 'appstore-config.mjs');
@@ -38,13 +38,15 @@ const TAURI_BEFORE = tauriState();
 let outs = 0;
 const freshOut = () => { outs += 1; const out = path.join(ROOT, 'out-' + outs); mkdirSync(out); return out; };
 const listing = (dir) => (existsSync(dir) ? readdirSync(dir).sort() : null);
-const args = ({ team = TEAM, identity = IDENTITY, profile = PROFILE, out, build = null, extra = [], omit = null }) => {
+// Every run gives --build, which the command requires (DM-252): 1 unless a
+// case names another number, or none when the case omits it.
+const args = ({ team = TEAM, identity = IDENTITY, profile = PROFILE, out, build = '1', extra = [], omit = null }) => {
   const a = [];
   if (omit !== 'team') a.push('--team', team);
   if (omit !== 'identity') a.push('--identity', identity);
   if (omit !== 'profile') a.push('--profile', profile);
   a.push('--out', out);
-  if (build !== null) a.push('--build', build);
+  if (omit !== 'build') a.push('--build', build);
   return [...a, ...extra];
 };
 const run = (argv) => spawnSync(process.execPath, [TOOL, ...argv], { encoding: 'utf8', cwd: ROOT });
@@ -65,12 +67,12 @@ function refusedRun(label, options, reason) {
 const tests = [];
 const test = (name, fn) => tests.push({ name, fn });
 
-test('the command writes tauri.appstore.conf.json as APPSTORE.md step 6 shows it: the identity, the everyday minimum macOS (12.0), the App Store entitlements file and the profile under its absolute path', () => {
+test('the command writes tauri.appstore.conf.json as APPSTORE.md step 6 shows it: the identity, the everyday minimum macOS (12.0), the App Store entitlements file, the profile under its absolute path and the build number', () => {
   const out = freshOut();
   const r = run(args({ out }));
   assert.equal(r.status, 0, 'exit code 0; output: ' + r.stdout + r.stderr);
   assert.deepEqual(listing(out), [CONFIG_NAME, ENTITLEMENTS_NAME].sort(), 'exactly the two files');
-  assert.equal(readFileSync(path.join(out, CONFIG_NAME), 'utf8'), '{\n  "bundle": {\n    "macOS": {\n      "signingIdentity": "Apple Distribution: Test Person (ABCDE12345)",\n      "minimumSystemVersion": "12.0",\n      "entitlements": "./Entitlements.appstore.plist",\n      "files": {\n        "embedded.provisionprofile": ' + JSON.stringify(PROFILE) + '\n      }\n    }\n  }\n}\n');
+  assert.equal(readFileSync(path.join(out, CONFIG_NAME), 'utf8'), '{\n  "bundle": {\n    "macOS": {\n      "signingIdentity": "Apple Distribution: Test Person (ABCDE12345)",\n      "minimumSystemVersion": "12.0",\n      "entitlements": "./Entitlements.appstore.plist",\n      "files": {\n        "embedded.provisionprofile": ' + JSON.stringify(PROFILE) + '\n      },\n      "bundleVersion": "1"\n    }\n  }\n}\n');
   assert.equal(conf.bundle.macOS.minimumSystemVersion, '12.0', 'the everyday minimum, which the store build repeats');
   // The block in APPSTORE.md step 6: the same keys in the same order, and the same fixed values.
   const doc = readFileSync(path.join(DESKTOP, 'APPSTORE.md'), 'utf8');
@@ -123,7 +125,7 @@ test('--build sets bundle.macOS.bundleVersion to the number given', () => {
 });
 
 test('with no --out the files go into src-tauri/, next to tauri.conf.json (read from the arguments; nothing is written)', () => {
-  assert.equal(parseArgs(['--team', TEAM, '--identity', IDENTITY, '--profile', PROFILE]).out, path.join(DESKTOP, 'src-tauri'));
+  assert.equal(parseArgs(['--team', TEAM, '--identity', IDENTITY, '--profile', PROFILE, '--build', '1']).out, path.join(DESKTOP, 'src-tauri'));
   assert.equal(TAURI, path.join(DESKTOP, 'src-tauri'));
 });
 
@@ -168,7 +170,23 @@ test('a build number that is not a whole number from 1, an output folder that do
   assert.equal(existsSync(missing), false, 'and it was not made');
   refusedRun('an unknown argument', { extra: ['--teamid', TEAM] }, /unknown argument "--teamid"/);
   refusedRun('the team given twice', { extra: ['--team', TEAM] }, /--team is given twice/);
-  refusedRun('an argument with no value', { extra: ['--build'] }, /--build needs a value/);
+  refusedRun('an argument with no value', { omit: 'build', extra: ['--build'] }, /--build needs a value/);
+});
+
+// DM-252: with no --build, a first store build carried CFBundleVersion 1.0.0,
+// which Tauri takes from the version (Tauri's App Store guide, Build and
+// upload), and Apple reads "1" as 1.0.0 (CFBundleVersion: "missing integers
+// in the format are interpreted as zeros"), so APPSTORE.md's "for example 1,
+// then 2" gave the first re-upload the first upload's build again. The
+// command now takes no build without a number, and plan() refuses one that a
+// caller did not give.
+test('a run without --build is refused and writes nothing: the refusal says to give --build 1 for the first store build and a higher number for every later upload; plan() refuses a missing build number as well (DM-252)', () => {
+  refusedRun('no --build', { omit: 'build' }, /^appstore-config: not written: --build is missing: give --build 1 for the first store build and a higher number for every later upload /);
+  const out = freshOut();
+  for (const build of [null, undefined]) {
+    assert.throws(() => write(plan({ ...parseArgs(args({ out }), { cwd: ROOT }), build })), (err) => err instanceof Refusal && /^the build number must be a whole number from 1, such as 1 or 2: /.test(err.message), 'plan() refuses a build number of ' + build);
+  }
+  assert.deepEqual(listing(out), [], 'nothing was written');
 });
 
 test('output files that exist already are refused and kept as they were unless --force replaces them, and an output that is a link or a folder is refused even with --force', () => {
