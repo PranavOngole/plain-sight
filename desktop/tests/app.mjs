@@ -184,6 +184,31 @@ async function inPanel(isOpen, steps) {
 }
 const openPanelBusy = () => (driveRaw('windows', app.pid).windows || []).some((w) => w.title === 'Open' && (w.sheets || []).length > 0);
 
+// Go to (Cmd+Shift+G) the test's own folder inside a save or folder panel,
+// typed with real keys. The panel's default button is pressed only once the
+// panel shows that folder by name (its location control, read through
+// Accessibility): if the Go-to box did not take the path, the default button
+// would save into or choose the panel's start folder, a personal one, which
+// no test may touch (DM-239 d), so the test fails here, naming the box, and
+// inPanel cancels the panel.
+function panelShowsFolder(name) {
+  const shows = (node) => Boolean(node) && typeof node === 'object'
+    && ([node.title, node.value, node.description].includes(name) || (node.children || []).some(shows));
+  return (drive('tree', app.pid, 16).windows || []).some(shows);
+}
+async function goTo(folder) {
+  await keys.press('cmd+shift+g');
+  await sleep(1000);
+  drive('type', app.pid, folder, 10);
+  await sleep(800);
+  await keys.press('return');   // go to the folder
+  await sleep(1500);
+  if (!panelShowsFolder(path.basename(folder))) {
+    throw new Error('the panel\'s Go-to box did not take ' + folder + ': the panel does not show that folder, so the test cancels the panel instead of pressing its default button over the panel\'s start folder');
+  }
+  note('the panel shows ' + path.basename(folder) + ' after the Go-to box');
+}
+
 // Open: the page's Open button, the system open panel, Go to (Cmd+Shift+G)
 // the file typed with real keys, the panel's Open button, then the page's
 // password dialog, typed with real keys.
@@ -221,7 +246,8 @@ test('Open shows the system open panel; a wrong password changes nothing; the ri
 // document window started in Downloads with the page's proposed name. The
 // robot goes to a folder of its own under the evidence directory through
 // the panel's Go-to box, as the folder test does, and presses Save (the
-// panel's default button); the file must land there and decrypt to the text.
+// panel's default button) only once the panel shows that folder (DM-239 d);
+// the file must land there and decrypt to the text.
 const SAVE_AS = path.join(EVIDENCE, 'folders', 'Saved from the panel');
 const savePanelShown = () => drive('cgwindows', app.pid).windows.filter((x) => x.onscreen && x.layer === 0 && x.width > 400).length >= 2;
 test('Save without a folder opens the system save panel; saved into the test\'s own folder through the panel, the .sight file decrypts to the text', async () => {
@@ -236,13 +262,8 @@ test('Save without a folder opens the system save panel; saved into the test\'s 
   await until(savePanelShown, 'the save panel on screen', 10000);
   note('windows with the save panel open: ' + JSON.stringify(drive('cgwindows', app.pid).windows.filter((x) => x.onscreen)));
   await inPanel(savePanelShown, async () => {
-    await keys.press('cmd+shift+g');
-    await sleep(1000);
-    drive('type', app.pid, SAVE_AS, 10);
-    await sleep(800);
-    await keys.press('return');   // go to the folder
-    await sleep(1500);
-    await keys.press('return');   // Save, the panel's default button
+    await goTo(SAVE_AS);
+    await keys.press('return');   // Save, the panel's default button, now that the panel shows the test's folder
     await until(() => !savePanelShown(), 'the save panel to close', 8000);
   });
   const fresh = await until(() => { const n = readdirSync(SAVE_AS); return n.length ? n : null; }, 'a file in the test\'s folder', 8000);
@@ -319,13 +340,8 @@ const folderSheetShown = () => drive('cgwindows', app.pid).windows.filter((x) =>
 test('choosing the test\'s own folder in the picker (typed into its Go-to box), then Save, writes the text there', async () => {
   mkdirSync(BUILD_TEST, { recursive: true });
   await inPanel(folderSheetShown, async () => {
-    await keys.press('cmd+shift+g');
-    await sleep(1000);
-    drive('type', app.pid, BUILD_TEST, 10);
-    await sleep(800);
-    await keys.press('return');   // go to the folder
-    await sleep(1500);
-    await keys.press('return');   // choose it (the panel's default button)
+    await goTo(BUILD_TEST);
+    await keys.press('return');   // choose it (the panel's default button), now that the panel shows the test's folder
     await until(() => !folderSheetShown(), 'the picker to close', 8000);
   });
   await keys.press('escape');   // Esc on the intro applies it like Start

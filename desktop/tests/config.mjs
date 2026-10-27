@@ -335,6 +335,25 @@ test('both suites that open a bundle run the launch guard before any launch and 
   assert.notEqual(TEST_NAME, 'Plain Sight', 'and a name of its own');
 });
 
+// The real-key save and folder tests (app.mjs) go to the test's own folder
+// through the panel's Go-to box and press the panel's default button only
+// after goTo, which cancels the panel when the panel does not show that
+// folder; before, the default button was pressed either way, and a Go-to box
+// that failed saved into the panel's start folder, the real Downloads or
+// Documents folder (DM-239 d).
+test('the real-key save and folder tests press a panel\'s default button only after the Go-to step that checks the panel shows the test\'s folder (DM-239 d)', () => {
+  const text = read(path.join(DESKTOP, 'tests'), 'app.mjs');
+  assert.match(text, /if \(!panelShowsFolder\(path\.basename\(folder\)\)\) \{\n    throw new Error\(/, 'goTo fails when the panel does not show the folder');
+  for (const [panel, folder] of [['savePanelShown', 'SAVE_AS'], ['folderSheetShown', 'BUILD_TEST']]) {
+    const at = text.indexOf('await inPanel(' + panel + ', async () => {');
+    assert.ok(at >= 0, 'the ' + panel + ' flow');
+    const body = text.slice(at, text.indexOf('});', at));
+    assert.ok(body.indexOf('await goTo(' + folder + ');') >= 0, 'the ' + panel + ' flow goes to its own folder through goTo');
+    assert.ok(body.indexOf('await goTo(' + folder + ');') < body.indexOf("keys.press('return')"), 'and presses the default button only after it');
+    assert.equal(body.includes("press('cmd+shift+g')"), false, 'the Go-to keys are typed by goTo alone, which checks the panel');
+  }
+});
+
 test('the web deployment allowlist is unchanged (DR-10)', () => {
   const lines = read(ROOT, '.vercelignore').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
   assert.deepEqual(lines, ['*', '!index.html', '!covers', '!covers/**', '!vercel.json']);
