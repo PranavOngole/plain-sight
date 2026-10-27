@@ -30,11 +30,13 @@
 // a whole number from 1; an output folder that does not exist; an output
 // file that exists already (unless --force) or that is no plain file; and
 // anything it cannot read. The two files are written under temporary names
-// and then renamed into place. No dependency: the property lists go through
-// macOS's plutil. Tested by tests/appstore-config-tests.mjs.
+// and then renamed into place as one step: when the second cannot be put in
+// place, the first is put back as it was (DM-253). No dependency: the
+// property lists go through macOS's plutil. Tested by
+// tests/appstore-config-tests.mjs.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, lstatSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -133,17 +135,63 @@ export function plan(options, { entitlementsFile = path.join(TAURI, 'Entitlement
   return { files: [[configPath, JSON.stringify({ bundle: { macOS } }, null, 2) + '\n'], [entitlementsPath, plist]] };
 }
 
-// Writes the two files, each under a temporary name first and then renamed
-// into place, so a failed write leaves neither half done.
-export function write({ files }) {
-  const temporary = files.map(([target, text]) => [target + '.tmp-' + process.pid, target, text]);
+// Writes the two files as one step (DM-253). Each is written under a
+// temporary name first, made anew (the exclusive flag, so nothing already at
+// that name is followed), and then renamed into place, the configuration
+// first. Before that first rename, an earlier configuration at its place (one
+// --force replaces) is kept under a second name, a hard link to the same
+// file. If the second rename then fails (an earlier entitlements file that
+// macOS will not let the command replace, say), the first file is put back as
+// it was: that earlier file, or no file when there was none. So a failed
+// write leaves neither half done, and the refusal says what is back. The
+// temporary files, and an earlier file kept and no longer needed, are
+// removed at the end. rename, link and unlink are handed in, so a test can
+// make one fail.
+export function write({ files }, { rename = renameSync, link = linkSync, unlink = unlinkSync } = {}) {
+  const steps = files.map(([target, text]) => ({ target, text, tmp: target + '.tmp-' + process.pid, earlier: target + '.earlier-' + process.pid, kept: false, stranded: false }));
+  const placed = [];
   try {
-    for (const [tmp, , text] of temporary) writeFileSync(tmp, text, { flag: 'wx' });
-    for (const [tmp, target] of temporary) renameSync(tmp, target);
+    for (const s of steps) writeFileSync(s.tmp, s.text, { flag: 'wx' });
+    // Only a file placed before another can need putting back.
+    for (const s of steps.slice(0, -1)) {
+      if (!entryAt(s.target)) continue;
+      try { link(s.target, s.earlier); } catch (err) { refuse('could not keep the earlier ' + s.target + ' to put it back should the write fail (' + reason(err) + ')'); }
+      s.kept = true;
+    }
+    for (const s of steps) {
+      try { rename(s.tmp, s.target); } catch (err) {
+        if (!placed.length) throw err;
+        throw putBack(placed, s, err, { rename, unlink });
+      }
+      placed.push(s);
+    }
   } finally {
-    for (const [tmp] of temporary) rmSync(tmp, { force: true });
+    for (const s of steps) {
+      rmSync(s.tmp, { force: true });
+      if (s.kept && !s.stranded) rmSync(s.earlier, { force: true });
+    }
   }
   return files.map(([target]) => target);
+}
+
+const reason = (err) => (err && err.message) || String(err);
+// After a rename failed, each file already placed is put back, the last
+// first: the earlier file kept for it, or none. Returns the refusal that says
+// so, or, when a file cannot be put back, an error that says where its
+// earlier file waits (that file is then kept, never removed).
+function putBack(placed, failed, err, { rename, unlink }) {
+  const back = [];
+  const problems = [];
+  for (const p of [...placed].reverse()) {
+    try {
+      if (p.kept) { rename(p.earlier, p.target); back.push(p.target + ' is back as it was'); } else { unlink(p.target); back.push(p.target + ' was removed again'); }
+    } catch (undoErr) {
+      p.stranded = p.kept;
+      problems.push(p.kept ? 'could not put the earlier ' + p.target + ' back (' + reason(undoErr) + '): it is at ' + p.earlier + '; move it back by hand' : 'could not remove the new ' + p.target + ' again (' + reason(undoErr) + '): remove it by hand');
+    }
+  }
+  const first = 'could not put ' + failed.target + ' in place (' + reason(err) + ')';
+  return problems.length ? new Error(first + ', and ' + problems.join('; ')) : new Refusal(first + '; ' + back.join('; '));
 }
 
 function main() {

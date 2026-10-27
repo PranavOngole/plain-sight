@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -223,6 +223,120 @@ test('a write that the disk refuses ends with exit code 1 and a plain message, a
   } finally {
     chmodSync(out, 0o755);
   }
+});
+
+// DM-253 (the Delivery Manager's delta of a92087a; DISH confirmed it; QA-01's
+// QA-G-42): write() renamed the two temporary files one after the other, so
+// when the second rename failed the new configuration was already in place
+// beside the earlier entitlements, against the comment that a failed write
+// leaves neither half done. A store build from that pair would take one run's
+// identity and profile with another run's entitlements.
+const esc = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const earlierPair = (out) => {
+  const config = path.join(out, CONFIG_NAME);
+  const entitlements = path.join(out, ENTITLEMENTS_NAME);
+  writeFileSync(config, 'EARLIER CONFIG\n');
+  writeFileSync(entitlements, 'EARLIER ENTITLEMENTS\n');
+  chmodSync(config, 0o600);
+  const then = new Date('2026-10-01T12:00:00Z');
+  utimesSync(config, then, then);
+  return { config, entitlements };
+};
+const fileFacts = (file) => { const s = statSync(file); return { ino: s.ino, mode: s.mode, size: s.size, mtimeMs: s.mtimeMs, text: readFileSync(file, 'utf8') }; };
+// A rename that macOS refuses on the calls named (EPERM, as it refused the
+// Delivery Manager's S10); every other call is the real one.
+const renameFailing = (...failing) => {
+  let calls = 0;
+  return (from, to) => {
+    calls += 1;
+    if (failing.includes(calls)) throw Object.assign(new Error("EPERM: operation not permitted, rename '" + from + "' -> '" + to + "'"), { code: 'EPERM' });
+    return renameSync(from, to);
+  };
+};
+const refusedRename = (target) => "EPERM: operation not permitted, rename '" + target + '.tmp-' + process.pid + "' -> '" + target + "'";
+test('when the second rename fails, write() puts the first file back as it was (the earlier file --force was replacing, the same file with its mode, size and time, or no file when there was none), removes its temporary files and refuses, saying what is back (DM-253)', () => {
+  const out = freshOut();
+  const { config, entitlements } = earlierPair(out);
+  const before = fileFacts(config);
+  const planned = plan(parseArgs(args({ out, extra: ['--force'] }), { cwd: ROOT }));
+  let err = null;
+  try { write(planned, { rename: renameFailing(2) }); } catch (e) { err = e; }
+  assert.ok(err instanceof Refusal, 'a refusal: ' + (err && err.stack));
+  assert.equal(err.message, 'could not put ' + entitlements + ' in place (' + refusedRename(entitlements) + '); ' + config + ' is back as it was');
+  assert.deepEqual(fileFacts(config), before, 'the earlier configuration is back: the same file, with its mode, size, time and text');
+  assert.equal(readFileSync(entitlements, 'utf8'), 'EARLIER ENTITLEMENTS\n', 'the earlier entitlements were never replaced');
+  assert.deepEqual(listing(out), [CONFIG_NAME, ENTITLEMENTS_NAME].sort(), 'no temporary file and no kept copy is left');
+  const none = freshOut();
+  const fresh = plan(parseArgs(args({ out: none }), { cwd: ROOT }));
+  err = null;
+  try { write(fresh, { rename: renameFailing(2) }); } catch (e) { err = e; }
+  assert.ok(err instanceof Refusal, 'a refusal: ' + (err && err.stack));
+  assert.equal(err.message, 'could not put ' + path.join(none, ENTITLEMENTS_NAME) + ' in place (' + refusedRename(path.join(none, ENTITLEMENTS_NAME)) + '); ' + path.join(none, CONFIG_NAME) + ' was removed again');
+  assert.deepEqual(listing(none), [], 'with no earlier file, nothing is left');
+});
+
+// The Delivery Manager's S10 and QA-01's C8.1 (wave-g/qa/scripts/app/
+// r9_config_adv.mjs), adopted with the answer the fix sets: an earlier pair
+// of another team, whose Entitlements.appstore.plist macOS will not let the
+// command replace (chflags uchg), so every check passes (both are plain files
+// and --force is given) and the second rename is refused.
+test('a run with --force over an earlier pair whose entitlements macOS will not let it replace (chflags uchg) refuses with exit 1 and one plain line, and both earlier files are as they were, with no temporary file (DM-253; the Delivery Manager\'s S10, QA-01\'s C8.1, QA-G-42)', () => {
+  const out = freshOut();
+  assert.equal(run(args({ out })).status, 0, 'an earlier pair');
+  const config = path.join(out, CONFIG_NAME);
+  const entitlements = path.join(out, ENTITLEMENTS_NAME);
+  const before = [readFileSync(config, 'utf8'), readFileSync(entitlements, 'utf8')];
+  execFileSync('chflags', ['uchg', entitlements]);
+  let r;
+  try {
+    r = run(args({ out, team: 'ZYXWV98765', identity: 'Apple Distribution: Other Person (ZYXWV98765)', build: '9', extra: ['--force'] }));
+  } finally {
+    execFileSync('chflags', ['nouchg', entitlements]);
+  }
+  assert.equal(r.status, 1, 'exit code 1: ' + r.stdout + r.stderr);
+  assert.equal(r.stderr, '', 'nothing on stderr');
+  assert.match(r.stdout, new RegExp('^appstore-config: not written: could not put ' + esc(entitlements) + ' in place \\(EPERM: operation not permitted, rename \'' + esc(entitlements) + '\\.tmp-\\d+\' -> \'' + esc(entitlements) + '\'\\); ' + esc(config) + ' is back as it was\\. Errors: 1\\n$'), 'one plain line that says the configuration is back: ' + r.stdout);
+  assert.deepEqual([readFileSync(config, 'utf8'), readFileSync(entitlements, 'utf8')], before, 'neither earlier file changed');
+  assert.deepEqual(listing(out), [CONFIG_NAME, ENTITLEMENTS_NAME].sort(), 'no temporary file and no kept copy is left');
+});
+
+// DISH's repro (dish_r9_delta/write_probe): write() handed a second target
+// that has become a non-empty folder, which no rename can replace.
+test('a second target that has become a non-empty folder: write() refuses, the first file is back as it was and the folder is untouched (DM-253, DISH\'s repro)', () => {
+  const out = freshOut();
+  const config = path.join(out, CONFIG_NAME);
+  writeFileSync(config, 'OLD CONFIG\n');
+  const folder = path.join(out, ENTITLEMENTS_NAME);
+  mkdirSync(folder);
+  writeFileSync(path.join(folder, 'keep'), 'x');
+  let err = null;
+  try { write({ files: [[config, 'NEW CONFIG\n'], [folder, 'NEW PLIST\n']] }); } catch (e) { err = e; }
+  assert.ok(err instanceof Refusal && err.message.endsWith('; ' + config + ' is back as it was'), 'a refusal that says the configuration is back: ' + (err && err.stack));
+  assert.equal(readFileSync(config, 'utf8'), 'OLD CONFIG\n', 'the first file is as it was');
+  assert.deepEqual(readdirSync(folder), ['keep'], 'the folder is untouched');
+  assert.deepEqual(listing(out), [CONFIG_NAME, ENTITLEMENTS_NAME].sort(), 'no temporary file is left');
+});
+
+test('when the first file cannot be put back either, the error says so and where its earlier file waits, and that file is kept there; a new file that cannot be removed again is named (DM-253)', () => {
+  const out = freshOut();
+  const { config, entitlements } = earlierPair(out);
+  const planned = plan(parseArgs(args({ out, extra: ['--force'] }), { cwd: ROOT }));
+  const kept = config + '.earlier-' + process.pid;
+  let err = null;
+  try { write(planned, { rename: renameFailing(2, 3) }); } catch (e) { err = e; }
+  assert.ok(err && !(err instanceof Refusal), 'an error, not a refusal, since a file changed: ' + (err && err.stack));
+  assert.equal(err.message, 'could not put ' + entitlements + ' in place (' + refusedRename(entitlements) + "), and could not put the earlier " + config + " back (EPERM: operation not permitted, rename '" + kept + "' -> '" + config + "'): it is at " + kept + '; move it back by hand');
+  assert.equal(readFileSync(kept, 'utf8'), 'EARLIER CONFIG\n', 'the earlier configuration waits there');
+  assert.deepEqual(listing(out), [CONFIG_NAME, ENTITLEMENTS_NAME, path.basename(kept)].sort(), 'no temporary file is left');
+  const none = freshOut();
+  const fresh = plan(parseArgs(args({ out: none }), { cwd: ROOT }));
+  const unlinkRefused = (p) => { throw Object.assign(new Error("EPERM: operation not permitted, unlink '" + p + "'"), { code: 'EPERM' }); };
+  err = null;
+  try { write(fresh, { rename: renameFailing(2), unlink: unlinkRefused }); } catch (e) { err = e; }
+  const made = path.join(none, CONFIG_NAME);
+  assert.ok(err && !(err instanceof Refusal), 'an error, not a refusal: ' + (err && err.stack));
+  assert.ok(err.message.endsWith(", and could not remove the new " + made + " again (EPERM: operation not permitted, unlink '" + made + "'): remove it by hand"), err.message);
+  assert.deepEqual(listing(none), [CONFIG_NAME], 'the new configuration is named and left; no temporary file');
 });
 
 test('desktop/.gitignore keeps both files out of the repository, and desktop/package.json runs the command as npm run appstore:config', () => {
