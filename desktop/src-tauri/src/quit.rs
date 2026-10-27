@@ -809,6 +809,30 @@ mod tests {
         assert_eq!(quit.finish(), Some(Ending::Terminate));
     }
 
+    /// The Delivery Manager's AT-R3 (dm-appstore-2783e5d/adv, quit.rs module
+    /// dm_adv), adopted as written (DM-237 a): a logout cancelled in the
+    /// sheet, then a window close with nothing to lose, ends through
+    /// terminate (no request is waiting), not through a reply to the
+    /// cancelled request. The reset of `terminate_pending` in `chosen` is what
+    /// this holds; with that line removed every other test still passed.
+    #[test]
+    fn at_r3_a_close_after_a_cancelled_logout_terminates_rather_than_replies() {
+        let mut quit = QuitState::new();
+        assert_eq!(quit.should_terminate(), Answer::Later { begin: true });
+        assert_eq!(quit.unsaved(quit.question(), true), Some(Next::Confirm));
+        assert_eq!(
+            quit.chosen(Choice::Cancel),
+            Some(Next::Cancel { reply: true })
+        );
+        assert!(quit.begin(), "the window is closed later");
+        assert_eq!(quit.unsaved(quit.question(), false), Some(Next::Quit));
+        assert_eq!(
+            quit.finish(),
+            Some(Ending::Terminate),
+            "nothing waits for a reply, so the app asks to terminate"
+        );
+    }
+
     #[test]
     fn a_missing_method_is_reported_with_its_consequence() {
         let line = not_installed("the reason");

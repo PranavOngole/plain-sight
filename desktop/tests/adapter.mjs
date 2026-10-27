@@ -210,6 +210,28 @@ test('the adapter\'s three waits leave the app\'s safety timer a full second of 
   assert.ok(longest + 1000 <= Number(safety[1]) * 1000, 'the waits take ' + longest + ' ms at most, which leaves less than 1000 ms before the ' + safety[1] + ' s safety timer');
 });
 
+// The quit's answer timer (D-48, DISH-G-37): quit.rs's ASK is read as text,
+// as SAFETY is above, and held to 1.5 s, the figure the README's quit bullet
+// and the quit.rs header state together with the two timers' sum (DM-237 b:
+// before this test, ASK set to 15 s passed every suite).
+test('the quit\'s answer timer is 1.5 s in quit.rs, and the README and the quit.rs header state that figure and its sum with the safety timer (DM-237 b)', () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const quitRs = readFileSync(path.join(here, '..', 'src-tauri', 'src', 'quit.rs'), 'utf8');
+  const ask = quitRs.match(/^const ASK: Duration = Duration::from_millis\((\d+)\);$/m);
+  assert.ok(ask, 'quit.rs names its answer timer in whole milliseconds');
+  const safety = quitRs.match(/^const SAFETY: Duration = Duration::from_secs\((\d+)\);$/m);
+  assert.ok(safety, 'quit.rs names its safety timer in whole seconds');
+  const askSeconds = Number(ask[1]) / 1000;
+  assert.equal(askSeconds, 1.5, 'the answer timer is 1.5 s (D-48)');
+  const total = askSeconds + Number(safety[1]);
+  const literal = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // The header is a wrapped //! comment: its lines are joined before the match.
+  const header = quitRs.split('\n').filter((l) => l.startsWith('//!')).map((l) => l.replace(/^\/\/! ?/, '')).join(' ');
+  assert.match(header, new RegExp(literal('is quit after the ' + askSeconds + '-second answer timer and then the ' + safety[1] + '-second safety timer, about ' + total + ' seconds in all')), 'the quit.rs header states both timers and their sum');
+  const readme = readFileSync(path.join(here, '..', '..', 'README.md'), 'utf8');
+  assert.match(readme, new RegExp(literal('the quit goes on after ' + askSeconds + ' seconds, and if it then never says it is done, the app\'s own timer ends it after ' + safety[1] + ' more seconds, so about ' + total + ' seconds in all')), 'the README\'s quit bullet states both timers and their sum');
+});
+
 test('the app\'s question whether a quit would lose text is answered by the page\'s callback, and false without one or when it fails (D-48)', () => {
   const a = load();
   try {

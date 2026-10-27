@@ -302,6 +302,38 @@ test('a Save the app cannot write says "Could not save" in both modes and writes
   }
 });
 
+// The web view's own downloads are refused (main.rs, on_download, DM-202): a
+// click on a link with a download attribute asks WebKit for a download, wry
+// then asks the app for a destination (wry 0.57.0, src/wkwebview/download.rs,
+// download_policy: the Downloads folder of the process's HOME plus the
+// suggested name), and the app's handler answers false, so WebKit writes
+// nothing. This launch runs under a HOME of its own under the evidence
+// directory, so even an app that allowed the download would write into that
+// folder and never into the real one. Written, not run (DM-237 c).
+const onscreenCount = () => drive('cgwindows', app.pid).windows.filter((w) => w.onscreen).length;
+test('a download link clicked in the page writes nothing: the web view\'s downloads are refused, and no window opens (DM-202, DM-237 c)', async () => {
+  const home = path.join(EVIDENCE, 'home-for-the-download-link');
+  const downloads = path.join(home, 'Downloads');
+  mkdirSync(downloads, { recursive: true });
+  const before = readdirSync(DOWNLOADS).length;
+  await stopApp(app);
+  try {
+    await launch({ HOME: home });
+    await page.press('Escape');   // the intro of a first launch under this home
+    const windows = onscreenCount();
+    await js(`(() => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['a download the app must refuse'], { type: 'text/plain' })); a.download = 'refused-download.txt'; document.body.appendChild(a); a.click(); a.remove(); return true; })()`);
+    await sleep(3000);
+    assert.deepEqual(readdirSync(downloads), [], 'nothing landed in this launch\'s Downloads folder');
+    assert.equal(readdirSync(DOWNLOADS).length, before, 'nothing landed in the test\'s Downloads folder');
+    assert.equal(onscreenCount(), windows, 'no new window');
+    assert.equal(await js('location.href'), 'tauri://localhost', 'still on the app page');
+    assert.ok(alive(app.pid), 'the app is still running');
+  } finally {
+    await stopApp(app);
+    await launch();
+  }
+});
+
 test('the shell shows nothing but the app: navigation away and new windows are refused', async () => {
   await js(`(() => { location.href = 'https://example.com/'; return true; })()`);
   await sleep(1500);
