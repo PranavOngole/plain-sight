@@ -282,6 +282,10 @@ pub async fn save_download<R: Runtime>(
 /// anything else, so a name that is not one Save makes, or that holds a
 /// path, never reaches a panel; then the file's bytes are made, the panel
 /// asked, and the file written where it said, under the name chosen there.
+/// The panel keeps the proposed format's extension, and so must its answer:
+/// one with another extension is refused before anything is staged or
+/// written, so the bytes of one format are never written under the name of
+/// another (DM-238).
 async fn save_through<F, Fut>(name: &str, text: &str, panel: F) -> Result<Option<String>, String>
 where
     F: FnOnce(String) -> Fut,
@@ -290,10 +294,17 @@ where
     if !is_download_name(name) {
         return Err("The file name is not one Save makes".to_owned());
     }
+    let (ext, _) = proposed_format(name).ok_or("The file name is not one Save makes")?;
     let bytes = file_bytes(name, text).map_err(|e| format!("Could not save the file: {e}"))?;
     let Some(path) = panel(name.to_owned()).await? else {
         return Ok(None);
     };
+    // The panel keeps the proposed extension (its one allowed file type), and
+    // the test build's stand-in must too: checked here, before anything is
+    // staged or written (DM-238).
+    if !has_extension(&path, ext) {
+        return Err(format!("the name must end in .{ext}"));
+    }
     let chosen = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -303,7 +314,8 @@ where
 }
 
 /// The system save panel: a sheet on the document window, starting in the
-/// Downloads folder with the proposed name, with a New Folder button. None
+/// Downloads folder with the proposed name and the proposed format's
+/// extension as its one allowed file type, with a New Folder button. None
 /// when cancelled. In the sandbox the panel itself lets the app write the file
 /// the user chose (the user-selected entitlement), so Downloads needs none.
 async fn save_as<R: Runtime>(
@@ -327,6 +339,7 @@ async fn save_as<R: Runtime>(
     }
     let start = downloads_dir(&window).ok();
     let parent = window.clone();
+    let filter = proposed_format(&name);
     let proposed = name;
     let (sender, mut receiver) = tauri::async_runtime::channel(1);
     // AppKit panels belong to the main thread: rfd builds the panel and starts
@@ -339,6 +352,16 @@ async fn save_as<R: Runtime>(
                 .set_title("Save")
                 .set_file_name(proposed)
                 .set_can_create_directories(true);
+            // The one allowed extension, the proposed format's: on macOS rfd
+            // hands the panel every filter's extensions as its allowed file
+            // types (rfd 0.17.2, src/backend/macos/file_dialog/panel_ffi.rs,
+            // `add_filters`, `setAllowedFileTypes`), so a name typed without
+            // an extension gets this one and the panel keeps it (AppKit,
+            // NSSavePanel.h, `allowedFileTypes`); `save_through` checks the
+            // answer's extension as well, for the test build's stand-in.
+            if let Some((ext, label)) = filter {
+                dialog = dialog.add_filter(label, &[ext]);
+            }
             if let Some(start) = start {
                 dialog = dialog.set_directory(start);
             }
@@ -549,6 +572,32 @@ fn downloads_dir<R: Runtime>(window: &WebviewWindow<R>) -> Result<PathBuf, Strin
 
 /// The plain files Save writes, by extension (index.html, PLAIN_FORMATS).
 const PLAIN_EXTENSIONS: [&str; 3] = [".txt", ".md", ".docx"];
+
+/// The formats Save proposes to the save panel, by extension, each with the
+/// name its filter gets (rfd shows the name on Windows and Linux only; on
+/// macOS the extensions become the panel's allowed file types).
+const PANEL_FORMATS: [(&str, &str); 4] = [
+    ("txt", "Plain text"),
+    ("md", "Markdown"),
+    ("docx", "Word document"),
+    ("sight", "Plain Sight file"),
+];
+
+/// The proposed name's format: its extension without the dot and the
+/// filter's name. None for a name that ends in none of the four.
+fn proposed_format(name: &str) -> Option<(&'static str, &'static str)> {
+    PANEL_FORMATS
+        .into_iter()
+        .find(|(ext, _)| name.rsplit_once('.').is_some_and(|(_, e)| e == *ext))
+}
+
+/// Whether the path's extension is `ext`, in any case: the panel keeps the
+/// proposed extension, and the test build's stand-in must too (DM-238).
+fn has_extension(path: &Path, ext: &str) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+}
 
 /// What goes into a file Save writes: for a `.docx`, a Word document made
 /// from the text (docx.rs); for every other name, the text as it is.
@@ -923,6 +972,121 @@ mod tests {
         assert_eq!(result, Ok(None), "a cancelled panel answers None");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "and writes nothing");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The save panel keeps the proposed format's extension (DM-238): the
+    /// panel is given that one extension as its allowed file type, and since
+    /// the test build's stand-in can answer any path, an answer whose
+    /// extension is not the proposed one is refused before anything is
+    /// staged or written. The three renamed cases are the Delivery Manager's
+    /// AT-R1, AT-R2 and AT-R8 (dm-appstore-2783e5d/adv, folder.rs module
+    /// dm_adv), adopted with the result the fix sets: before it, notes.docx
+    /// held the plain text, notes.txt the zip archive and notes.sight the
+    /// plain text.
+    #[test]
+    fn a_panel_answer_must_keep_the_proposed_extension() {
+        let dir = scratch("panel-extension");
+        let answer = |path: PathBuf| move |_proposed: String| async move { Ok(Some(path)) };
+        let save = |proposed: &str, text: &str, chosen: &str| {
+            tauri::async_runtime::block_on(save_through(proposed, text, answer(dir.join(chosen))))
+        };
+        // AT-R1: a plain .txt Save renamed to notes.docx in the panel.
+        assert_eq!(
+            save("2026-10-26 14-00-00.txt", "plain words", "notes.docx"),
+            Err("the name must end in .txt".to_owned())
+        );
+        // AT-R2: a .docx Save renamed to notes.txt.
+        assert_eq!(
+            save("2026-10-26 14-00-00.docx", "plain words", "notes.txt"),
+            Err("the name must end in .docx".to_owned())
+        );
+        // AT-R8: a plain .txt Save renamed to notes.sight.
+        assert_eq!(
+            save("2026-10-26 14-00-00.txt", "meet at nine", "notes.sight"),
+            Err("the name must end in .txt".to_owned())
+        );
+        // The other two formats the same way, and a name with no extension.
+        assert_eq!(
+            save("2026-10-26 14-00-00.md", "# notes", "notes.txt"),
+            Err("the name must end in .md".to_owned())
+        );
+        assert_eq!(
+            save("untitled-draft-20261026-1400.sight", "{}", "notes.txt"),
+            Err("the name must end in .sight".to_owned())
+        );
+        assert_eq!(
+            save("2026-10-26 14-00-00.txt", "plain words", "notes"),
+            Err("the name must end in .txt".to_owned())
+        );
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            0,
+            "nothing was written for a refused name"
+        );
+        // The proposed extension, in any case and under any stem, passes.
+        assert_eq!(
+            save("2026-10-26 14-00-00.txt", "plain words", "notes.txt"),
+            Ok(Some("notes.txt".to_owned()))
+        );
+        assert_eq!(fs::read(dir.join("notes.txt")).unwrap(), b"plain words");
+        assert_eq!(
+            save("2026-10-26 14-00-00.txt", "upper case", "NOTES.TXT"),
+            Ok(Some("NOTES.TXT".to_owned()))
+        );
+        assert_eq!(fs::read(dir.join("NOTES.TXT")).unwrap(), b"upper case");
+        assert_eq!(
+            save("2026-10-26 14-00-00.docx", "a document", "report.docx"),
+            Ok(Some("report.docx".to_owned()))
+        );
+        assert_eq!(
+            &fs::read(dir.join("report.docx")).unwrap()[..4],
+            b"PK\x03\x04",
+            "the Word document under a .docx name"
+        );
+        assert_eq!(
+            save("2026-10-26 14-00-00.md", "# notes", "notes.md"),
+            Ok(Some("notes.md".to_owned()))
+        );
+        assert_eq!(
+            save("untitled-draft-20261026-1400.sight", "{}", "kept.sight"),
+            Ok(Some("kept.sight".to_owned()))
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The panel's filter and the check follow the proposed name: the one
+    /// extension of each of the four formats, by name; any other name has
+    /// none. The extension check reads the last extension, in any case.
+    #[test]
+    fn the_proposed_format_names_the_one_allowed_extension() {
+        assert_eq!(
+            proposed_format("2026-10-26 14-00-00.txt"),
+            Some(("txt", "Plain text"))
+        );
+        assert_eq!(
+            proposed_format("2026-10-26 14-00-00.md"),
+            Some(("md", "Markdown"))
+        );
+        assert_eq!(
+            proposed_format("2026-10-26 14-00-00.docx"),
+            Some(("docx", "Word document"))
+        );
+        assert_eq!(
+            proposed_format("untitled-draft-20261026-1400.sight"),
+            Some(("sight", "Plain Sight file"))
+        );
+        assert_eq!(proposed_format("notes.sh"), None);
+        assert_eq!(proposed_format("notes"), None);
+        assert!(has_extension(Path::new("/x/notes.TXT"), "txt"), "any case");
+        assert!(
+            !has_extension(Path::new("/x/notes.txt.sight"), "txt"),
+            "the last extension counts"
+        );
+        assert!(!has_extension(Path::new("/x/notes"), "txt"));
+        assert!(
+            !has_extension(Path::new("/x/.txt"), "txt"),
+            "a name that is only an extension has none"
+        );
     }
 
     #[test]

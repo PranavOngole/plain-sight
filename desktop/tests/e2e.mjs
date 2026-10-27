@@ -72,7 +72,8 @@ async function picture(name) {
 // Every launch names the probe folder, the folder that stands for Downloads
 // (the test build's PLAIN_SIGHT_E2E_DOWNLOADS, folder.rs) and the save
 // panel's stand-in (PLAIN_SIGHT_E2E_SAVE_AS: a folder takes the name the page
-// proposes, a file path is the panel's answer as it is), never ~/Downloads.
+// proposes, a file path is the panel's answer as it is and must carry the
+// proposed extension, DM-238), never ~/Downloads.
 async function launch(env = {}) {
   const child = spawnApp(EXE, { PLAIN_SIGHT_E2E_DIR: PROBE, PLAIN_SIGHT_E2E_DOWNLOADS: DOWNLOADS, PLAIN_SIGHT_E2E_SAVE_AS: DOWNLOADS, ...env });
   app = { child, pid: child.pid };
