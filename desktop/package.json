@@ -13,7 +13,8 @@
     "test:e2e": "node tests/e2e.mjs",
     "test:bundle": "node tests/bundle.mjs",
     "app:testcopy": "node tests/testcopy.mjs",
-    "test:release": "node tests/release.mjs"
+    "test:release": "node tests/release.mjs",
+    "appstore:config": "node tools/appstore-config.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.12.3"
