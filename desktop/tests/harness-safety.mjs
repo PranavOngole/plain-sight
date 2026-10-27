@@ -298,6 +298,20 @@ if (process.argv[2] === '--child') {
         { name: 'a test after the signal', fn: async () => { console.log('TEST AFTER THE SIGNAL'); } }
       ], { after: slowAfter });
     },
+    // PO-R8-1: the cleanup runs once and every caller waits for that one; no
+    // case showed the once, so with each caller running a cleanup of its own
+    // (`cleaning =` for `cleaning ||=`, the Product Owner's PO3-DM248) every
+    // case passed. The Delivery Manager's AT-H9 (dm-harness-adv-a33.mjs): a
+    // SIGINT while the run's own cleanup waits in after() makes no second
+    // cleanup; here with a second SIGINT after the first, after() counting its
+    // calls and every folder put back from the backup named.
+    async 'run-cleanup-once'() {
+      let calls = 0;
+      onRename = (from, to) => { if (from.startsWith(BACKUP_ROOT(home) + path.sep)) console.log('PUT BACK ' + path.relative(home, to)); };
+      await runSuite([{ name: 'a test that writes test data', fn: async () => { testData(dirs[0]); } }], {
+        after: async () => { calls += 1; console.log('AFTER CALL ' + calls); console.log('IN AFTER'); await h.sleep(3000); console.log('AFTER DONE ' + calls); }
+      });
+    },
     // DM-249: after a signal, or once the run's own cleanup had begun, the
     // test that was running went on and could launch the app again, which
     // then outlived the run and ran over the restored folders (a launch of
@@ -799,6 +813,29 @@ test('SIGTERM during a test and then SIGHUP during the cleanup, as a watcher\'s 
   assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
   assert.match(r.out, /^release: SIGHUP came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the SIGHUP is reported');
   assert.doesNotMatch(r.out, /TEST AFTER THE SIGNAL/, 'no test starts once a signal has come');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+
+// PO-R8-1: the cleanup runs once. The Delivery Manager's AT-H9, adopted, with
+// a second signal: with each caller running its own cleanup (PO3-DM248) the
+// data still came back and every case above passed, but after() ran twice.
+test('the cleanup runs once: a Ctrl+C while the run\'s own cleanup waits in after(), then a second one, start no cleanup of their own: after() is called once, every folder is put back once, both signals are reported and deferred, exit code 130 (PO-R8-1; the Delivery Manager\'s AT-H9)', async () => {
+  const deferred = "release: SIGINT came while the run puts the app's data back; the run ends with 130 once that is done";
+  let first = false;
+  let second = false;
+  const r = await runCase('run-cleanup-once', (out, child) => {
+    if (!first && out.includes('IN AFTER')) { first = true; child.kill('SIGINT'); return; }
+    if (first && !second && out.split('\n').includes(deferred)) { second = true; child.kill('SIGINT'); }
+  });
+  assert.ok(first && second, 'both signals were sent while after() waited; the child\'s output:\n' + r.out);
+  ended(r, 130);
+  const lines = r.out.split('\n');
+  assert.deepEqual(lines.filter((l) => /^AFTER CALL \d+$/.test(l)), ['AFTER CALL 1'], 'after() was called once; the child\'s output:\n' + r.out);
+  assert.deepEqual(lines.filter((l) => /^AFTER DONE \d+$/.test(l)), ['AFTER DONE 1'], 'and went on to its end once');
+  const putBack = lines.filter((l) => l.startsWith('PUT BACK ')).map((l) => l.slice('PUT BACK '.length)).sort();
+  assert.deepEqual(putBack, r.dirs.map((d) => path.relative(r.home, d)).sort(), 'every folder was put back from the backup, once');
+  assert.equal(lines.filter((l) => l === deferred).length, 2, 'both signals were reported and deferred');
   clean(r);
   assert.equal(r.lock, false, 'the lock is released');
 });
