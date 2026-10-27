@@ -18,6 +18,10 @@
 //   is and named, never counted as the person's data not coming back; with
 //   nothing worse, the run ends with exit code 8 (DM-243). A test copy runs
 //   once: a run on a copy whose container is still there does not start;
+// - a test that needs a first launch again gets one from freshStart: an
+//   unsandboxed bundle's folders are cleared, while a sandboxed bundle gets a
+//   fresh copy under a new test identifier, since macOS does not let a run
+//   clear a copy's container (DM-247);
 // - only files the run created are moved out of ~/Downloads, into the
 //   evidence folder, matched by name and time.
 //
@@ -45,6 +49,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bundleIdentifier } from './launch-guard.mjs';
+import { makeTestCopy, testIdentifier } from './testcopy.mjs';
 
 export const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const DESKTOP = path.resolve(HERE, '..');
@@ -329,6 +334,32 @@ export function clearTestData() {
   const moved = movedAside();
   for (const dir of DATA_DIRS) if (clearable(dir, moved)) rmSync(dir, { recursive: true, force: true });
 }
+
+// A first launch again, for a test that needs one (DM-247). An unsandboxed
+// bundle keeps its data in the folders the run moved aside, so they are
+// cleared (clearTestData). A sandboxed bundle keeps it in its container, and
+// macOS does not let a run remove a test copy's container (release-run-1:
+// EPERM), so it is never cleared during the run: the test gets a fresh copy of
+// the bundle instead, under a new test identifier, whose first launch makes a
+// container of its own. The copy is made by the copy script's makeTestCopy
+// into the run's evidence folder, under the launch guard's read-back. Its
+// folders, none of which may exist yet, join the ones the run clears at its
+// end, so a container macOS keeps is named as test data left behind, as the
+// bundle's own is. Returns the facts of the bundle the next launch opens.
+const freshFolders = [];
+let lastStamp = 0;
+export function freshStart(facts, { makeCopy = makeTestCopy, now = Date.now } = {}) {
+  if (!facts.sandboxed) { clearTestData(); return facts; }
+  if (phase !== 'aside') throw new Error('the app data is not moved aside (' + phase + '), so no fresh copy is made');
+  let stamp = Math.max(now(), lastStamp + 1);
+  const foldersOf = (s) => dataFoldersOf(testIdentifier(s)).map((p) => path.join(HOME, p));
+  while (foldersOf(stamp).some((dir) => existsSync(dir))) stamp += 1;
+  lastStamp = stamp;
+  freshFolders.push(...foldersOf(stamp));
+  const { made } = makeCopy(facts.app, path.join(EVIDENCE, 'fresh-copies', String(stamp)), stamp);
+  note('fresh copy for a first launch: ' + made.identifier + ' at ' + made.app);
+  return made;
+}
 // Puts the app's data back folder by folder: the test data in each place is
 // cleared, then what was there before the run comes back. A folder that
 // cannot be cleared (a container that macOS keeps closed, say) never keeps
@@ -354,7 +385,7 @@ export function restoreAppData() {
   const problems = [];
   const left = [];
   const testDataLeft = [];
-  for (const dir of DATA_DIRS) {
+  for (const dir of [...DATA_DIRS, ...freshFolders]) {
     if (!clearable(dir, moved)) continue;
     let step = 'clear the test data in';
     try {

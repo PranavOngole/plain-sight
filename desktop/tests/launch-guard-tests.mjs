@@ -3,8 +3,9 @@
 // this test's own, with the codesign answer handed in as a property list
 // text (DM-240, ledger D-39). Nothing here is signed, opened or launched. The
 // one real codesign call reads a system app's signature. What needs a real
-// bundle, and is not run here: the copy's ad hoc signing, its verification
-// and the read-back of the signed copy (the script's own last step).
+// bundle, and is not run here: the copy's ad hoc signing and its
+// verification; the read-back of the copy runs on fake bundles, with the
+// signing and the codesign reads handed in (makeTestCopy).
 //
 // Run from the repository root: node desktop/tests/launch-guard-tests.mjs
 
@@ -403,6 +404,35 @@ test('a ditto that fails part way leaves no partial copy: the copy it began is r
   } finally {
     chmodSync(unreadable, 0o644);
   }
+});
+
+// DM-247: the copy script's whole flow is one function, makeTestCopy, which
+// the harness also calls for a fresh copy when a real-key test needs a first
+// launch of a sandboxed bundle. Its read-back, here with the signing and the
+// codesign reads handed in: a copy that passes it is returned, signed once
+// with the original's entitlements; one the launch guard would refuse is
+// removed, and the error says why and that it was removed.
+test('makeTestCopy makes, signs and reads back a copy under a test identifier, and removes a copy whose read-back fails, saying why (DM-247)', async () => {
+  const { makeTestCopy } = await import('./testcopy.mjs');
+  assert.equal(typeof makeTestCopy, 'function', 'testcopy.mjs gives the harness its whole copy as one function');
+  const source = fakeBundle('source-make', REAL_ID, { manifest: true, signature: true });
+  const signed = [];
+  const sign = (copy, xml, record) => { signed.push({ copy, xml, record }); };
+  const destination = path.join(ROOT, 'make-ok');
+  const { original, made, copy } = makeTestCopy(source, destination, 1761000012, { readFacts: (app) => bundleFacts(app, { codesign: codesignSaying(sandboxed) }), readEntitlements: () => sandboxed, sign });
+  assert.equal(copy, path.join(destination, TEST_NAME + '.app'));
+  assert.deepEqual([original.identifier, made.identifier, made.name, made.sandboxed, made.app], [REAL_ID, testIdentifier(1761000012), TEST_NAME, true, copy], 'the copy is the test identifier\'s, sandboxed like the original');
+  assert.deepEqual(signed, [{ copy, xml: sandboxed, record: path.join(destination, 'entitlements-of-the-original.plist') }], 'signed once, with the original\'s entitlements');
+  assert.equal(existsSync(path.join(copy, MANIFEST)), false, 'without the migration manifest');
+  const refusedAt = path.join(ROOT, 'make-refused');
+  let failure = null;
+  try {
+    makeTestCopy(source, refusedAt, 1761000013, { readFacts: (app) => bundleFacts(app, { codesign: codesignSaying(sandboxed, app === source ? null : REAL_ID) }), readEntitlements: () => sandboxed, sign });
+  } catch (err) { failure = err; }
+  assert.ok(failure, 'a copy whose signature carries the real identifier is refused by the read-back');
+  assert.match(failure.message, /the launch guard would refuse the copy: /, failure.message);
+  assert.equal(failure.removal, 'the unfinished copy was removed: ' + path.join(refusedAt, TEST_NAME + '.app'));
+  assert.equal(existsSync(path.join(refusedAt, TEST_NAME + '.app')), false, 'no copy is left');
 });
 
 test('the read-back compares the entitlements exactly: the same keys and values in any order pass, a missing, extra or changed one fails', () => {

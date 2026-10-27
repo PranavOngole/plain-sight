@@ -33,12 +33,15 @@
 // It prints the copy's path last, for PLAIN_SIGHT_APP=<path>. The original is
 // never changed: a bundle sandboxed under the real identifier stays the D-39
 // trap and is deleted once test:bundle has checked it. Nothing here opens
-// either bundle.
+// either bundle. The whole copy is one function, makeTestCopy, which the
+// harness also calls for a fresh copy when a real-key test needs a first
+// launch of a sandboxed bundle (harness.mjs, freshStart, DM-247).
 //
 // Run from desktop/ after `npm run app:build`:
 //   npm run app:testcopy [-- <destination folder>]
-// The plist rewriting is unit-tested on a fake bundle (launch-guard-tests.mjs);
-// the signing, the verification and the read-back need a real bundle.
+// The plist rewriting and the read-back are unit-tested on fake bundles
+// (launch-guard-tests.mjs), with the signing and the codesign reads handed
+// in; the signing and the verification themselves need a real bundle.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -128,25 +131,48 @@ export function signCopy(copy, entitlementsXml, record) {
   execFileSync('codesign', ['--verify', '--deep', '--strict', copy], { stdio: 'inherit' });
 }
 
+// The whole copy, as the script makes it and as the harness makes a fresh one
+// (DM-247): the original's facts and entitlements read, the copy made
+// (copyUnsigned), signed and verified (signCopy) and read back. Unless the
+// identifier is the test identifier, the name the test name, the manifest
+// gone, the entitlements exactly the original's and the launch guard lets the
+// copy through, the copy is removed and the error says so (in its removal
+// field, as a line of its own). Returns the original's facts, the copy's and
+// the copy's path. The reads and the signing can be handed in, so the
+// read-back is tested on fake bundles.
+export function makeTestCopy(source, destination, stamp, { readFacts = bundleFacts, readEntitlements = codesignEntitlements, copy = copyUnsigned, sign = signCopy } = {}) {
+  const original = readFacts(source);
+  const xml = readEntitlements(source);
+  const made = copy(source, destination, stamp);
+  try {
+    sign(made, xml, path.join(destination, 'entitlements-of-the-original.plist'));
+    const facts = readFacts(made);
+    const problems = [];
+    if (facts.identifier !== testIdentifier(stamp)) problems.push('the identifier is ' + facts.identifier);
+    if (facts.name !== TEST_NAME) problems.push('the name is ' + facts.name);
+    if (existsSync(path.join(made, MANIFEST))) problems.push('the migration manifest is still in the copy');
+    if (!sameEntitlements(facts.entitlements, original.entitlements)) problems.push('the entitlements differ from the original\'s: ' + JSON.stringify(facts.entitlements) + ' against ' + JSON.stringify(original.entitlements));
+    const why = refusal(facts, {});
+    if (why) problems.push('the launch guard would refuse the copy: ' + why);
+    if (problems.length) throw new Error(problems.join('; '));
+    return { original, made: facts, copy: made };
+  } catch (err) {
+    let removal = 'the unfinished copy was removed: ' + made;
+    try {
+      rmSync(made, { recursive: true, force: true });
+    } catch (failed) {
+      removal = 'the unfinished copy could not be removed (' + reasonOf(failed) + '): remove it by hand: ' + made;
+    }
+    throw Object.assign(new Error(err && err.message ? err.message : String(err)), { removal });
+  }
+}
+
 function main() {
   const source = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
   const stamp = Math.floor(Date.now() / 1000);
   const destination = process.argv[2] || path.join(process.env.PLAIN_SIGHT_EVIDENCE || path.join(os.homedir(), 'cover-story-delivery', 'desktop'), 'testcopy-' + stamp);
-  let copy = null;
   try {
-    const original = bundleFacts(source);
-    const xml = codesignEntitlements(source);
-    copy = copyUnsigned(source, destination, stamp);
-    signCopy(copy, xml, path.join(destination, 'entitlements-of-the-original.plist'));
-    const made = bundleFacts(copy);
-    const problems = [];
-    if (made.identifier !== testIdentifier(stamp)) problems.push('the identifier is ' + made.identifier);
-    if (made.name !== TEST_NAME) problems.push('the name is ' + made.name);
-    if (existsSync(path.join(copy, MANIFEST))) problems.push('the migration manifest is still in the copy');
-    if (!sameEntitlements(made.entitlements, original.entitlements)) problems.push('the entitlements differ from the original\'s: ' + JSON.stringify(made.entitlements) + ' against ' + JSON.stringify(original.entitlements));
-    const why = refusal(made, {});
-    if (why) problems.push('the launch guard would refuse the copy: ' + why);
-    if (problems.length) throw new Error(problems.join('; '));
+    const { made, copy } = makeTestCopy(source, destination, stamp);
     console.log('copied ' + source);
     console.log('identifier ' + made.identifier + ', name ' + made.name + ', sandboxed ' + made.sandboxed + ', entitlements ' + (Object.keys(made.entitlements).sort().join(' ') || 'none') + ', migration manifest left out');
     console.log('the original is unchanged; a bundle sandboxed under the real identifier is the D-39 trap: delete it once test:bundle has checked it');
@@ -154,10 +180,7 @@ function main() {
     console.log(copy);
   } catch (err) {
     console.log('testcopy: ' + (err && err.message ? err.message : err) + '. Errors: 1');
-    if (copy && existsSync(copy)) {
-      rmSync(copy, { recursive: true, force: true });
-      console.log('the unfinished copy was removed: ' + copy);
-    }
+    if (err && err.removal) console.log(err.removal);
     process.exit(1);
   }
 }

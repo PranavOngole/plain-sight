@@ -356,6 +356,31 @@ test('each suite that opens a bundle calls the launch guard exactly as launchabl
   }
 });
 
+// DM-247: three real-key tests started from a first launch by clearing the
+// test data mid-run, which on a sandboxed copy removes the copy's container,
+// and macOS refused that removal (EPERM, release-run-1). app.mjs clears
+// nothing itself now: a test that needs a first launch asks the harness's
+// freshStart (harness-safety.mjs runs it), which clears only an unsandboxed
+// bundle's folders and gives a sandboxed one a fresh copy; every launch
+// opens the bundle it returned, and the vault's record is looked for in that
+// bundle's web data.
+test('the real-key suite never clears a sandboxed copy\'s data mid-run: each test that needs a first launch asks freshStart for the bundle to open, and every launch opens it (DM-247)', () => {
+  const text = read(path.join(DESKTOP, 'tests'), 'app.mjs');
+  assert.equal(/\bclearTestData\b/.test(text), false, 'app.mjs neither imports nor calls clearTestData');
+  assert.match(text, /^async function firstLaunchAgain\(\) \{\n  await quitIfRunning\(\);\n  current = freshStart\(BUNDLE\);\n  if \(!opened\.includes\(current\.app\)\) opened\.push\(current\.app\);\n\}$/m, 'a first launch again is a fresh start of the bundle under test');
+  for (const title of ['the system folder picker opens from the folder button', 'Cmd+Q with text on the page asks', 'the vault in the release app keeps the text']) {
+    const at = text.indexOf("test('" + title);
+    assert.ok(at >= 0, 'app.mjs has the test ' + JSON.stringify(title));
+    assert.ok(text.slice(at, text.indexOf('\n});', at)).includes(", async () => {\n  await firstLaunchAgain();\n  await launch();\n"), JSON.stringify(title) + ' starts from freshStart, then launches');
+  }
+  assert.equal([...text.matchAll(/firstLaunchAgain\(\)/g)].length, 4, 'the three tests and the definition, nothing else');
+  const start = text.indexOf('async function launch(');
+  const launcher = text.slice(start, text.indexOf('\n}\n', start));
+  assert.ok(launcher.includes("execFileSync('open', ['-n', current.app]);"), 'every launch opens the bundle freshStart returned');
+  assert.equal(/execFileSync\('open', \['-n', APP\]\)/.test(text), false, 'none opens APP itself');
+  assert.match(text, /^  const dir = webDataFolder\(HOME, current\);$/m, 'the vault\'s record is looked for in the launched bundle\'s web data');
+});
+
 // DM-241: macOS titles the app menu with the bundle's name, which is "Plain
 // Sight test copy" on the copy the two suites run on, while the items keep
 // the app's own words ("About Plain Sight", "Quit Plain Sight"). So neither

@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { webcrypto } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { DESKTOP, EVIDENCE, HOME, NotRun, alive, clearTestData, decryptRecord, drive, driveRaw, firstWindow, note, run, sleep, until } from './harness.mjs';
+import { DESKTOP, EVIDENCE, HOME, NotRun, alive, decryptRecord, drive, driveRaw, firstWindow, freshStart, note, run, sleep, until } from './harness.mjs';
 import { appMenuTitle, launchable, menuBarOf, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
@@ -29,23 +29,32 @@ const BUNDLE = launchable('app', APP);
 // The app menu is titled by the bundle's name, "Plain Sight test copy" on a
 // test copy; its items keep the app's own words (DM-241).
 const APP_MENU = appMenuTitle(BUNDLE);
+// The bundle the next launch opens: the bundle under test, or the fresh copy
+// of it that a test asked for a first launch (firstLaunchAgain, DM-247); and
+// every bundle this run opened, for finding and ending its copies.
+let current = BUNDLE;
+const opened = [BUNDLE.app];
 let app = null;   // { pid }
 let frontBefore = -1;
 
 const launched = [];
 
-// Every running copy of the release app.
+// Every running copy of the release app, from any bundle this run opened.
 function instances() {
-  try {
-    return execFileSync('pgrep', ['-f', path.join(APP, 'Contents/MacOS/plain-sight')], { encoding: 'utf8' }).trim().split('\n').map(Number).filter((p) => Number.isInteger(p) && p > 0);
-  } catch { return []; }
+  const pids = new Set();
+  for (const bundle of opened) {
+    try {
+      for (const p of execFileSync('pgrep', ['-f', path.join(bundle, 'Contents/MacOS/plain-sight')], { encoding: 'utf8' }).trim().split('\n').map(Number)) if (Number.isInteger(p) && p > 0) pids.add(p);
+    } catch { /* none running from this bundle */ }
+  }
+  return [...pids];
 }
 
 // Opened the way a person opens it, through LaunchServices. A copy left
 // running would be found in place of the new one, so none may be running.
 async function launch() {
   assert.deepEqual(instances(), [], 'no copy of the release app is running before it is opened');
-  execFileSync('open', ['-n', APP]);
+  execFileSync('open', ['-n', current.app]);
   const pid = await until(() => instances().find((p) => !launched.includes(p)) || 0, 'the app process', 15000);
   launched.push(pid);
   app = { pid };
@@ -69,6 +78,17 @@ async function quitIfRunning() {
     await until(() => !alive(app.pid), 'the app to quit', 10000);
   }
   app = null;
+}
+
+// A first launch again, so the intro is up and no vault is on. The harness's
+// freshStart clears an unsandboxed bundle's data; a sandboxed bundle's
+// container is never cleared during the run, since macOS refused that removal
+// (EPERM, release-run-1): the next launch opens a fresh copy of the bundle
+// under test instead, under a new test identifier (DM-247).
+async function firstLaunchAgain() {
+  await quitIfRunning();
+  current = freshStart(BUNDLE);
+  if (!opened.includes(current.app)) opened.push(current.app);
 }
 
 async function copyRealText(mod = 'cmd') {
@@ -325,8 +345,7 @@ test('a window blur ends a peek: after the About panel has had the focus, Cmd+C 
 const BUILD_TEST = path.join(EVIDENCE, 'folders', 'Chosen in the panel');
 
 test('the system folder picker opens from the folder button, at the normal window level', async () => {
-  await quitIfRunning();
-  clearTestData();   // a first launch again, so the intro is up
+  await firstLaunchAgain();
   await launch();
   await pressControl('btn-folder');
   const sheet = await until(() => {
@@ -394,8 +413,7 @@ test('the window\'s red close button quits the app', async () => {
 // (the sheet is a child of the document window), ends the app.
 const sheetShown = () => drive('cgwindows', app.pid).windows.filter((x) => x.onscreen).length >= 2;
 test('Cmd+Q with text on the page asks "Quit without saving?": Return cancels and keeps the text; after Cmd+W the sheet\'s Quit button ends the app', async () => {
-  await quitIfRunning();
-  clearTestData();   // a first launch, so the intro is up and no vault is on
+  await firstLaunchAgain();
   await launch();
   await keys.press('return');   // the intro's Start button has the focus on a first launch
   await keys.type('words a quit would lose');
@@ -417,13 +435,13 @@ test('Cmd+Q with text on the page asks "Quit without saving?": Return cancels an
 });
 
 // The vault in the release app (AC-3.3, DM-223): turned on in the intro, the
-// text typed and Cmd+Q pressed at once, the vault's record found in the release
-// app's own web data folder (inside its container when it is sandboxed), and
-// the phrase with the chord reopening it after a relaunch.
+// text typed and Cmd+Q pressed at once, the vault's record found in the web
+// data folder of the bundle the test launched (inside its container when it
+// is sandboxed: a fresh copy's, DM-247), and the phrase with the chord
+// reopening it after a relaunch.
 const VAULT_PHRASE = 'release vault phrase 2026';
-const WEB_DATA = webDataFolder(HOME, BUNDLE);
 function vaultRecordInReleaseData() {
-  const dir = WEB_DATA;
+  const dir = webDataFolder(HOME, current);
   const out = execFileSync('python3', ['-c', `
 import os, sqlite3, sys
 found = []
@@ -439,8 +457,7 @@ print(len(found))
 }
 
 test('the vault in the release app keeps the text typed just before Cmd+Q, in its own web data, and the phrase reopens it after a relaunch', async () => {
-  await quitIfRunning();
-  clearTestData();   // a first launch, so the intro is up
+  await firstLaunchAgain();
   await launch();
   await pressControl('vault-on');
   await focusControl('vault-phrase');
@@ -452,7 +469,7 @@ test('the vault in the release app keeps the text typed just before Cmd+Q, in it
   await keys.press('cmd+q');   // at once, before the autosave runs
   await until(() => !alive(app.pid), 'the app to quit', 10000);
   app = null;
-  assert.equal(vaultRecordInReleaseData(), 1, 'one vault record, in ' + WEB_DATA);
+  assert.equal(vaultRecordInReleaseData(), 1, 'one vault record, in ' + webDataFolder(HOME, current));
   await launch();
   await keys.type(VAULT_PHRASE);
   await keys.press('cmd+e');

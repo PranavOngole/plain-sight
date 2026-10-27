@@ -200,6 +200,64 @@ if (process.argv[2] === '--child') {
       onRemove = (target) => { if (target === container) throw refused('rmdir', target, 'EACCES'); };
       await runSuite([launchMakesContainer]);
     },
+    // DM-247: a real-key test that needs a first launch of a sandboxed bundle
+    // asks freshStart, which asks the copy script's makeTestCopy (a stand-in
+    // here, recording what it was asked) for a fresh copy and clears nothing:
+    // the bundle's own container keeps what its launch wrote. The fresh
+    // copy's first launch makes its own container; at the run's end both
+    // containers, which macOS keeps, are named as test data left behind.
+    async 'run-fresh-start'() {
+      const fresh = path.join(CONTAINERS(home), 'com.pranavongole.plainsight.testcopy-1761000020000');
+      onRemove = (target) => { if (target === container || target === fresh) throw refused('rmdir', target); };
+      await runSuite([launchMakesContainer, {
+        name: 'a test that needs a first launch gets a fresh copy, and nothing is cleared',
+        fn: async () => {
+          const removed = [];
+          const atTheEnd = onRemove;
+          onRemove = (target) => { removed.push(target); atTheEnd(target); };
+          const asked = [];
+          const made = h.freshStart({ app: process.env.PLAIN_SIGHT_APP, identifier: h.APP_ID, sandboxed: true }, {
+            now: () => 1761000020000,
+            makeCopy: (source, destination, stamp) => { asked.push({ source, destination, stamp }); return { made: { app: path.join(destination, 'Plain Sight test copy.app'), identifier: 'com.pranavongole.plainsight.testcopy-' + stamp, sandboxed: true } }; }
+          });
+          onRemove = atTheEnd;
+          console.log('FRESH ' + JSON.stringify({ asked, made, removed }));
+          assert.deepEqual(removed, [], 'nothing was removed for the first launch');
+          assert.equal(readFileSync(marker(path.join(container, 'Data', 'Library', 'WebKit', 'WebsiteData')), 'utf8'), 'TEST DATA', 'the bundle\'s own container keeps what its launch wrote');
+          testData(path.join(fresh, 'Data'));   // the fresh copy's first launch makes its container
+        }
+      }]);
+    },
+    // A fresh copy never takes an identifier whose folders exist already: the
+    // next stamp is taken, and the folder that was there is left alone.
+    async 'run-fresh-start-taken'() {
+      const taken = path.join(CONTAINERS(home), 'com.pranavongole.plainsight.testcopy-1761000030000');
+      mkdirSync(taken, { recursive: true });
+      writeFileSync(marker(taken), 'ANOTHER RUN\'S CONTAINER');
+      await runSuite([{
+        name: 'a fresh copy skips an identifier that is taken',
+        fn: async () => {
+          const made = h.freshStart({ app: process.env.PLAIN_SIGHT_APP, identifier: h.APP_ID, sandboxed: true }, {
+            now: () => 1761000030000,
+            makeCopy: (source, destination, stamp) => ({ made: { app: path.join(destination, 'Plain Sight test copy.app'), identifier: 'com.pranavongole.plainsight.testcopy-' + stamp, sandboxed: true } })
+          });
+          console.log('FRESH ' + JSON.stringify({ made }));
+        }
+      }]);
+    },
+    // An unsandboxed bundle still gets its folders cleared, and no copy.
+    async 'run-fresh-start-unsandboxed'() {
+      await runSuite([{
+        name: 'a test that needs a first launch of an unsandboxed bundle gets its folders cleared',
+        fn: async () => {
+          testData(dirs[0]);
+          const facts = { app: '/nowhere/Plain Sight.app', identifier: h.ID, sandboxed: false };
+          const made = h.freshStart(facts, { makeCopy: () => { throw new Error('no copy is made for an unsandboxed bundle'); } });
+          assert.equal(made, facts, 'the next launch opens the same bundle');
+          assert.equal(existsSync(marker(dirs[0])), false, 'its folders were cleared');
+        }
+      }]);
+    },
     // H5: a sandbox probe's container (the bundle under test carries an
     // sbprobe- identifier), refused like a test copy's.
     async 'run-probe-container-refused'() {
@@ -515,6 +573,46 @@ test('a launch whose document window is on-screen ends the first wait with the w
   ended(r, 0);
   assert.match(r.out, /^FIRST WINDOW \[\{"height":744,"layer":0,"onscreen":true,"width":980,"x":790,"y":324\}\]$/m, 'the child\'s output:\n' + r.out);
   assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 0$/m);
+  clean(r);
+});
+
+// DM-247: three real-key tests (app.mjs) started from a first launch by
+// clearing the test data mid-run, which on a sandboxed copy removes the
+// copy's container; macOS refused that removal (EPERM) at the end of
+// release-run-1, so those tests could not pass on a copy unattended (the
+// Delivery Manager's AT-H5 showed it under this file's fake home). They now
+// ask the harness's freshStart, which never clears a sandboxed bundle's
+// container during the run and gives the next launch a fresh copy instead.
+test('a test that needs a first launch of a sandboxed copy gets a fresh copy from the copy script, never a clear of the copy\'s container, and both containers are named at the end as test data left behind (DM-247)', async () => {
+  const r = await runCase('run-fresh-start', undefined, { app: TEST_COPY });
+  ended(r, 8);
+  const line = r.out.split('\n').find((l) => l.startsWith('FRESH '));
+  assert.ok(line, 'the test reached freshStart; the child\'s output:\n' + r.out);
+  const fresh = JSON.parse(line.slice('FRESH '.length));
+  const box = path.dirname(r.home);
+  assert.deepEqual(fresh.asked, [{ source: path.join(box, 'bundle', 'Plain Sight test copy.app'), destination: path.join(box, 'evidence', 'fresh-copies', '1761000020000'), stamp: 1761000020000 }], 'makeTestCopy was asked once, for a copy of the bundle under test, into the run\'s evidence folder');
+  assert.equal(fresh.made.identifier, 'com.pranavongole.plainsight.testcopy-1761000020000', 'the next launch opens the fresh copy');
+  assert.deepEqual(fresh.removed, [], 'nothing was removed for the first launch');
+  for (const id of [TEST_COPY, 'com.pranavongole.plainsight.testcopy-1761000020000']) assert.ok(r.out.includes('test data left behind: ' + path.join(CONTAINERS(r.home), id) + ' ('), id + ' is named as left behind; the child\'s output:\n' + r.out);
+  const listed = r.out.split('\n').find((l) => l.startsWith('Test containers on this Mac at the end of the run'));
+  assert.ok(listed && listed.includes(TEST_COPY) && listed.includes('com.pranavongole.plainsight.testcopy-1761000020000'), 'both are listed by name: ' + listed);
+  assert.match(r.out, /^2 passed, 0 failed, 0 not run, 2 total\. Errors: 0$/m);
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('a fresh copy never takes an identifier whose folders are there already: it takes the next stamp and leaves that folder alone (DM-247)', async () => {
+  const r = await runCase('run-fresh-start-taken', undefined, { app: TEST_COPY });
+  ended(r, 0);
+  const line = r.out.split('\n').find((l) => l.startsWith('FRESH '));
+  assert.ok(line, 'the child\'s output:\n' + r.out);
+  assert.equal(JSON.parse(line.slice('FRESH '.length)).made.identifier, 'com.pranavongole.plainsight.testcopy-1761000030001');
+  assert.equal(readFileSync(marker(path.join(CONTAINERS(r.home), 'com.pranavongole.plainsight.testcopy-1761000030000')), 'utf8'), 'ANOTHER RUN\'S CONTAINER', 'the container that was there is untouched');
+  clean(r);
+});
+test('a test that needs a first launch of an unsandboxed bundle still gets its folders cleared, and no copy (DM-247)', async () => {
+  const r = await runCase('run-fresh-start-unsandboxed');
+  ended(r, 0);
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 0$/m, 'the child\'s output:\n' + r.out);
   clean(r);
 });
 
