@@ -2,7 +2,9 @@
 // real key presses through macOS: the keyboard path into the page, the menu
 // bar, the clipboard, the window and the process. They need the screen
 // unlocked, so they start only when the Mac has been left alone for a while
-// with the screen on (see harness.mjs), and they stop at the first touch.
+// with the screen on (see harness.mjs), they stop at the first touch, and a
+// launch's window listed only off-screen stops the run as not run
+// (harness.mjs, firstWindow; DISH-G-50).
 // What happens inside the page is checked in e2e.mjs; here the page is read
 // only through what a person can do: peek, copy, and paste the clipboard.
 //
@@ -13,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { webcrypto } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { DESKTOP, EVIDENCE, HOME, NotRun, alive, clearTestData, decryptRecord, drive, driveRaw, note, run, sleep, until } from './harness.mjs';
+import { DESKTOP, EVIDENCE, HOME, NotRun, alive, clearTestData, decryptRecord, drive, driveRaw, firstWindow, note, run, sleep, until } from './harness.mjs';
 import { appMenuTitle, launchable, menuBarOf, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
@@ -48,7 +50,7 @@ async function launch() {
   launched.push(pid);
   app = { pid };
   note('opened pid ' + pid);
-  await until(() => drive('cgwindows', pid).windows.some((w) => w.layer === 0 && w.onscreen), 'the app window', 15000);
+  await firstWindow(pid, (windows) => windows.some((w) => w.layer === 0 && w.onscreen), 'the app window', 15000);
   await until(() => drive('front', pid).ok, 'the app in front', 8000);
   await sleep(1200);   // the page and its cover module load
 }

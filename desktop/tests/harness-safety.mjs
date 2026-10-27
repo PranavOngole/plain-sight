@@ -199,6 +199,40 @@ if (process.argv[2] === '--child') {
       let moves = 0;
       onRename = (from) => { moves += 1; if (moves === 2) throw refused('rename', from); };
       await runSuite([{ name: 'a test that must not run', fn: async () => { throw new Error('the run started without its backup'); } }]);
+    },
+    // The lock screen (DISH-G-50): the suites that launch the app need an
+    // unlocked Mac left alone with the display on.
+    async 'run-locked'() {
+      fake.locked = true;
+      await runSuite([{ name: 'a test that must not run', fn: async () => { throw new Error('the run started on a locked screen'); } }]);
+    },
+    // A launch's window listed only off-screen for the whole first wait, as
+    // on 26 October with the screen locked (release-run-1's listings: AppKit's
+    // 500 by 500 helper and the 980 by 747 document window, both off-screen).
+    async 'run-offscreen'() {
+      fake.windows = [HELPER, { height: 747, layer: 0, onscreen: false, width: 980, x: 230, y: 60 }];
+      await runSuite([firstLaunch, { name: 'a later test', fn: async () => { throw new Error('a test ran after the stop'); } }]);
+    },
+    // No document window at all, only AppKit's off-screen helpers: the app's
+    // failure, never taken for a locked screen.
+    async 'run-no-window'() {
+      fake.windows = [HELPER, { height: 0, layer: 0, onscreen: false, width: 0, x: 0, y: 0 }];
+      await runSuite([firstLaunch]);
+    },
+    async 'run-onscreen'() {
+      fake.windows = [HELPER, { height: 744, layer: 0, onscreen: true, width: 980, x: 790, y: 324 }];
+      await runSuite([firstLaunch]);
+    }
+  };
+  const HELPER = { height: 500, layer: 0, onscreen: false, width: 500, x: 0, y: 940 };
+  // A launch's first wait, as e2e.mjs waits for its window, after writing
+  // test data where the app would.
+  const firstLaunch = {
+    name: 'a launch waits for its first window',
+    fn: async () => {
+      testData(dirs[0]);
+      const windows = await h.firstWindow(4242, (list) => list.filter((w) => w.layer === 0 && w.onscreen).length === 1 && list, 'the app window', 700);
+      console.log('FIRST WINDOW ' + JSON.stringify(windows.filter((w) => w.onscreen)));
     }
   };
   // For the run-* cases: the test copy's container, test data written where
@@ -361,6 +395,42 @@ test('a move aside that macOS refuses ends the run as not started, with every fo
   assert.match(r.out, /^release: not started: could not move .+ aside \(EPERM\); everything was put back\. Errors: 0$/m, 'the child\'s output:\n' + r.out);
   clean(r);
   assert.equal(r.lock, false, 'the lock is released');
+});
+
+// The lock screen (DISH-G-50): e2e-run-1 and release-run-1 (26 October 2026)
+// started with the screen locked, every window of the app was listed with
+// onscreen false (888 listings and 211, none on-screen), and each wait for a
+// window was counted as a failure.
+test('a suite that needs an unlocked Mac does not start on a locked screen: exit code 4, the reason given, nothing moved (DISH-G-50)', async () => {
+  const r = await runCase('run-locked');
+  ended(r, 4);
+  assert.match(r.out, /^release: not started: the screen is locked: these suites need an unlocked Mac left alone, display on\. Errors: 0$/m, 'the child\'s output:\n' + r.out);
+  clean(r);
+  assert.equal(r.lock, false, 'no lock was taken');
+});
+test('a launch whose window is listed only off-screen for the whole first wait stops the run as not run: exit code 3, nothing counted as failed, the data back (DISH-G-50)', async () => {
+  const r = await runCase('run-offscreen');
+  ended(r, 3);
+  assert.match(r.out, /^stop - a launch waits for its first window \(every window is off-screen \(the screen locked or the display asleep during the run\)\)$/m, 'the child\'s output:\n' + r.out);
+  assert.match(r.out, /^skip - a later test \(not run: every window is off-screen /m, 'the tests after it are not run');
+  assert.match(r.out, /^0 passed, 0 failed, 2 not run, 2 total\. Errors: 0$/m);
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('a launch with no document window at all, only AppKit\'s off-screen helpers, is still the app\'s failure, not a locked screen (DISH-G-50)', async () => {
+  const r = await runCase('run-no-window');
+  ended(r, 1);
+  assert.match(r.out, /^FAIL - a launch waits for its first window$/m, 'the child\'s output:\n' + r.out);
+  assert.match(r.out, /timed out after 700 ms waiting for the app window/, 'the wait\'s own timeout is the failure');
+  assert.doesNotMatch(r.out, /every window is off-screen/);
+  clean(r);
+});
+test('a launch whose document window is on-screen ends the first wait with the windows listed (DISH-G-50)', async () => {
+  const r = await runCase('run-onscreen');
+  ended(r, 0);
+  assert.match(r.out, /^FIRST WINDOW \[\{"height":744,"layer":0,"onscreen":true,"width":980,"x":790,"y":324\}\]$/m, 'the child\'s output:\n' + r.out);
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 0$/m);
+  clean(r);
 });
 
 let passed = 0;

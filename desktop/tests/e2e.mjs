@@ -2,9 +2,13 @@
 // shell, the real WebKit view, the real files on disk and real relaunches.
 // They need the test build (`npm run build:e2e`, cargo feature e2e), which
 // lets a test read the page, run a line of script in it and take a picture of
-// it. Key presses are dispatched inside the page, so these tests also run
-// while the screen is locked; what needs real keys (the keyboard path through
-// macOS, the clipboard, the open panel, the menus) is in app.mjs.
+// it. Key presses are dispatched inside the page; what needs real keys (the
+// keyboard path through macOS, the clipboard, the open panel, the menus) is
+// in app.mjs. The suite still needs an unlocked Mac left alone with the
+// display on: with the screen locked on 26 October 2026 macOS listed every
+// window of the app off-screen and the run could not see it (e2e-run-1), so a
+// locked screen is refused and a launch's window listed only off-screen stops
+// the run as not run (harness.mjs, firstWindow; DISH-G-50).
 //
 // Run from desktop/: npm run test:e2e   (exit code 0 only when every test passes)
 
@@ -16,7 +20,7 @@ import path from 'node:path';
 // evidence directory, before the harness reads it (Mac_PS_010).
 import './e2e-downloads.mjs';
 import {
-  DESKTOP, DOWNLOADS, EVIDENCE, HOME, ID, NotRun, ROOT, alive, decryptRecord, drive, isCoverPrefix, newDownloads, note, novelText,
+  DESKTOP, DOWNLOADS, EVIDENCE, HOME, ID, NotRun, ROOT, alive, decryptRecord, drive, firstWindow, isCoverPrefix, newDownloads, note, novelText,
   run, sleep, spawnApp, stopApp, until
 } from './harness.mjs';
 
@@ -76,8 +80,9 @@ async function picture(name) {
 // proposed extension, DM-238), never ~/Downloads.
 async function launch(env = {}) {
   const child = spawnApp(EXE, { PLAIN_SIGHT_E2E_DIR: PROBE, PLAIN_SIGHT_E2E_DOWNLOADS: DOWNLOADS, PLAIN_SIGHT_E2E_SAVE_AS: DOWNLOADS, ...env });
-  app = { child, pid: child.pid };
-  await until(() => documentWindows().length === 1, 'the app window', 20000);
+  const pid = child.pid;
+  app = { child, pid };
+  await firstWindow(pid, (windows) => windows.filter((w) => w.layer === 0 && w.onscreen).length === 1, 'the app window', 20000);
   await until(async () => (await js('window.PlainSight && window.PlainSight.coverId()')) !== null, 'the cover to load', 15000);
   return app;
 }
@@ -868,5 +873,6 @@ test('File > Open... opens the system open panel, which the test cancels', async
 
 await run(tests, {
   name: 'e2e',
+  needUnlocked: true,
   after: async () => { if (app && alive(app.pid)) await stopApp(app); }
 });

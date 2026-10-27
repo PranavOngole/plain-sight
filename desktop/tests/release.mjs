@@ -1,11 +1,14 @@
 // Tests of the release app itself, the sealed bundle `npm run app:build`
-// makes, without key presses, so they also run while the screen is locked:
-// it opens through LaunchServices as a double-click does, its menu bar is the
-// app's own, and each way out (the Quit item, a quit request as the Dock sends
-// it, the window's close button and Close Window) ends it. While the screen is
-// locked macOS shows Accessibility no windows and gives no app a key window,
-// so the close button and Close Window tests run only on an unlocked screen
-// and are reported as not run otherwise. The network watch runs around all of
+// makes, without key presses: it opens through LaunchServices as a
+// double-click does, its menu bar is the app's own, and each way out (the
+// Quit item, a quit request as the Dock sends it, the window's close button
+// and Close Window) ends it. The suite needs an unlocked Mac left alone with
+// the display on: with the screen locked on 26 October 2026 macOS listed
+// every window of the app off-screen (release-run-1), so a locked screen is
+// refused and a launch's window listed only off-screen stops the run as not
+// run (harness.mjs, firstWindow; DISH-G-50). The close button and Close
+// Window tests still report not run when Accessibility shows no windows or
+// the window is not the key window. The network watch runs around all of
 // it.
 //
 // Run from desktop/ after `npm run app:build`: npm run test:release
@@ -14,7 +17,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { DESKTOP, EVIDENCE, HOME, NotRun, alive, drive, note, run, sleep, until } from './harness.mjs';
+import { DESKTOP, EVIDENCE, HOME, NotRun, alive, drive, firstWindow, note, run, sleep, until } from './harness.mjs';
 import { appMenuTitle, launchable, menuBarOf, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
@@ -55,7 +58,7 @@ async function open() {
   launched.push(pid);
   app = { pid };
   note('opened pid ' + pid);
-  await until(() => documentWindows().length === 1, 'the document window', 15000);
+  await firstWindow(pid, (windows) => windows.filter((w) => w.layer === 0 && w.onscreen).length === 1, 'the document window', 15000);
   await sleep(1500);
 }
 // Each way out runs the page's Esc first and ends when the adapter says the
@@ -148,6 +151,7 @@ test('no network use was seen from the app or its web view during these launches
 
 await run(tests, {
   name: 'release',
+  needUnlocked: true,
   before: () => {
     // The watch is handed the bundle, so it finds the networking process by
     // that bundle's web data: its container when it is sandboxed (DM-242).

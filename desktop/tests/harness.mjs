@@ -5,7 +5,11 @@
 // The safety rules:
 // - a run starts only while the screen is locked or after PLAIN_SIGHT_IDLE_MIN
 //   seconds (default 120) without keyboard or mouse use, and stops at the
-//   first touch (exit code 3), because the app's window takes the front;
+//   first touch (exit code 3), because the app's window takes the front. The
+//   three suites that launch the app (e2e.mjs, release.mjs, app.mjs) need an
+//   unlocked Mac left alone with the display on: they do not start on a
+//   locked screen, stop if it locks, and stop as not run when a launch's
+//   window is listed only off-screen (firstWindow, DISH-G-50);
 // - the app's own data folders are moved aside first and put back after, so
 //   a real vault or folder choice is never seen or changed by a test; a run
 //   that cannot put one back ends with exit code 6 and says where it is;
@@ -19,8 +23,9 @@
 //
 // Exit codes, the most serious first when several apply: 6 the app's own
 // data could not be put back (the run says where it waits); 3 the run
-// stopped (a touch of the keyboard or mouse, or the screen locked during a
-// run that needs it unlocked); 1 a test failed; 8 test data left behind,
+// stopped (a touch of the keyboard or mouse, the screen locked during a run
+// that needs it unlocked, or a launch's window listed only off-screen); 1 a
+// test failed; 8 test data left behind,
 // your own data is back; 0 every test passed or was not run. A run that does
 // not start ends with 4 (the app is open, the Mac is in use, the screen is
 // locked for a suite that needs it unlocked, the test copy ran before, or a
@@ -124,7 +129,10 @@ export function mayStart({ needUnlocked = false } = {}) {
   // (DM-243). The container's name is checked; it is never opened.
   if (APP_ID !== ID && existsSync(path.join(CONTAINERS, APP_ID))) return 'the bundle under test, ' + APP_ID + ', has a container from an earlier run, which macOS may let this run neither move aside nor clear; make a fresh copy with npm run app:testcopy, or remove that container by hand (see wave-g/probe/DESIGN.md, Leftovers)';
   const s = driveRaw('session');
-  if (needUnlocked && s.locked) return 'the screen is locked; this run needs it unlocked';
+  // The three suites that launch the app (e2e.mjs, release.mjs, app.mjs) need
+  // it: with the screen locked on 26 October 2026 every window of the app was
+  // listed off-screen and the runs said nothing about the app (DISH-G-50).
+  if (needUnlocked && s.locked) return 'the screen is locked: these suites need an unlocked Mac left alone, display on';
   if (!s.locked && s.idle < IDLE_MIN) return `the Mac was used ${Number(s.idle).toFixed(0)} s ago; the run needs ${IDLE_MIN} s without keyboard or mouse use`;
   return null;
 }
@@ -150,6 +158,39 @@ export async function until(fn, what, ms = 5000) {
     await sleep(80);
   }
   throw new Error('timed out after ' + ms + ' ms waiting for ' + what + (last ? ': ' + last.message : ''));
+}
+
+// A launch's first wait for its window, in the three suites that launch the
+// app. With the screen locked on 26 October 2026, macOS listed the app's
+// document window with onscreen false for the whole run (e2e-run-1: 888
+// listings, release-run-1: 211, none on-screen), and each wait was counted as
+// a failure. So when the wait ends with a window of the document's size
+// listed and no window of the app ever on-screen, the run stops as not run
+// (exit code 3), as it does at a touch, instead of counting a failure
+// (DISH-G-50). AppKit's own helper windows are listed off-screen in every
+// run (500 by 500 and 0 by 0 in the runs of 21 October), so they alone count
+// as no window: an app that shows no document window still fails. An app
+// that made its window and never showed it would look like a locked screen
+// here; the suites check the screen before and during the run, so a locked
+// screen is refused or stopped first.
+export const OFF_SCREEN = 'every window is off-screen (the screen locked or the display asleep during the run)';
+export class OffScreen extends UserActivity {}
+const documentSized = (w) => w.layer === 0 && w.width >= 600 && w.height >= 400;
+export async function firstWindow(pid, want, what, ms) {
+  let listed = false;
+  let shown = false;
+  try {
+    return await until(() => {
+      const windows = drive('cgwindows', pid).windows;
+      if (windows.some(documentSized)) listed = true;
+      if (windows.some((w) => w.onscreen)) shown = true;
+      return want(windows);
+    }, what, ms);
+  } catch (err) {
+    if (err instanceof UserActivity || !listed || shown) throw err;
+    note('the first wait for the window of pid ' + pid + ' saw it only off-screen: ' + err.message);
+    throw new OffScreen(OFF_SCREEN);
+  }
 }
 
 export function alive(pid) {

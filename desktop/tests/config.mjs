@@ -355,6 +355,30 @@ test('the suites that open a bundle take the app menu\'s title from that bundle 
   }
 });
 
+// The lock screen (DISH-G-50): on 26 October, with the screen locked, the
+// end-to-end and release suites listed no on-screen window (e2e-run-1, 888
+// listings; release-run-1, 211) and counted each wait as a failure. The three
+// suites that launch the app ask run() for an unlocked screen, so a locked
+// one is refused before anything moves, and wait for a launch's first window
+// through the harness's firstWindow, which stops the run as not run when the
+// window is listed only off-screen (harness-safety.mjs runs both).
+test('the three suites that launch the app refuse a locked screen and wait for a launch\'s first window through firstWindow (DISH-G-50)', () => {
+  const tests = path.join(DESKTOP, 'tests');
+  for (const [file, launcher] of [['e2e.mjs', 'async function launch('], ['release.mjs', 'async function open('], ['app.mjs', 'async function launch(']]) {
+    const text = read(tests, file);
+    const at = text.indexOf('await run(tests, {');
+    assert.ok(at >= 0, file + ' calls run()');
+    assert.match(text.slice(at, text.indexOf('});', at)), /\n  needUnlocked: true,\n/, file + ' asks run() for an unlocked screen');
+    const imported = text.match(/^import \{([^}]*)\} from '\.\/harness\.mjs';$/m);
+    assert.ok(imported && imported[1].split(',').map((s) => s.trim()).includes('firstWindow'), file + ' imports firstWindow from the harness');
+    const start = text.indexOf(launcher);
+    assert.ok(start >= 0, file + ' has its launch function');
+    const body = text.slice(start, text.indexOf('\n}\n', start));
+    assert.match(body, /\n  await firstWindow\(pid, /, file + ' waits for the launch\'s first window through firstWindow');
+    assert.equal(/until\(\(\) => [^\n]*(documentWindows|cgwindows)/.test(body), false, file + ' has no window wait of its own left in the launch');
+  }
+});
+
 // The real-key save and folder tests (app.mjs) go to the test's own folder
 // through the panel's Go-to box and press the panel's default button only
 // after goTo, which cancels the panel when the panel does not show that
