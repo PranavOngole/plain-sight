@@ -27,7 +27,8 @@
 // (<TEAMID>)"; a profile whose name does not end in .provisionprofile, that
 // lies inside the repository (as given or once its links are followed), that
 // does not exist or that is not a file; no build number, or one that is not
-// a whole number from 1; an output folder that does not exist; an output
+// a whole number from 1; an output folder that does not exist, is empty, or
+// lies inside the repository other than src-tauri/; an output
 // file that exists already (unless --force) or that is no plain file; and
 // anything it cannot read. The two files are written under temporary names
 // and then renamed into place as one step: when the second cannot be put in
@@ -76,6 +77,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     values[key] = argv[i];
   }
   for (const key of ['team', 'identity', 'profile']) if (!values[key]) refuse('--' + key + ' is missing; usage: ' + USAGE);
+  if (Object.hasOwn(values, 'out') && !values.out) refuse('--out is empty; give a folder, or leave --out out to write into src-tauri/; usage: ' + USAGE);
   if (!Object.hasOwn(values, 'build')) refuse('--build is missing: give --build 1 for the first store build and a higher number for every later upload (without it the build would carry the version, 1.0.0, which Apple counts as the same build as 1); usage: ' + USAGE);
   return {
     team: values.team,
@@ -93,7 +95,7 @@ const entryAt = (p) => { try { return lstatSync(p); } catch { return null; } };
 const plistJson = (file) => JSON.parse(execFileSync('plutil', ['-convert', 'json', '-o', '-', file], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
 
 // Every check, then the two files' contents; nothing is written here.
-export function plan(options, { entitlementsFile = path.join(TAURI, 'Entitlements.plist'), tauriConfFile = path.join(TAURI, 'tauri.conf.json'), repository = REPOSITORY } = {}) {
+export function plan(options, { entitlementsFile = path.join(TAURI, 'Entitlements.plist'), tauriConfFile = path.join(TAURI, 'tauri.conf.json'), repository = REPOSITORY, storeFolder = TAURI } = {}) {
   const { team, identity, profile, build, out, force } = options;
   if (!/^[A-Z0-9]{10}$/.test(team)) refuse('the team id must be ten upper-case letters or digits, as Membership details shows it: ' + JSON.stringify(team));
   if (!identity.startsWith(IDENTITY_PREFIX)) refuse('the identity must start with "' + IDENTITY_PREFIX + '", as security find-identity -v lists the Apple Distribution certificate: ' + JSON.stringify(identity));
@@ -109,6 +111,10 @@ export function plan(options, { entitlementsFile = path.join(TAURI, 'Entitlement
   if (typeof build !== 'string' || !/^[1-9][0-9]*$/.test(build)) refuse('the build number must be a whole number from 1, such as 1 or 2: ' + JSON.stringify(build));
   const outEntry = existsSync(out) ? statSync(out) : null;
   if (!outEntry || !outEntry.isDirectory()) refuse('there is no folder at ' + out);
+  // Inside the repository only src-tauri/, whose two output names
+  // desktop/.gitignore keeps out of git (QA-01's observation 1).
+  const outReal = realOrNull(out) || out;
+  if (outReal !== (realOrNull(storeFolder) || storeFolder) && [out, outReal].some((p) => inside(p, repository) || inside(p, repositoryReal))) refuse('the output folder lies inside the repository, where git would keep the team id and the profile\'s path; leave --out out to write into src-tauri/, whose two files desktop/.gitignore keeps out, or give a folder outside the repository: ' + out);
   const configPath = path.join(out, CONFIG_NAME);
   const entitlementsPath = path.join(out, ENTITLEMENTS_NAME);
   for (const target of [configPath, entitlementsPath]) {

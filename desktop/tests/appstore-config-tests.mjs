@@ -52,7 +52,7 @@ const args = ({ team = TEAM, identity = IDENTITY, profile = PROFILE, out, build 
 const run = (argv) => spawnSync(process.execPath, [TOOL, ...argv], { encoding: 'utf8', cwd: ROOT });
 // One refusal: exit code 1, one plain line naming the reason, nothing written.
 function refusedRun(label, options, reason) {
-  const out = options.out || freshOut();
+  const out = options.out ?? freshOut();   // an empty --out is a case of its own
   const before = listing(out);
   const r = run(args({ ...options, out }));
   assert.equal(r.status, 1, label + ': exit code 1; output: ' + r.stdout + r.stderr);
@@ -476,6 +476,63 @@ test('started through a link to the script, a linked folder or a /tmp path, the 
   } finally {
     rmSync(copy, { recursive: true, force: true });
   }
+});
+
+// QA-G-43 (QA-01's section 20): two more breaks of the command passed every
+// case. A2, the control-character check narrowed to the line break: QA-01's
+// C2 tab, DEL, carriage return and escape; A3, inside() as a bare prefix
+// test: its C6.14, a profile beside the repository in a folder whose name
+// begins with the repository folder's name. And its observation 1: --out
+// inside the repository wrote the team id and the profile's path where git
+// would track them, and --out "" wrote into the current folder.
+test('an identity with a tab, DEL, a carriage return or an escape in it is refused, and nothing is written (QA-G-43; QA-01\'s C2 and its break A2)', () => {
+  const reason = /the identity holds a control character/;
+  refusedRun('a tab', { identity: 'Apple Distribution: a\tb (ABCDE12345)' }, reason);
+  refusedRun('DEL', { identity: 'Apple Distribution: a\u007fb (ABCDE12345)' }, reason);
+  refusedRun('a carriage return', { identity: 'Apple Distribution: a\rb (ABCDE12345)' }, reason);
+  refusedRun('an escape', { identity: 'Apple Distribution: a\u001bb (ABCDE12345)' }, reason);
+});
+
+test('a profile beside the repository, in a folder whose name begins with the repository folder\'s name, is outside it and accepted; one inside is refused (QA-G-43; QA-01\'s C6.14 and its break A3)', () => {
+  const repository = path.join(ROOT, 'fake-repo');
+  const sibling = path.join(ROOT, 'fake-repo-keys');
+  for (const dir of [repository, sibling]) mkdirSync(dir);
+  const beside = path.join(sibling, 'beside.provisionprofile');
+  const within = path.join(repository, 'within.provisionprofile');
+  for (const file of [beside, within]) writeFileSync(file, 'a stand-in for the profile\n');
+  const out = freshOut();
+  write(plan(parseArgs(args({ out, profile: beside }), { cwd: ROOT }), { repository }));
+  assert.deepEqual(listing(out), [CONFIG_NAME, ENTITLEMENTS_NAME].sort(), 'the profile beside it is accepted');
+  assert.throws(() => plan(parseArgs(args({ out: freshOut(), profile: within }), { cwd: ROOT }), { repository }), /^Error: the profile lies inside the repository/, 'the one inside it is refused');
+});
+
+test('an output folder inside the repository other than src-tauri/, and an empty --out, are refused, and nothing is written; src-tauri/ stays allowed and the default (QA-01\'s observation 1, QA-G-43)', () => {
+  // A copy of the command in a fake repository inside this test's folder, as
+  // QA-01's C7.12 runs it, so no run, even one with this guard broken, writes
+  // into the real repository.
+  const fake = path.join(ROOT, 'fake-repository');
+  const copied = [[TOOL, 'desktop/tools/appstore-config.mjs'], [path.join(TAURI, 'tauri.conf.json'), 'desktop/src-tauri/tauri.conf.json'], [path.join(TAURI, 'Entitlements.plist'), 'desktop/src-tauri/Entitlements.plist']];
+  for (const [from, to] of copied) {
+    mkdirSync(path.dirname(path.join(fake, to)), { recursive: true });
+    writeFileSync(path.join(fake, to), readFileSync(from));
+  }
+  const tool = path.join(fake, 'desktop', 'tools', 'appstore-config.mjs');
+  const tracked = path.join(fake, 'desktop', 'tracked');
+  mkdirSync(tracked);
+  const reason = /^appstore-config: not written: the output folder lies inside the repository, where git would keep the team id and the profile's path; /;
+  for (const [label, out] of [['a folder of the repository', tracked], ['the repository itself', fake]]) {
+    const before = listing(out);
+    const r = spawnSync(process.execPath, [tool, ...args({ out })], { encoding: 'utf8', cwd: ROOT });
+    assert.equal(r.status, 1, label + ': exit code 1: ' + r.stdout + r.stderr);
+    assert.match(r.stdout, reason, label + ': ' + r.stdout);
+    assert.deepEqual(listing(out), before, label + ': nothing was written');
+  }
+  const store = path.join(fake, 'desktop', 'src-tauri');
+  const allowed = spawnSync(process.execPath, [tool, ...args({ out: store })], { encoding: 'utf8', cwd: ROOT });
+  assert.equal(allowed.status, 0, 'its src-tauri/ is allowed: ' + allowed.stdout + allowed.stderr);
+  assert.deepEqual(listing(store), [CONFIG_NAME, ENTITLEMENTS_NAME, 'Entitlements.plist', 'tauri.conf.json'].sort(), 'and written');
+  refusedRun('an empty --out', { out: '' }, /^appstore-config: not written: --out is empty; /);
+  assert.equal(parseArgs(['--team', TEAM, '--identity', IDENTITY, '--profile', PROFILE, '--build', '1']).out, TAURI, 'src-tauri/ is the default');
 });
 
 test('desktop/.gitignore keeps both files out of the repository, and desktop/package.json runs the command as npm run appstore:config', () => {
