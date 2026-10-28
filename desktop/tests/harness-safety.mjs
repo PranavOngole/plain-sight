@@ -459,6 +459,17 @@ if (process.argv[2] === '--child') {
       personFile(dirs[0], 'notes.txt', 'THE PERSON\'S NOTES');
       await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[0], 'notes.txt'), 'change'); testData(dirs[0]); } }]);
     },
+    // PO-R10-1 (round 11): late writers that keep the file's size. The
+    // first rewrites it with other bytes of the same length, the second
+    // writes the same bytes again, so only the modification time changes.
+    async 'run-restore-late-same-size'() {
+      personFile(dirs[0], 'notes.txt', 'THE PERSON\'S NOTES');
+      await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[0], 'notes.txt'), 'same-size'); testData(dirs[0]); } }]);
+    },
+    async 'run-restore-late-same-bytes'() {
+      personFile(dirs[0], 'notes.txt', 'THE PERSON\'S NOTES');
+      await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[0], 'notes.txt'), 'same-bytes'); testData(dirs[0]); } }]);
+    },
     async 'run-restore-late-remove'() {
       writeFileSync(path.join(appSupport, 'folder.txt'), '/Users/someone/Notes');
       await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(appSupport, 'folder.txt'), 'remove'); testData(dirs[0]); } }]);
@@ -748,10 +759,12 @@ chmodSync(STANDIN_EXE, 0o755);
 // The late writer of the restore check's cases (round 10): waits until a
 // file holds the given text (the person's marker, back after the restore),
 // then 1 s later changes the target or removes it; it ends by itself after
-// 30 s if the text never comes.
+// 30 s if the text never comes. A change appends to the target; same-size
+// rewrites it with as many bytes, every one an x, and same-bytes writes its
+// own bytes again, which changes only its modification time (PO-R10-1).
 const LATE_WRITER = path.join(ROOT, 'late-writer.mjs');
 writeFileSync(LATE_WRITER, [
-  "import { appendFileSync, readFileSync, rmSync } from 'node:fs';",
+  "import { appendFileSync, readFileSync, rmSync, writeFileSync } from 'node:fs';",
   "const [watch, expect, target, action] = process.argv.slice(2);",
   "const started = Date.now();",
   "const look = setInterval(() => {",
@@ -759,7 +772,12 @@ writeFileSync(LATE_WRITER, [
   "  try { now = readFileSync(watch, 'utf8'); } catch { now = null; }",
   "  if (now === expect) {",
   "    clearInterval(look);",
-  "    setTimeout(() => { if (action === 'remove') rmSync(target, { force: true }); else appendFileSync(target, ' CHANGED LATE'); }, 1000);",
+  "    setTimeout(() => {",
+  "      if (action === 'remove') rmSync(target, { force: true });",
+  "      else if (action === 'same-size') writeFileSync(target, Buffer.alloc(readFileSync(target).length, 'x'));",
+  "      else if (action === 'same-bytes') writeFileSync(target, readFileSync(target));",
+  "      else appendFileSync(target, ' CHANGED LATE');",
+  "    }, 1000);",
   "  } else if (Date.now() - started > 30000) clearInterval(look);",
   "}, 20);"
 ].join('\n') + '\n');
@@ -1308,6 +1326,35 @@ test('a file of the person\'s changed 1 s after the restore, by a writer the run
   assert.match(r.out, /^Exit code: 6$/m);
   assert.deepEqual(r.backups, [], 'the data was put back, then changed: no backup is left');
   assert.equal(r.lock, false, 'the lock is released');
+});
+// PO-R10-1 (round 11): the Product Owner's break PO1-RESTORE, the listing
+// without modification times (st.size + ' bytes'), passed every case here,
+// since each late change grew the file. A late writer that rewrites a file at
+// the same size, or writes the same bytes again, changes only what the
+// listing's time holds, and the check exists to catch a late writer.
+const lateSameSize = async (id, check) => {
+  const r = await runCase(id, undefined, { recheck: null });
+  ended(r, 6);
+  const notes = path.join(r.dirs[0], 'notes.txt');
+  assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(notes) + ' \\(changed\\)', 'm'), 'the path is named; the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /as they were \(names/, 'no clean line');
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 1$/m);
+  assert.match(r.out, /^Exit code: 6$/m);
+  assert.deepEqual(r.backups, [], 'the data was put back, then changed: no backup is left');
+  assert.equal(r.lock, false, 'the lock is released');
+  check(notes);
+};
+test('a file of the person\'s rewritten 1 s after the restore with other bytes of the same length is caught by the second look: exit code 6, its path named (changed) (PO-R10-1)', async () => {
+  await lateSameSize('run-restore-late-same-size', (notes) => {
+    assert.equal(readFileSync(notes, 'utf8'), 'x'.repeat('THE PERSON\'S NOTES'.length), 'the writer kept the size and changed the bytes');
+  });
+});
+test('a file of the person\'s written again 1 s after the restore with the same bytes, only its modification time new, is caught too: exit code 6, its path named (changed) (PO-R10-1)', async () => {
+  await lateSameSize('run-restore-late-same-bytes', (notes) => {
+    assert.equal(readFileSync(notes, 'utf8'), 'THE PERSON\'S NOTES', 'the bytes are as they were');
+    const st = fs.statSync(notes);
+    assert.ok(st.mtimeMs - st.birthtimeMs >= 900, 'and the file was written again after the restore: modified ' + Math.round(st.mtimeMs - st.birthtimeMs) + ' ms after it was made');
+  });
 });
 test('the person\'s folder.txt removed 1 s after the restore, as a launch of this branch\'s build removes it, is caught: exit code 6, its path named (DM-249, the shape of the Delivery Manager\'s AT-H8c)', async () => {
   const r = await runCase('run-restore-late-remove', undefined, { recheck: null });
