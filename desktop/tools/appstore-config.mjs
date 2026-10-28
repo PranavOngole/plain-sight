@@ -211,5 +211,11 @@ function main() {
   }
 }
 
-const MAIN = Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// Started as the command, however the path to it was typed: Node takes the
+// module at its real path (through a link to the script, a linked folder, or
+// /tmp, which macOS links to /private/tmp), so both are compared as real
+// paths. Before, such a start ran nothing and ended with exit code 0
+// (QA-G-41).
+const realOrAsGiven = (p) => { try { return realpathSync(p); } catch { return p; } };
+const MAIN = Boolean(process.argv[1]) && realOrAsGiven(path.resolve(process.argv[1])) === realOrAsGiven(fileURLToPath(import.meta.url));
 if (MAIN) main();

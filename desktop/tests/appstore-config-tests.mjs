@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -444,6 +444,38 @@ test('an Entitlements.plist that holds a list, not a dictionary, is refused, and
 test('a tauri.conf.json that cannot be read, missing or not JSON, is refused, and nothing is written (DISH-G-84, its N6)', () => {
   refusedPlan('missing', inputFiles({ confText: null }), /^could not read .*tauri\.conf\.json \(ENOENT\)$/);
   refusedPlan('not JSON', inputFiles({ confText: '{ "identifier": ' }), /^could not read .*tauri\.conf\.json \(/);
+});
+
+// QA-G-41 (QA-01's C10.2 to C10.4, wave-g/qa/scripts/app/r9_config_adv.mjs):
+// started by a path that is not the physical one, the command ran nothing and
+// ended with exit code 0. Its main-module check compared the path as typed
+// with the real path Node takes the module at: a link to the script, a
+// linked folder, or /tmp, which macOS links to /private/tmp.
+test('started through a link to the script, a linked folder or a /tmp path, the command runs and writes as when started by its real path (QA-G-41; QA-01\'s C10.2 to C10.4)', () => {
+  const ran = (tool, label) => {
+    const out = freshOut();
+    const r = spawnSync(process.execPath, [tool, ...args({ out })], { encoding: 'utf8', cwd: ROOT });
+    assert.equal(r.status, 0, label + ': exit code 0: ' + r.stdout + r.stderr);
+    assert.match(r.stdout, /^written: /m, label + ': it says what it wrote: ' + r.stdout);
+    assert.deepEqual(listing(out), [CONFIG_NAME, ENTITLEMENTS_NAME].sort(), label + ': and wrote both files');
+  };
+  const linkedTool = path.join(ROOT, 'linked-tool.mjs');
+  symlinkSync(TOOL, linkedTool);
+  ran(linkedTool, 'C10.2, a link to the script');
+  const linkedDesktop = path.join(ROOT, 'linked-desktop');
+  symlinkSync(DESKTOP, linkedDesktop);
+  ran(path.join(linkedDesktop, 'tools', 'appstore-config.mjs'), 'C10.3, a path through a linked folder');
+  assert.equal(realpathSync('/tmp'), '/private/tmp', 'this Mac links /tmp to /private/tmp');
+  const copy = mkdtempSync('/private/tmp/plain-sight-appstore-config-');
+  try {
+    for (const [from, to] of [[TOOL, 'desktop/tools/appstore-config.mjs'], [path.join(TAURI, 'tauri.conf.json'), 'desktop/src-tauri/tauri.conf.json'], [path.join(TAURI, 'Entitlements.plist'), 'desktop/src-tauri/Entitlements.plist']]) {
+      mkdirSync(path.dirname(path.join(copy, to)), { recursive: true });
+      writeFileSync(path.join(copy, to), readFileSync(from));
+    }
+    ran(path.join(copy.replace(/^\/private\/tmp\//, '/tmp/'), 'desktop', 'tools', 'appstore-config.mjs'), 'C10.4, a copy started by its /tmp path');
+  } finally {
+    rmSync(copy, { recursive: true, force: true });
+  }
 });
 
 test('desktop/.gitignore keeps both files out of the repository, and desktop/package.json runs the command as npm run appstore:config', () => {
