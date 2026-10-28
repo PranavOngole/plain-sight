@@ -173,13 +173,15 @@ await run(tests, {
     watch = { child, report };
   },
   after: async () => {
-    // No copy this run opened outlives it, however a test ended; a copy someone
-    // else opened is never touched. A launch under way when the run began to
-    // end records its copy first, so that copy is ended too (DM-249).
+    // Every copy running from a bundle this run opened ends with the run,
+    // recorded or not: a launch whose wait for its pid timed out never
+    // recorded its copy, which was left running (DISH I-14, QA-01's
+    // observation 6). The run starts only when no copy of the app is running
+    // (mayStart), so these are the run's own. A launch under way when the run
+    // began to end records its copy first (DM-249).
     await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});
-    const ours = () => instances().filter((p) => launched.includes(p));
-    for (const pid of ours()) { try { drive('quit-app', pid); } catch (err) { note('quit-app ' + pid + ': ' + err.message); } }
-    await until(() => !ours().length, 'every copy this run opened to end', 5000).catch(() => ours().forEach((p) => process.kill(p, 'SIGKILL')));
+    for (const pid of instances()) { try { drive('quit-app', pid); } catch (err) { note('quit-app ' + pid + ': ' + err.message); } }
+    await until(() => !instances().length, 'every copy running from the bundle to end', 5000).catch(() => instances().forEach((p) => { try { process.kill(p, 'SIGKILL'); } catch { /* it has ended */ } }));
     if (watch && watch.child.exitCode === null) watch.child.kill('SIGTERM');
   }
 });

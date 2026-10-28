@@ -741,12 +741,12 @@ test('in the app the quit question counts edits and keeps no copy of the saved t
   }
 });
 
-// QA-G-33, read in the page's source: no second copy of the hidden text. No
+// QA-G-33, read in the page's source: no lasting copy of the hidden text. No
 // savedText is left; the hidden buffer is written only by setReal, which
 // counts each change; the count moves only there; and the quit question's
 // mark is set from a count (the count at a Save's click, or after an Open's
 // replace) and dropped by the wipe, never set from the text.
-test('the page keeps no second copy of the hidden text: no savedText, every change to the buffer counted by setReal, and the quit question\'s mark is a count, never the text (QA-G-33)', () => {
+test('the page keeps no lasting copy of the hidden text: no savedText, every change to the buffer counted by setReal, and the quit question\'s mark is a count, never the text (QA-G-33)', () => {
   assert.equal(/\bsavedText\b/.test(HTML), false, 'index.html holds no savedText (onUnsavedText, the adapter\'s name, is another word)');
   const script = HTML.slice(HTML.indexOf('<script>'), HTML.indexOf('</script>'));
   const lineAt = (index) => script.slice(script.lastIndexOf('\n', index) + 1, script.indexOf('\n', index)).replace(/\s*\/\/.*$/, '').trim();

@@ -501,7 +501,7 @@ test('no suite launches the app once the run is ending, and each suite\'s end st
     assert.ok(body.includes("  launching = true;\n  let pid = 0;\n  try {\n    execFileSync('open', ['-n', " + bundle + "]);\n    pid = await until(() => instances().find((p) => !launched.includes(p)) || 0, 'the app process', 15000);\n    launched.push(pid);\n    recordLaunch(pid, " + bundle + ");\n  } finally {\n    launching = false;\n  }\n"), file + ': a launch under way is marked until its copy is recorded, here and with the harness for its restore check');
     assert.equal([...text.matchAll(/execFileSync\('open'/g)].length, 1, file + ' opens the bundle in one place only');
     const end = text.slice(text.indexOf('await run(tests, {'));
-    assert.ok(end.includes("  after: async () => {\n") && end.includes("    await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});\n    const ours = () => instances().filter((p) => launched.includes(p));\n"), file + ': after() waits for a launch under way before it ends the copies');
+    assert.ok(end.includes("  after: async () => {\n") && end.includes("    await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});\n    for (const pid of instances()) "), file + ': after() waits for a launch under way before it ends the copies');
   }
 });
 
@@ -531,6 +531,26 @@ test('the restore check waits 3 s before its second look, and no test file but t
   assert.match(read(tests, 'harness.mjs'), /^export const RESTORE_RECHECK_MS = 3000;$/m, 'the second look comes 3 s after the restore');
   const naming = readdirSync(tests).filter((f) => f.endsWith('.mjs') && read(tests, f).includes('setRestoreRecheckForTests')).sort();
   assert.deepEqual(naming, ['config.mjs', 'harness-safety.mjs', 'harness.mjs'], 'named only by the harness, its safety suite and this check');
+});
+
+// DISH I-14 and QA-01's observation 6 (its T4): a launch whose wait for its
+// pid timed out never recorded its copy, and after() ended only the copies it
+// had recorded, so such a copy outlived the run. Both suites' after() now end
+// every copy running from a bundle the run opened, recorded or not; only a GUI
+// run reaches that code, so it is pinned here.
+test('the release and real-key suites\' after() ends every copy running from a bundle the run opened, recorded or not (DISH I-14; QA-01\'s observation 6)', () => {
+  const tests = path.join(DESKTOP, 'tests');
+  for (const file of ['app.mjs', 'release.mjs']) {
+    const text = read(tests, file);
+    const end = text.slice(text.indexOf('await run(tests, {'));
+    const start = end.indexOf('  after: async () => {\n');
+    assert.ok(start >= 0, file + ' has an after()');
+    const after = end.slice(start, end.indexOf('\n  }\n', start));
+    assert.ok(after.includes('    for (const pid of instances()) '), file + ': after() asks every running copy to quit');
+    assert.ok(after.includes('    await until(() => !instances().length, '), file + ': and waits until none runs');
+    assert.ok(after.includes('.catch(() => instances().forEach('), file + ': then ends any copy still running');
+    assert.equal(/launched\.includes/.test(after), false, file + ': whether the run recorded it or not');
+  }
 });
 
 // The real-key save and folder tests (app.mjs) go to the test's own folder
