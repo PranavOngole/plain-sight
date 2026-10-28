@@ -24,13 +24,13 @@
 //! minimizes it or hides the app as the yellow button and Cmd+H do; "show"
 //! brings a hidden app back as a click on its Dock icon does: it unhides the
 //! app and then asks macOS to make it the active app (`unhide_and_activate`).
-//! `{"id": n, "windowState": true}` answers what the page's visibility
-//! follows, for the evidence when a wait for it times out: whether any part
-//! of the window is visible (its occlusion state), whether it is on screen,
-//! minimized, on the active space and the key window, and whether the app is
-//! the active one and hidden. The Quit item and the Dock's quit need no
-//! probe: the runner presses the real item through Accessibility and sends
-//! the Dock's quit request itself.
+//! `{"id": n, "windowState": true}` answers, for the evidence when a wait for
+//! the page's visibility times out, whether any part of the window is visible
+//! (its occlusion state), whether it is on screen, minimized, on the active
+//! space and the key window, and whether the app is the active one and
+//! hidden. The Quit item and the Dock's quit need no probe: the runner
+//! presses the real item through Accessibility and sends the Dock's quit
+//! request itself.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

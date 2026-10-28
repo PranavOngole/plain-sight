@@ -628,14 +628,15 @@ test('the app\'s delegate answers applicationShouldTerminate:, so a quit request
   assert.equal(await ask({ delegateResponds: true }), true);
 });
 
-// What the page's visibility follows on the Mac, for the evidence: whether
-// any part of the window is visible (its occlusion state) and whether the app
-// is the active one, as the hook reads them from AppKit (windowState in
-// src-tauri/src/e2e.rs), and the front app's pid and the app's windows as the
-// driver sees them. In e2e-run-4 (28 October 2026) the page stayed hidden for
-// the whole wait after show, and run.log said nothing of the window. Each part
-// that cannot be read is noted with the others; a person at the keyboard
-// still stops the run. Evidence only: no test passes on it.
+// The window's state, for the evidence when the page's visibility does not
+// come: whether any part of the window is visible (its occlusion state) and
+// whether the app is the active one, as the hook reads them from AppKit
+// (windowState in src-tauri/src/e2e.rs), and the front app's pid and the
+// app's windows as the driver sees them. In e2e-run-4 (28 October 2026) the
+// page stayed hidden for the whole wait after show, and run.log said nothing
+// of the window. Each part that cannot be read is noted with the others; a
+// person at the keyboard still stops the run. Evidence only: no test passes
+// on it.
 async function windowEvidence(when) {
   const parts = [];
   const read = async (label, fn) => {
