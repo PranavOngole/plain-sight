@@ -553,6 +553,27 @@ test('the release and real-key suites\' after() ends every copy running from a b
   }
 });
 
+// QA-G-45 (N13): e2e.mjs could start the app another way and pass the pins
+// above: QA-01's N13 started it through execFile from a dynamic import of
+// node:child_process, so spawnApp's refusal was skipped, and every suite
+// passed. The rule, read from the file: node:child_process is named once,
+// for execFileSync, which runs textutil, chmod and plutil only; no dynamic
+// import and no require; and the test build's path goes to spawnApp (and to
+// path.basename, for names), nowhere else.
+test('e2e.mjs starts the app only through spawnApp: execFileSync is all it takes from node:child_process and runs only textutil, chmod and plutil, there is no dynamic import or require, and the test build\'s path goes only to spawnApp (QA-G-45, QA-01\'s N13; DM-249)', () => {
+  const e2e = read(path.join(DESKTOP, 'tests'), 'e2e.mjs');
+  const code = e2e.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+  assert.equal([...code.matchAll(/child_process/g)].length, 1, 'node:child_process is named once');
+  assert.ok(code.includes("\nimport { execFileSync } from 'node:child_process';\n"), 'and only execFileSync is taken from it');
+  assert.equal(/\bimport\s*\(|\brequire\s*\(/.test(code), false, 'no dynamic import and no require');
+  const named = [...code.matchAll(/\bexecFileSync\(\s*'([^']+)'/g)].map((m) => m[1]);
+  assert.equal([...code.matchAll(/\bexecFileSync\b/g)].length, named.length + 1, 'every execFileSync call names its program');
+  assert.deepEqual([...new Set(named)].sort(), ['chmod', 'plutil', 'textutil'], 'execFileSync runs textutil, chmod and plutil only');
+  const rest = code.replace(/^const EXE = .*$/m, '').replace(/\bspawnApp\(EXE, /g, '').replace(/\bpath\.basename\(EXE\)/g, '');
+  assert.equal(/\bEXE\b/.test(rest), false, 'the test build\'s path goes only to spawnApp and path.basename');
+  assert.equal([...code.matchAll(/\bspawnApp\(EXE, /g)].length, 1, 'and to spawnApp in one place');
+});
+
 // The real-key save and folder tests (app.mjs) go to the test's own folder
 // through the panel's Go-to box and press the panel's default button only
 // after goTo, which cancels the panel when the panel does not show that
