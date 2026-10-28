@@ -426,6 +426,15 @@ if (process.argv[2] === '--child') {
         await h.sleep(4000);
       } }], { after: e2eAfter });
     },
+    // QA-01's E1 (wave-g/qa/scripts/app/r9_suite_adv.mjs, group E; QA-G-45):
+    // e2e.mjs itself, its launch() and its after(), with this file's stand-in
+    // for the driver and the stand-in app as the test build. Only its first
+    // test runs. Its launch waits for a first window that never comes, or,
+    // with the window shown at once, for the probe's answer, which the
+    // stand-in never gives; the parent sends the signal once the app has
+    // recorded its pid.
+    async 'e2e-first-window-wait'() { await e2eSuite([]); },
+    async 'e2e-probe-wait'() { await e2eSuite([HELPER, DOC_ON]); },
     // H5: a sandbox probe's container (the bundle under test carries an
     // sbprobe- identifier), refused like a test copy's.
     async 'run-probe-container-refused'() {
@@ -572,6 +581,19 @@ if (process.argv[2] === '--child') {
   let afterEnded = null;
   const afterDone = new Promise((resolve) => { afterEnded = resolve; });
   const e2eAfterThenSay = async () => { await e2eAfter(); console.log('AFTER DONE'); afterEnded(); };
+  // QA-01's E1: e2e.mjs run as it is, its app the stand-in. The child refuses
+  // unless the app e2e.mjs would launch is that stand-in, in this file's own
+  // temporary folder, so no test build is ever started.
+  const e2eSuite = async (windows) => {
+    fake.windows = windows;
+    mkdirSync(path.join(home, 'Downloads'), { recursive: true });
+    Object.assign(process.env, standinEnv, { PLAIN_SIGHT_E2E_APP: process.env[STANDIN], PLAIN_SIGHT_ONLY: '^first launch: ' });
+    if (!process.env.PLAIN_SIGHT_E2E_APP || !process.env.PLAIN_SIGHT_E2E_APP.startsWith(path.dirname(box) + path.sep)) {
+      console.log('refusing: e2e.mjs would launch ' + process.env.PLAIN_SIGHT_E2E_APP + ', not the stand-in');
+      process.exit(2);
+    }
+    await import(pathToFileURL(path.join(HERE, 'e2e.mjs')).href);
+  };
   try {
     await cases[which]();
     console.log('RESULT ok');
@@ -1017,6 +1039,45 @@ test('e2e.mjs\'s after() stops the app that is current when each stop ends: a co
   assert.equal(s.pids.length, 2, 'two copies were started: ' + JSON.stringify(s.pids));
   assert.deepEqual(s.running, [], 'neither outlives the run');
   clean(r);
+});
+
+// DISH-G-85 and QA-G-45 (N12): QA-01's E1 (r9_suite_adv.mjs, group E),
+// adopted: e2e.mjs's own launch() and after(), in six variants that send the
+// signal once the app has recorded its pid: SIGINT, SIGQUIT and SIGHUP 300 ms
+// into the wait for the first window, SIGTERM 1.5 s into it, SIGINT at once,
+// and SIGINT 300 ms into the wait for the probe's answer. With app set only
+// after the window wait (QA-01's N12) or after both waits (DISH's N17), the
+// app was outside after()'s sight and outlived the run.
+test('e2e.mjs\'s own launch() records the app before its waits, so a signal during the wait for the first window or for the probe stops it: exit code 130, the app ended, nothing written after the run, the data back, in each of six variants (DISH-G-85, QA-G-45; QA-01\'s E1)', async () => {
+  const variants = [
+    ['e2e-first-window-wait', 'SIGINT', 300], ['e2e-first-window-wait', 'SIGQUIT', 300], ['e2e-first-window-wait', 'SIGHUP', 300],
+    ['e2e-first-window-wait', 'SIGTERM', 1500], ['e2e-first-window-wait', 'SIGINT', 0], ['e2e-probe-wait', 'SIGINT', 300]
+  ];
+  const runs = await Promise.all(variants.map(async ([id, signal, delay], n) => {
+    let sent = false;
+    let poll = null;
+    const r = await runCase(id, (out, child, box) => {
+      if (poll) return;
+      poll = setInterval(() => {
+        const file = path.join(box, STANDIN_PIDS);
+        if (sent || !existsSync(file) || !readFileSync(file, 'utf8').trim()) return;
+        sent = true;
+        clearInterval(poll);
+        setTimeout(() => child.kill(signal), delay);
+      }, 20);
+    }, { tag: 'e2e-' + n });
+    clearInterval(poll);
+    return { what: id + ', ' + signal + ' ' + delay + ' ms after the pid', sent, r, s: await standinsAfter(r) };
+  }));
+  for (const { what, sent, r, s } of runs) {
+    assert.ok(sent, what + ': the signal was sent once the app had recorded its pid; the child\'s output:\n' + r.out);
+    ended(r, 130);
+    assert.equal(s.pids.length, 1, what + ': one app was started: ' + JSON.stringify(s.pids));
+    assert.deepEqual(s.running, [], what + ': after() stopped it, so no app outlives the run');
+    assert.deepEqual(s.wrote, [], what + ': nothing was written into the restored web data folder after the run');
+    clean(r);
+    assert.equal(r.lock, false, what + ': the lock is released');
+  }
 });
 
 // DM-247: three real-key tests (app.mjs) started from a first launch by

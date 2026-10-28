@@ -505,6 +505,24 @@ test('no suite launches the app once the run is ending, and each suite\'s end st
   }
 });
 
+// DISH-G-85 and QA-G-45 (N12): e2e.mjs's after() sees the app a test
+// launched only because launch() sets app right after spawnApp, before the
+// launch's first wait. With the assignment after the window wait (QA-01's
+// N12) or after both waits (DISH's N17), a signal during that wait left the
+// new app outside after()'s sight, running over the restored data, and every
+// suite passed. Only a GUI run reaches it, so the order is pinned here;
+// harness-safety.mjs runs e2e.mjs's own launch() under its stand-ins
+// (QA-01's E1).
+test('e2e.mjs sets the app its after() stops right after spawnApp, before the launch\'s first wait (DISH-G-85; QA-G-45, QA-01\'s N12; DM-249)', () => {
+  const e2e = read(path.join(DESKTOP, 'tests'), 'e2e.mjs');
+  const start = e2e.indexOf('async function launch(');
+  assert.ok(start >= 0, 'e2e.mjs has launch()');
+  const body = e2e.slice(start, e2e.indexOf('\n}\n', start));
+  assert.ok(body.includes("  const child = spawnApp(EXE, { PLAIN_SIGHT_E2E_DIR: PROBE, PLAIN_SIGHT_E2E_DOWNLOADS: DOWNLOADS, PLAIN_SIGHT_E2E_SAVE_AS: DOWNLOADS, ...env });\n  const pid = child.pid;\n  app = { child, pid };\n  await firstWindow("), 'launch() sets app right after spawnApp and before its first wait');
+  assert.ok(body.indexOf('  app = { child, pid };\n') >= 0 && body.indexOf('  app = { child, pid };\n') < body.indexOf('await '), 'the assignment comes before the first await of launch()');
+  assert.equal([...body.matchAll(/\bapp = /g)].length, 1, 'launch() sets app in one place only');
+});
+
 // The real-key save and folder tests (app.mjs) go to the test's own folder
 // through the panel's Go-to box and press the panel's default button only
 // after goTo, which cancels the panel when the panel does not show that
