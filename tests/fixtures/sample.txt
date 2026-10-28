@@ -1,0 +1,14 @@
+Plain Sight golden sample: the page and the Mac app must write this text to the same Word document, byte for byte.
+
+Tabs:	one tab, then		two tabs in a row, and one at the end	
+Accents: café, naïve, Ærø, Zürich, São Paulo, Ångström
+Japanese: 日本語の文章と、句読点。
+Emoji: 😀 and 🎉 and a rocket at the end 🚀
+Markup stays text: ]]> and &<>"' and &amp; and <w:p/> and </w:t>
+A Windows line end follows this line
+A lone carriage return follows this lineand this comes after the lone carriage return
+
+
+Two blank lines above. Characters XML cannot hold are left out of the document: the control characters [], [], [] and [] and the non-characters [￾] and [￿] become [], [], [], [], [] and [].
+Long line: The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. 
+The last line ends with a line feed.

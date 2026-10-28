@@ -1,0 +1,3 @@
+# The Word writer's golden sample holds a CRLF and a lone CR on purpose; no line-ending conversion.
+tests/fixtures/sample.txt -text
+tests/fixtures/sample.docx binary
