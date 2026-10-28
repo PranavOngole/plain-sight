@@ -475,6 +475,8 @@ if (process.argv[2] === '--child') {
       personFile(dirs[1], 'locked.txt', 'NOT FOR THE HARNESS', 0o000);
       await runSuite([{ name: 'a test that writes test data', fn: async () => { testData(dirs[0]); } }]);
     },
+    async 'run-unkillable-ignore'() { await unkillable('ignore'); },
+    async 'run-unkillable-frozen'() { await unkillable('frozen'); },
     // H5: a sandbox probe's container (the bundle under test carries an
     // sbprobe- identifier), refused like a test copy's.
     async 'run-probe-container-refused'() {
@@ -634,6 +636,19 @@ if (process.argv[2] === '--child') {
     const folder = path.dirname(target);
     spawn(process.execPath, [process.env[LATE], marker(folder), real(home, folder), target, action], { stdio: 'ignore', detached: true }).unref();
   };
+  // QA-G-44 (N6): QA-01's L5 (r9_launch_adv.mjs with r9_launch_child.mjs,
+  // case unkillable): an app that ignores SIGTERM, or freezes itself on it,
+  // so only stopApp's SIGKILL after its 8 s wait ends it. The test tries to
+  // launch again while the cleanup waits, and after() is e2e.mjs's own.
+  const unkillable = (mode) => runSuite([{ name: 'an app that will not quit on SIGTERM', fn: async () => {
+    const child = h.spawnApp(process.env[STANDIN], { ...standinEnv, STANDIN_MODE: mode });
+    current = { child, pid: child.pid };
+    await ready(current);
+    console.log('IN TEST');
+    await h.sleep(1500);
+    try { launchApp(); console.log('RELAUNCHED ' + current.pid); } catch (err) { console.log('REFUSED ' + err.constructor.name); }
+    await h.sleep(15000);
+  } }], { after: async () => { console.log('IN AFTER'); const t0 = Date.now(); await e2eAfter(); console.log('AFTER DONE after ' + (Date.now() - t0) + ' ms'); } });
   const e2eSuite = async (windows) => {
     fake.windows = windows;
     mkdirSync(path.join(home, 'Downloads'), { recursive: true });
@@ -668,7 +683,9 @@ const ROOT = mkdtempSync(path.join(os.tmpdir(), 'plain-sight-harness-safety-'));
 // STANDIN_APPDATA 150 ms after it starts, as every launch of this branch's
 // build does (folder.rs, Folder::with, through Folder::load). It writes
 // nothing to its output, so a closed pipe cannot end it, and it ends by
-// itself after 20 s.
+// itself after 20 s. With STANDIN_MODE ignore it ignores SIGTERM, and with
+// frozen it stops itself (SIGSTOP) on it, so only a SIGKILL ends it (QA-01's
+// r9_standin.mjs modes, QA-G-44).
 const STANDIN_APP = path.join(ROOT, 'standin-app.mjs');
 const STANDIN_EXE = path.join(ROOT, 'standin-app');
 writeFileSync(STANDIN_APP, [
@@ -676,7 +693,7 @@ writeFileSync(STANDIN_APP, [
   "import path from 'node:path';",
   "const env = process.env;",
   "let quitting = false;",
-  "process.on('SIGTERM', () => { if (quitting) return; quitting = true; setTimeout(() => process.exit(0), 1000); });",
+  "process.on('SIGTERM', () => { if (env.STANDIN_MODE === 'ignore') return; if (env.STANDIN_MODE === 'frozen') { process.kill(process.pid, 'SIGSTOP'); return; } if (quitting) return; quitting = true; setTimeout(() => process.exit(0), 1000); });",
   "process.on('SIGINT', () => {});",
   "process.on('SIGHUP', () => {});",
   "appendFileSync(env.STANDIN_PIDS, process.pid + '\\n');",
@@ -716,7 +733,10 @@ function fakeCopy(box, identifier) {
   return app;
 }
 
-function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100 } = {}) {
+// Every case ends within its watchdog (120 s, or what it names): one that
+// hangs is ended with SIGKILL and fails, so a regression fails instead of
+// holding the suite (QA-G-44).
+function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100, watchdog = 120000 } = {}) {
   const box = path.join(ROOT, tag);
   const home = path.join(box, 'home');
   const tmp = path.join(box, 'tmp');
@@ -729,10 +749,12 @@ function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100 
   if (recheck !== null) env[RECHECK] = String(recheck);
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child', id], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
+  const timer = setTimeout(() => { out += '\nWATCHDOG: the case ran for ' + watchdog + ' ms and was ended with SIGKILL\n'; child.kill('SIGKILL'); }, watchdog);
   const feed = (chunk) => { out += chunk; onOutput(out, child, box); };
   child.stdout.on('data', feed);
   child.stderr.on('data', feed);
   return new Promise((resolve) => child.on('exit', (code, signal) => {
+    clearTimeout(timer);
     const line = out.split('\n').find((l) => l.startsWith('DIRS '));
     const dirs = line ? JSON.parse(line.slice(5)).map((rel) => path.join(home, rel)) : [];
     resolve({
@@ -1246,6 +1268,46 @@ test('the listing never opens a file: a file of the person\'s that no one may re
   assert.ok(start >= 0 && body.includes('lstatSync(p, { bigint: true })') && body.includes('readdirSync(p)'), 'listData lists with lstat and readdir');
   assert.equal(/readFile|openSync|createReadStream|readSync|\bopen\(|\bfs\./.test(body), false, 'and calls nothing that opens a file');
   clean(r);
+});
+
+// QA-G-44 (QA-01's section 20). N6: stopApp() without its SIGKILL fallback
+// passed every suite; stopCurrentApp loops on it, so an app that ignores
+// SIGTERM or freezes would hold the cleanup, and the person's data with it,
+// forever. QA-01's L5 cases, adopted, each bounded by a 40 s watchdog so a
+// regression fails instead of hanging the suite.
+test('an app that ignores SIGTERM, or freezes on it, is ended by stopApp\'s SIGKILL after its 8 s wait: the cleanup ends inside 12 s, the relaunch is refused, exit code 130, no app left, the data back, the lock released (QA-G-44; QA-01\'s L5)', async () => {
+  const runs = await Promise.all(['ignore', 'frozen'].map(async (mode) => {
+    let sent = false;
+    const r = await runCase('run-unkillable-' + mode, (out, child) => { if (!sent && out.includes('IN TEST')) { sent = true; setTimeout(() => child.kill('SIGINT'), 300); } }, { watchdog: 40000 });
+    return { mode, sent, r, s: await standinsAfter(r) };
+  }));
+  for (const { mode, sent, r, s } of runs) {
+    assert.ok(sent, mode + ': the signal was sent during the test; the child\'s output:\n' + r.out);
+    ended(r, 130);
+    const took = Number((r.out.match(/^AFTER DONE after (\d+) ms$/m) || [])[1]);
+    assert.ok(took >= 7500 && took < 12000, mode + ': after() waited stopApp\'s 8 s and then ended the app: ' + took + ' ms; the child\'s output:\n' + r.out);
+    assert.match(r.out, /^REFUSED RunEnding$/m, mode + ': the relaunch during that wait was refused');
+    assert.doesNotMatch(r.out, /^RELAUNCHED /m, mode + ': no app was launched again');
+    assert.deepEqual(s.running, [], mode + ': no app is left');
+    clean(r);
+    assert.equal(r.lock, false, mode + ': the lock is released');
+  }
+});
+// N10: a SIGQUIT during the cleanup obeyed at once passed every suite, since
+// the SIGQUIT case above sends it only during a test. QA-01's P3.2 with
+// SIGQUIT (r9_infra_adv.mjs), adopted: one while after() waits.
+test('a SIGQUIT while the run\'s own cleanup waits in after() waits for that cleanup as a SIGINT does: reported by name, after() once with the lock held, the data back, the lock released, exit code 130 (QA-G-44; QA-01\'s P3.2 with SIGQUIT)', async () => {
+  let sent = false;
+  const t0 = Date.now();
+  const r = await runCase('run-signal-during-cleanup', (out, child) => { if (!sent && out.includes('IN AFTER')) { sent = true; child.kill('SIGQUIT'); } }, { tag: 'run-sigquit-during-cleanup' });
+  assert.ok(sent, 'the signal was sent while after() waited; the child\'s output:\n' + r.out);
+  ended(r, 130);
+  assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
+  assert.match(r.out, /^release: SIGQUIT came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the SIGQUIT is reported by name');
+  onceWithTheLock(r);
+  assert.ok(Date.now() - t0 > 3000, 'the run lived until the cleanup was done (after() holds 3 s)');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
 });
 
 // DM-247: three real-key tests (app.mjs) started from a first launch by
