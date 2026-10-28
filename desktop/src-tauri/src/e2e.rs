@@ -21,16 +21,26 @@
 //! "Quit without saving?" sheet (quit.rs) as its completion handler sees it,
 //! false when no sheet is up, and
 //! `{"id": n, "window": "minimize"}` (or "unminimize", "hide", "show")
-//! minimizes it or hides the app as the yellow button and Cmd+H do. The Quit
-//! item and the Dock's quit need no probe: the runner presses the real item
-//! through Accessibility and sends the Dock's quit request itself.
+//! minimizes it or hides the app as the yellow button and Cmd+H do; "show"
+//! brings a hidden app back as a click on its Dock icon does: it unhides the
+//! app and then asks macOS to make it the active app (`unhide_and_activate`).
+//! `{"id": n, "windowState": true}` answers what the page's visibility
+//! follows, for the evidence when a wait for it times out: whether any part
+//! of the window is visible (its occlusion state), whether it is on screen,
+//! minimized, on the active space and the key window, and whether the app is
+//! the active one and hidden. The Quit item and the Dock's quit need no
+//! probe: the runner presses the real item through Accessibility and sends
+//! the Dock's quit request itself.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{sel, MainThreadMarker};
-use objc2_app_kit::{NSApplication, NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSWindow};
+use objc2_app_kit::{
+    NSApplication, NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSWindow,
+    NSWindowOcclusionState,
+};
 use objc2_foundation::{NSDictionary, NSError, NSString};
 use objc2_web_kit::WKWebView;
 use serde_json::{json, Value};
@@ -134,12 +144,56 @@ pub fn watch(app: AppHandle) {
                     );
                 }
             });
+        } else if req["window"].as_str() == Some("show") {
+            // Both steps in order on the main thread, and the answer after
+            // them. Before, this was AppHandle::show ("Shows the application,
+            // but does not automatically focus it", Tauri 2.12.4), which sends
+            // only NSApp unhide: (tao 0.37.1, show_application,
+            // src/platform/macos.rs lines 416 to 420). In e2e-run-4 (28
+            // October 2026) the page stayed hidden for 5 s after it; most
+            // likely the window came back behind another app's window, with
+            // the app not active. That run recorded neither, so the test now
+            // reads both through windowState when the wait times out.
+            on_main_run_loop(move || {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                unhide_and_activate(&NSApplication::sharedApplication(mtm));
+                respond(&answer, json!({ "ok": true }));
+            });
+        } else if req["windowState"].as_bool() == Some(true) {
+            // Read on the main thread, where AppKit keeps them.
+            on_main_run_loop(move || {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                let Ok(ns_window) = window.ns_window() else {
+                    respond(&answer, json!({ "ok": false, "error": "no NSWindow" }));
+                    return;
+                };
+                // SAFETY: Tauri's pointer to the window's NSWindow, on the main thread.
+                let ns_window: &NSWindow = unsafe { &*ns_window.cast() };
+                let ns_app = NSApplication::sharedApplication(mtm);
+                let occlusion = ns_window.occlusionState();
+                respond(
+                    &answer,
+                    json!({ "ok": true, "value": {
+                        "occlusionVisible": occlusion.contains(NSWindowOcclusionState::Visible),
+                        "occlusionState": occlusion.0,
+                        "windowVisible": ns_window.isVisible(),
+                        "miniaturized": ns_window.isMiniaturized(),
+                        "onActiveSpace": ns_window.isOnActiveSpace(),
+                        "keyWindow": ns_window.isKeyWindow(),
+                        "appActive": ns_app.isActive(),
+                        "appHidden": ns_app.isHidden(),
+                    } }),
+                );
+            });
         } else if let Some(action) = req["window"].as_str() {
             let done = match action {
                 "minimize" => window.minimize(),
                 "unminimize" => window.unminimize(),
                 "hide" => app.hide(),
-                "show" => app.show(),
                 _ => {
                     respond(
                         &answer,
@@ -169,6 +223,26 @@ pub fn watch(app: AppHandle) {
             });
         }
     });
+}
+
+/// The way back to a hidden app that a click on its Dock icon takes: unhide
+/// the app (the call tao's show_application makes), then ask macOS to make
+/// it the active app. Apple's page for unhide(_:) says it "makes the receiver
+/// active" too, but since macOS 14 activation is only a request, which the
+/// system may refuse ("app activation is driven by user intent", AppKit
+/// Release Notes for macOS 14, App Activation). So the request is made here
+/// on its own, and the test reads isActive back through windowState when the
+/// page stays hidden. activate() exists from macOS 14; the app runs from
+/// 12.0, where activateIgnoringOtherApps: is the call (deprecated since macOS
+/// 14). Main thread.
+fn unhide_and_activate(ns_app: &NSApplication) {
+    ns_app.unhide(None);
+    if ns_app.respondsToSelector(sel!(activate)) {
+        ns_app.activate();
+    } else {
+        #[allow(deprecated)]
+        ns_app.activateIgnoringOtherApps(true);
+    }
 }
 
 fn respond(path: &Path, value: Value) {

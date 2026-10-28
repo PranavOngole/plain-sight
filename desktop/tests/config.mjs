@@ -593,6 +593,76 @@ test('the real-key save and folder tests press a panel\'s default button only af
   }
 });
 
+// e2e-run-4's show step (round 11): in e2e-run-4 (a92087a, 28 October 2026)
+// the hidden-document test's page stayed hidden for the whole 5 s wait after
+// the hook's show, which was AppHandle::show, an unhide alone (tao 0.37.1's
+// show_application). The hook's show now unhides the app and then asks
+// macOS to make it the active app, as a click on its Dock icon does, both on
+// the main thread in that order, and answers after them; and the test's
+// waits for the page's visibility record the window's state on a timeout
+// (the hook's windowState, the driver's front app) and still fail. Read
+// from the files, since only a launched test build runs them;
+// harness-safety.mjs runs the test's timeout path under a fake of the hook.
+test('the e2e hook\'s show unhides the app and then activates it, as a Dock click does, and the hidden-document test records the window\'s state on a timeout and still fails (e2e-run-4\'s show step)', () => {
+  const code = read(TAURI, 'src', 'e2e.rs').split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+  assert.equal(/\bapp\.show\(\)/.test(code), false, 'the hook does not show the app through AppHandle::show, an unhide alone');
+  const arm = code.indexOf('} else if req["window"].as_str() == Some("show") {');
+  const others = code.indexOf('} else if let Some(action) = req["window"].as_str() {');
+  assert.ok(arm >= 0 && arm < others, 'show has its own branch, before the other window actions');
+  assert.ok(code.slice(arm, code.indexOf('} else if', arm + 1)).includes([
+    '            on_main_run_loop(move || {',
+    '                let Some(mtm) = MainThreadMarker::new() else {',
+    '                    return;',
+    '                };',
+    '                unhide_and_activate(&NSApplication::sharedApplication(mtm));',
+    '                respond(&answer, json!({ "ok": true }));',
+    '            });'
+  ].join('\n')), 'show unhides and activates the app on the main thread, then answers');
+  const fn = code.indexOf('\nfn unhide_and_activate(ns_app: &NSApplication) {\n');
+  assert.ok(fn >= 0, 'unhide_and_activate is there');
+  assert.equal(code.slice(fn, code.indexOf('\n}\n', fn) + 3), [
+    '',
+    'fn unhide_and_activate(ns_app: &NSApplication) {',
+    '    ns_app.unhide(None);',
+    '    if ns_app.respondsToSelector(sel!(activate)) {',
+    '        ns_app.activate();',
+    '    } else {',
+    '        #[allow(deprecated)]',
+    '        ns_app.activateIgnoringOtherApps(true);',
+    '    }',
+    '}',
+    ''
+  ].join('\n'), 'it unhides the app, then asks for activation: activate() from macOS 14, activateIgnoringOtherApps: before');
+  const state = code.slice(code.indexOf('} else if req["windowState"].as_bool() == Some(true) {'), others);
+  for (const want of ['ns_window.occlusionState()', '"occlusionVisible": occlusion.contains(NSWindowOcclusionState::Visible),', '"appActive": ns_app.isActive(),', '"appHidden": ns_app.isHidden(),']) {
+    assert.ok(state.includes(want), 'windowState answers ' + want);
+  }
+  const e2e = read(path.join(DESKTOP, 'tests'), 'e2e.mjs');
+  const wait = e2e.indexOf('\nasync function waitForVisibility(want, what) {\n');
+  assert.equal(e2e.slice(wait, e2e.indexOf('\n}\n', wait) + 3), [
+    '',
+    'async function waitForVisibility(want, what) {',
+    '  try {',
+    '    await until(async () => (await js(`document.visibilityState`)) === want, what, 5000);',
+    '  } catch (err) {',
+    '    if (err instanceof UserActivity) throw err;',
+    '    await windowEvidence(\'at the timeout waiting for \' + what);',
+    '    throw err;',
+    '  }',
+    '}',
+    ''
+  ].join('\n'), 'a wait for the page\'s visibility gives it 5 s, records the window\'s state on a timeout, then throws the timeout');
+  const evidence = e2e.slice(e2e.indexOf('\nasync function windowEvidence(when) {\n'), wait);
+  for (const want of ["await read('hook', () => ask({ windowState: true }));", "drive('frontmost').pid", "note('window state ' + when + ' (evidence only, never a pass): ' + parts.join('; '));"]) {
+    assert.ok(evidence.includes(want), 'windowEvidence: ' + want);
+  }
+  const at = e2e.indexOf("test('a minimized window and a hidden app give the page a hidden document");
+  const body = e2e.slice(at, e2e.indexOf('\n});\n', at));
+  assert.ok(at > wait && body.includes("for (const [away, back] of [['minimize', 'unminimize'], ['hide', 'show']]) {"), 'the test hides the app and shows it again through the hook');
+  assert.equal([...body.matchAll(/await waitForVisibility\('(hidden|visible)', /g)].map((m) => m[1]).join(), 'hidden,visible', 'both of its waits go through waitForVisibility');
+  assert.equal(/\buntil\(/.test(body), false, 'and no wait of the test goes around it');
+});
+
 test('the web deployment allowlist is unchanged (DR-10)', () => {
   const lines = read(ROOT, '.vercelignore').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
   assert.deepEqual(lines, ['*', '!index.html', '!covers', '!covers/**', '!vercel.json']);

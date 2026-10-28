@@ -20,8 +20,8 @@ import path from 'node:path';
 // evidence directory, before the harness reads it (Mac_PS_010).
 import './e2e-downloads.mjs';
 import {
-  DESKTOP, DOWNLOADS, EVIDENCE, HOME, ID, NotRun, ROOT, alive, decryptRecord, drive, firstWindow, isCoverPrefix, newDownloads, note, novelText,
-  run, sleep, spawnApp, stopApp, stopCurrentApp, until
+  DESKTOP, DOWNLOADS, EVIDENCE, HOME, ID, NotRun, ROOT, UserActivity, alive, decryptRecord, drive, firstWindow, isCoverPrefix, newDownloads, note,
+  novelText, run, sleep, spawnApp, stopApp, stopCurrentApp, until
 } from './harness.mjs';
 
 // The page's own Word document writer (index.html, docxBytes), run here as it
@@ -628,17 +628,58 @@ test('the app\'s delegate answers applicationShouldTerminate:, so a quit request
   assert.equal(await ask({ delegateResponds: true }), true);
 });
 
+// What the page's visibility follows on the Mac, for the evidence: whether
+// any part of the window is visible (its occlusion state) and whether the app
+// is the active one, as the hook reads them from AppKit (windowState in
+// src-tauri/src/e2e.rs), and the front app's pid and the app's windows as the
+// driver sees them. In e2e-run-4 (28 October 2026) the page stayed hidden for
+// the whole wait after show, and run.log said nothing of the window. Each part
+// that cannot be read is noted with the others; a person at the keyboard
+// still stops the run. Evidence only: no test passes on it.
+async function windowEvidence(when) {
+  const parts = [];
+  const read = async (label, fn) => {
+    try {
+      parts.push(label + ' ' + JSON.stringify(await fn()));
+    } catch (err) {
+      if (err instanceof UserActivity) throw err;
+      parts.push(label + ' could not be read: ' + err.message);
+    }
+  };
+  await read('hook', () => ask({ windowState: true }));
+  await read('front app', () => { const pid = drive('frontmost').pid; return { pid, thisApp: Boolean(app) && pid === app.pid }; });
+  await read('driver', () => drive('windows', app.pid));
+  note('window state ' + when + ' (evidence only, never a pass): ' + parts.join('; '));
+}
+
+// Waits up to 5 s for the page's visibility. On a timeout the window's state
+// goes into run.log first, and the test still fails with the timeout.
+async function waitForVisibility(want, what) {
+  try {
+    await until(async () => (await js(`document.visibilityState`)) === want, what, 5000);
+  } catch (err) {
+    if (err instanceof UserActivity) throw err;
+    await windowEvidence('at the timeout waiting for ' + what);
+    throw err;
+  }
+}
+
 test('a minimized window and a hidden app give the page a hidden document, which is what starts its ten-minute wipe', async () => {
   // While the screen is locked macOS already counts the window as not visible,
   // so the change can only be seen on an unlocked screen.
   const before = await js(`document.visibilityState`);
   note('visibility before: ' + before);
   if (before !== 'visible') throw new NotRun('the page is already hidden, as while the screen is locked');
+  // The state with the page visible, to read a timeout's record against; it
+  // also runs the evidence's reads in every run, not only after a failure.
+  await windowEvidence('with the page visible, before the minimize');
+  // The hook's show brings the hidden app back as a click on its Dock icon
+  // does: it unhides the app, then asks macOS to make it the active app.
   for (const [away, back] of [['minimize', 'unminimize'], ['hide', 'show']]) {
     await ask({ window: away });
-    await until(async () => (await js(`document.visibilityState`)) === 'hidden', 'a hidden page after ' + away, 5000);
+    await waitForVisibility('hidden', 'a hidden page after ' + away);
     await ask({ window: back });
-    await until(async () => (await js(`document.visibilityState`)) === 'visible', 'a visible page after ' + back, 5000);
+    await waitForVisibility('visible', 'a visible page after ' + back);
   }
 });
 

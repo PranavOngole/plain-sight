@@ -84,10 +84,11 @@ if (process.argv[2] === '--child') {
   fs.rmSync = (target, options) => { if (onRemove) onRemove(target); return remove(target, options); };
   // The stand-in for the driver and for pgrep: run() asks the driver whether
   // this program may use Accessibility, whether the screen is locked and how
-  // long the Mac has been idle, and for the app's windows, and pgrep whether
-  // the app is open. It answers from `fake`, the case's state; every other
-  // program runs as it is (plutil reads a fake bundle's Info.plist).
-  const fake = { locked: false, idle: 600, windows: [] };
+  // long the Mac has been idle, and for the app's windows, e2e.mjs's
+  // hidden-document test for the front app's pid, and pgrep whether the app
+  // is open. It answers from `fake`, the case's state; every other program
+  // runs as it is (plutil reads a fake bundle's Info.plist).
+  const fake = { locked: false, idle: 600, windows: [], front: 4243 };
   const started = Date.now();
   const exec = childProcess.execFileSync;
   childProcess.execFileSync = (file, args = [], options) => {
@@ -96,7 +97,8 @@ if (process.argv[2] === '--child') {
       const answer = command === 'trusted' ? { ok: true, accessibility: true }
         : command === 'session' ? { ok: true, locked: fake.locked, idle: fake.idle + (Date.now() - started) / 1000 }
           : command === 'cgwindows' ? { ok: true, windows: fake.windows }
-            : { ok: false, error: 'the stand-in has no answer for ' + command };
+            : command === 'frontmost' ? { ok: true, pid: fake.front }
+              : { ok: false, error: 'the stand-in has no answer for ' + command };
       return JSON.stringify(answer) + '\n';
     }
     if (file === 'pgrep') throw Object.assign(new Error('pgrep found no process'), { status: 1, stdout: '' });
@@ -442,6 +444,11 @@ if (process.argv[2] === '--child') {
     // recorded its pid.
     async 'e2e-first-window-wait'() { await e2eSuite([]); },
     async 'e2e-probe-wait'() { await e2eSuite([HELPER, DOC_ON]); },
+    // Round 11 (e2e-run-4's show step): e2e.mjs's own hidden-document test
+    // under a fake of the test build's hook. The show leaves the page hidden,
+    // as in e2e-run-4, or brings it back.
+    async 'e2e-show-stays-hidden'() { await e2eHidden(false); },
+    async 'e2e-show-returns'() { await e2eHidden(true); },
     // DM-249's launched half, the restore check (round 10). The person's data
     // holds a nested file as well, which the run must leave as it was.
     async 'run-restore-clean'() {
@@ -653,6 +660,39 @@ if (process.argv[2] === '--child') {
     fake.windows = windows;
     mkdirSync(path.join(home, 'Downloads'), { recursive: true });
     Object.assign(process.env, standinEnv, { PLAIN_SIGHT_E2E_APP: process.env[STANDIN], PLAIN_SIGHT_ONLY: '^first launch: ' });
+    if (!process.env.PLAIN_SIGHT_E2E_APP || !process.env.PLAIN_SIGHT_E2E_APP.startsWith(path.dirname(box) + path.sep)) {
+      console.log('refusing: e2e.mjs would launch ' + process.env.PLAIN_SIGHT_E2E_APP + ', not the stand-in');
+      process.exit(2);
+    }
+    await import(pathToFileURL(path.join(HERE, 'e2e.mjs')).href);
+  };
+  // Round 11: e2e.mjs run as it is, its hidden-document test only, with a
+  // fake of the test build's hook (src-tauri/src/e2e.rs) answering in the
+  // probe folder: the page's visibility, the window actions and windowState.
+  // The test launches nothing; the child refuses as e2eSuite does unless the
+  // app e2e.mjs would launch is the stand-in.
+  const e2eHidden = async (showBringsItBack) => {
+    const probe = path.join(h.EVIDENCE, 'probe');
+    let visibility = 'visible';
+    const answerFor = (req) => {
+      if (req.eval === 'document.visibilityState') return { ok: true, value: visibility };
+      if (req.window === 'minimize' || req.window === 'hide') { visibility = 'hidden'; return { ok: true }; }
+      if (req.window === 'unminimize' || (req.window === 'show' && showBringsItBack)) { visibility = 'visible'; return { ok: true }; }
+      if (req.window === 'show') return { ok: true };
+      if (req.windowState === true) return { ok: true, value: { fakeHook: true, occlusionVisible: visibility === 'visible', appActive: visibility === 'visible', appHidden: false } };
+      return { ok: false, error: 'the fake hook has no answer for ' + JSON.stringify(req) };
+    };
+    setInterval(() => {
+      const request = path.join(probe, 'request.json');
+      if (!existsSync(request)) return;
+      const req = JSON.parse(readFileSync(request, 'utf8'));
+      rmSync(request);
+      const tmp = path.join(probe, 'response-' + req.id + '.tmp');
+      writeFileSync(tmp, JSON.stringify(answerFor(req)));
+      fs.renameSync(tmp, path.join(probe, 'response-' + req.id + '.json'));
+    }, 20).unref();
+    mkdirSync(path.join(home, 'Downloads'), { recursive: true });
+    Object.assign(process.env, standinEnv, { PLAIN_SIGHT_E2E_APP: process.env[STANDIN], PLAIN_SIGHT_ONLY: '^a minimized window and a hidden app give the page a hidden document' });
     if (!process.env.PLAIN_SIGHT_E2E_APP || !process.env.PLAIN_SIGHT_E2E_APP.startsWith(path.dirname(box) + path.sep)) {
       console.log('refusing: e2e.mjs would launch ' + process.env.PLAIN_SIGHT_E2E_APP + ', not the stand-in');
       process.exit(2);
@@ -1170,6 +1210,44 @@ test('e2e.mjs\'s own launch() records the app before its waits, so a signal duri
     clean(r);
     assert.equal(r.lock, false, what + ': the lock is released');
   }
+});
+
+// Round 11, e2e-run-4's show step: in e2e-run-4 (a92087a, 28 October 2026)
+// the hidden-document test's page stayed hidden for the whole 5 s wait after
+// the hook's show, and run.log said nothing of the window. Here e2e.mjs's own
+// test runs under a fake of the hook: when the show leaves the page hidden,
+// the test fails with that timeout, never passes, and run.log holds the
+// window's state at the timeout (the hook's windowState and the driver's
+// front app); when the show brings the page back, it passes. Both runs hold
+// the record made with the page visible, before the minimize.
+const HIDDEN_TEST = 'a minimized window and a hidden app give the page a hidden document, which is what starts its ten-minute wipe';
+const runLog = (tag) => readFileSync(path.join(ROOT, tag, 'evidence', 'run.log'), 'utf8');
+const BEFORE_RECORD = ' window state with the page visible, before the minimize (evidence only, never a pass): hook {"fakeHook":true,"occlusionVisible":true,"appActive":true,"appHidden":false}; front app {"pid":4243,"thisApp":false}; driver could not be read: ';
+test('e2e.mjs\'s hidden-document test, its show leaving the page hidden as in e2e-run-4: it fails with the 5 s timeout, is never counted as passed, and run.log holds the window\'s state at the timeout and before the minimize (round 11, e2e-run-4\'s show step)', async () => {
+  const r = await runCase('e2e-show-stays-hidden');
+  ended(r, 1);
+  assert.ok(r.out.split('\n').includes('FAIL - ' + HIDDEN_TEST), 'the test fails; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^ {7}Error: timed out after 5000 ms waiting for a visible page after show$/m, 'with the timeout of its show step');
+  assert.match(r.out, /^0 passed, 1 failed, 0 not run, 1 total\. Errors: 1$/m, 'counted as failed, not as passed or not run');
+  const log = runLog('e2e-show-stays-hidden');
+  assert.match(log, / probe \{"window":"show"\} -> \{"ok":true\}$/m, 'the test asked the hook for its show; run.log:\n' + log);
+  const at = log.split('\n').filter((l) => l.includes(' window state at the timeout waiting for a visible page after show (evidence only, never a pass): '));
+  assert.equal(at.length, 1, 'one record at the timeout; run.log:\n' + log);
+  assert.ok(at[0].includes(' hook {"fakeHook":true,"occlusionVisible":false,"appActive":false,"appHidden":false}; front app {"pid":4243,"thisApp":false}; driver could not be read: '), 'the hook\'s window state and the front app: ' + at[0]);
+  assert.ok(log.includes(BEFORE_RECORD), 'and the record before the minimize; run.log:\n' + log);
+  assert.ok(log.indexOf(at[0]) > log.lastIndexOf(' probe {"window":"show"}'), 'the record at the timeout comes after the show');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('e2e.mjs\'s hidden-document test, its show bringing the page back: it passes, with the record before the minimize and none at a timeout (round 11, the control)', async () => {
+  const r = await runCase('e2e-show-returns');
+  ended(r, 0);
+  assert.ok(r.out.split('\n').includes('ok   - ' + HIDDEN_TEST), 'the child\'s output:\n' + r.out);
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 0$/m);
+  const log = runLog('e2e-show-returns');
+  assert.ok(log.includes(BEFORE_RECORD), 'the record before the minimize; run.log:\n' + log);
+  assert.ok(!log.includes(' window state at the timeout '), 'no record at a timeout; run.log:\n' + log);
+  clean(r);
 });
 
 // DM-249's launched half (round 10). The Delivery Manager's check of a
