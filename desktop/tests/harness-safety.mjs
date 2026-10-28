@@ -470,6 +470,31 @@ if (process.argv[2] === '--child') {
       personFile(dirs[0], 'notes.txt', 'THE PERSON\'S NOTES');
       await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[0], 'notes.txt'), 'same-bytes'); testData(dirs[0]); } }]);
     },
+    // DM-257 (round 11): the Delivery Manager's AT-R3, AT-R4 and AT-R7 (its
+    // delta of 46d6f62, adv/tests/desktop/tests/dm-harness-adv-46.mjs),
+    // adopted, and a data folder that can no longer be listed after the
+    // restore. The nested file is where WebKit keeps the vault record.
+    async 'run-restore-late-nested'() {
+      const rel = path.join('WebsiteData', 'LocalStorage', 'tauri_localhost_0.localstorage');
+      personFile(dirs[0], rel, 'VAULT RECORD 0123456789');
+      await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[0], rel), 'same-size', dirs[0]); testData(dirs[0]); } }]);
+    },
+    async 'run-restore-late-new-file'() {
+      await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[1], 'written-after-the-restore'), 'create'); testData(dirs[0]); } }]);
+    },
+    async 'run-restore-unlisted'() {
+      const sealed = path.join(dirs[1], 'sealed');
+      mkdirSync(sealed);
+      writeFileSync(path.join(sealed, 'inside.txt'), 'x');
+      chmodSync(sealed, 0o000);
+      console.log('SEALED ' + sealed);
+      await runSuite([{ name: 'a test that writes test data', fn: async () => { testData(dirs[0]); } }]);
+    },
+    async 'run-restore-unlistable-after'() {
+      personFile(dirs[1], path.join('notes', 'today.txt'), 'THE PERSON\'S NOTES');
+      console.log('SEALED ' + path.join(dirs[1], 'notes'));
+      await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[1], 'notes'), 'seal', dirs[1]); testData(dirs[0]); } }]);
+    },
     async 'run-restore-late-remove'() {
       writeFileSync(path.join(appSupport, 'folder.txt'), '/Users/someone/Notes');
       await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(appSupport, 'folder.txt'), 'remove'); testData(dirs[0]); } }]);
@@ -647,11 +672,11 @@ if (process.argv[2] === '--child') {
   // DM-249's launched half (round 10): a file of the person's, written into a
   // data folder before the run; and a late writer (the parent's LATE script),
   // started by a test and never recorded as an app, which waits until the
-  // marker of the target's folder holds the person's own words again, that
-  // is until the restore, then changes or removes the target 1 s later.
+  // marker of the target's data folder (the folder the target is in, or the
+  // one named) holds the person's own words again, that is until the
+  // restore, then acts on the target 1 s later.
   const personFile = (dir, rel, text, mode = 0o644) => { const file = path.join(dir, rel); mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, text); chmodSync(file, mode); };
-  const lateWriter = (target, action) => {
-    const folder = path.dirname(target);
+  const lateWriter = (target, action, folder = path.dirname(target)) => {
     spawn(process.execPath, [process.env[LATE], marker(folder), real(home, folder), target, action], { stdio: 'ignore', detached: true }).unref();
   };
   // QA-G-44 (N6): QA-01's L5 (r9_launch_adv.mjs with r9_launch_child.mjs,
@@ -761,10 +786,13 @@ chmodSync(STANDIN_EXE, 0o755);
 // then 1 s later changes the target or removes it; it ends by itself after
 // 30 s if the text never comes. A change appends to the target; same-size
 // rewrites it with as many bytes, every one an x, and same-bytes writes its
-// own bytes again, which changes only its modification time (PO-R10-1).
+// own bytes again, which changes only its modification time (PO-R10-1);
+// create makes a new file there, and seal takes every permission from a
+// folder, so that no one may list it (DM-257).
 const LATE_WRITER = path.join(ROOT, 'late-writer.mjs');
 writeFileSync(LATE_WRITER, [
-  "import { appendFileSync, readFileSync, rmSync, writeFileSync } from 'node:fs';",
+  "import { appendFileSync, chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';",
+  "import path from 'node:path';",
   "const [watch, expect, target, action] = process.argv.slice(2);",
   "const started = Date.now();",
   "const look = setInterval(() => {",
@@ -776,6 +804,8 @@ writeFileSync(LATE_WRITER, [
   "      if (action === 'remove') rmSync(target, { force: true });",
   "      else if (action === 'same-size') writeFileSync(target, Buffer.alloc(readFileSync(target).length, 'x'));",
   "      else if (action === 'same-bytes') writeFileSync(target, readFileSync(target));",
+  "      else if (action === 'create') { mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, 'MADE AFTER THE RESTORE'); }",
+  "      else if (action === 'seal') chmodSync(target, 0o000);",
   "      else appendFileSync(target, ' CHANGED LATE');",
   "    }, 1000);",
   "  } else if (Date.now() - started > 30000) clearInterval(look);",
@@ -1355,6 +1385,51 @@ test('a file of the person\'s written again 1 s after the restore with the same 
     const st = fs.statSync(notes);
     assert.ok(st.mtimeMs - st.birthtimeMs >= 900, 'and the file was written again after the restore: modified ' + Math.round(st.mtimeMs - st.birthtimeMs) + ' ms after it was made');
   });
+});
+// DM-257 (round 11): four parts of the restore check passed all 53 safety
+// cases when broken (the Delivery Manager's RC1, RC2, RC3 and RC7, its
+// delta of 46d6f62). RC1, the time comparison, is held by PO-R10-1's two
+// cases above. The walk into subfolders, the report of new entries and the
+// naming of a folder not listed when moved aside are held here by its
+// AT-R3, AT-R4 and AT-R7, adopted (adv/tests/desktop/tests/
+// dm-harness-adv-46.mjs), and a data folder that can no longer be listed
+// after the restore, which no case reached either, by a fourth.
+const unseal = (r) => { const sealed = (r.out.match(/^SEALED (.*)$/m) || [])[1]; if (sealed && existsSync(sealed)) chmodSync(sealed, 0o755); };
+test('a file of the person\'s two folders deep, where WebKit keeps the vault record, rewritten at the same size 1 s after the restore is caught: exit code 6, the nested path named (changed) (DM-257; the Delivery Manager\'s AT-R3)', async () => {
+  const r = await runCase('run-restore-late-nested', undefined, { recheck: null });
+  ended(r, 6);
+  const nested = path.join(r.dirs[0], 'WebsiteData', 'LocalStorage', 'tauri_localhost_0.localstorage');
+  assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(nested) + ' \\(changed\\)', 'm'), 'the nested path is named; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^Exit code: 6$/m);
+  assert.equal(readFileSync(nested, 'utf8'), 'x'.repeat('VAULT RECORD 0123456789'.length), 'the writer kept the size and changed the bytes');
+});
+test('a new file written into a folder the run put back, 1 s after the restore, is caught: exit code 6, its path named (new) (DM-257; the Delivery Manager\'s AT-R4)', async () => {
+  const r = await runCase('run-restore-late-new-file', undefined, { recheck: null });
+  ended(r, 6);
+  const made = path.join(r.dirs[1], 'written-after-the-restore');
+  assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(made) + ' \\(new\\)', 'm'), 'the new path is named; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^Exit code: 6$/m);
+  assert.ok(existsSync(made), 'the writer made the file after the restore');
+});
+test('a data folder that holds a folder no one may list (mode 000) cannot be listed when it is moved aside: the clean line counts one folder fewer and names it as not checked (EACCES), exit code 0 (DM-257; the Delivery Manager\'s AT-R7)', async () => {
+  const r = await runCase('run-restore-unlisted', undefined, { recheck: null });
+  try {
+    ended(r, 0);
+    const line = r.out.split('\n').find((l) => l.startsWith('restore check')) || '';
+    assert.equal(line, 'restore check: ' + (r.dirs.length - 1) + ' folders as they were (names, sizes and times; checked twice, 3 s apart); not listed when moved aside, so not checked: ' + r.dirs[1] + ' (EACCES)', 'the child\'s output:\n' + r.out);
+  } finally {
+    unseal(r);
+  }
+});
+test('a data folder that can no longer be listed after the restore (a folder in it sealed, mode 000, 1 s after the restore) is named: exit code 6, "could not be listed after the restore: EACCES" (DM-257)', async () => {
+  const r = await runCase('run-restore-unlistable-after', undefined, { recheck: null });
+  try {
+    ended(r, 6);
+    assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(r.dirs[1]) + ' \\(could not be listed after the restore: EACCES\\)', 'm'), 'the folder is named; the child\'s output:\n' + r.out);
+    assert.match(r.out, /^Exit code: 6$/m);
+  } finally {
+    unseal(r);
+  }
 });
 test('the person\'s folder.txt removed 1 s after the restore, as a launch of this branch\'s build removes it, is caught: exit code 6, its path named (DM-249, the shape of the Delivery Manager\'s AT-H8c)', async () => {
   const r = await runCase('run-restore-late-remove', undefined, { recheck: null });
