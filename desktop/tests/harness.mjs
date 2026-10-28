@@ -27,11 +27,12 @@
 //   evidence folder, matched by name and time.
 //
 // Exit codes, the most serious first when several apply: 6 the app's own
-// data could not be put back (the run says where it waits); 3 the run
-// stopped (a touch of the keyboard or mouse, the screen locked during a run
-// that needs it unlocked, or a launch's window listed only off-screen); 1 a
-// test failed; 8 test data left behind,
-// your own data is back; 0 every test passed or was not run. A run that does
+// data could not be put back (the run says where it waits), or the restore
+// check found it not as it was or an app the run launched still running; 3
+// the run stopped (a touch of the keyboard or mouse, the screen locked
+// during a run that needs it unlocked, or a launch's window listed only
+// off-screen); 1 a test failed; 8 test data left behind, your own data is
+// back; 0 every test passed or was not run. A run that does
 // not start ends with 4 (the app is open, the Mac is in use, the screen is
 // locked for a suite that needs it unlocked, the test copy ran before, or a
 // folder could not be moved aside, in which case everything is put back) or
@@ -40,7 +41,8 @@
 // Accessibility permission for the program running it does not start and
 // ends with 1; a run stopped by a signal (SIGINT from Ctrl+C, SIGQUIT from
 // Ctrl+backslash, SIGTERM or SIGHUP) puts everything back and
-// ends with 130, and a signal that comes while the run is putting things back,
+// ends with 130 (6 when the app's data is not back as it was), and a signal
+// that comes while the run is putting things back,
 // or a second one, waits for that to finish and is reported, not obeyed
 // (DM-248). Once a signal has come or the cleanup has begun, nothing launches
 // the app again: spawnApp and the suites' own launches refuse
@@ -49,11 +51,17 @@
 // run started outlives it (DM-249). A run names any test data left behind as
 // it puts things back; every run that ends by its own count (not by a signal)
 // then lists every test container on the Mac by name (never opened), the
-// summary and the exit code.
+// summary and the exit code. Each run that puts the data back then checks it
+// (checkRestore, DM-249's launched half): the folders it moved aside are
+// listed when they move (every entry's path, kind, size and modification
+// time, never a file's contents) and again after the restore, at once and
+// 3 s later, and no app the run launched may still be running. stopApp
+// notes "stopping pid <n>" in run.log before it ends an app, so a driver can
+// send a signal while a test waits there.
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, webcrypto } from 'node:crypto';
-import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -223,10 +231,12 @@ export function spawnApp(exe, env = {}) {
   child.stdout.pipe(out);
   child.stderr.pipe(out);
   note('launched ' + exe + ' as pid ' + child.pid);
+  recordLaunch(child.pid, exe, child);
   return child;
 }
 
 export async function stopApp(app) {
+  if (app) note('stopping pid ' + app.pid);
   if (!app || !alive(app.pid)) return;
   app.child.kill('SIGTERM');
   await until(() => !alive(app.pid), 'the app to stop', 8000).catch(() => app.child.kill('SIGKILL'));
@@ -238,6 +248,16 @@ export async function stopApp(app) {
 export async function stopCurrentApp(current) {
   for (let app = current(); app && alive(app.pid); app = current()) await stopApp(app);
 }
+
+// Every app process the run launched, for the restore check at its end:
+// spawnApp records its child, and the suites that open a bundle through
+// LaunchServices record each copy as they find its pid. A child counts as
+// running until Node has seen it end, so a reused pid cannot be taken for it.
+const launches = [];
+export function recordLaunch(pid, what, child = null) {
+  launches.push({ pid, what, child });
+}
+const stillRunning = (l) => (l.child ? l.child.exitCode === null && l.child.signalCode === null : alive(l.pid));
 
 // ---------------------------------------------------------------------------
 // The app's data folders: moved aside before the run, put back after.
@@ -313,6 +333,7 @@ export function backupAppData() {
     throw new Error('an earlier run left app data in ' + BACKUP_ROOT + '; put it back by hand before running again:\n  ' + leftBehind().join('\n  '));
   }
   phase = 'moving';
+  listings.clear();
   backupDir = path.join(BACKUP_ROOT, String(Date.now()));
   existedBefore = DATA_DIRS.filter((dir) => existsSync(dir));
   const moved = [];
@@ -332,10 +353,14 @@ export function backupAppData() {
       if (!readdirSync(BACKUP_ROOT).length) rmdirSync(BACKUP_ROOT);
       backupDir = null;
       existedBefore = [];
+      listings.clear();
       phase = 'untouched';
       throw new Error('could not move ' + dir + ' aside (' + (err.code || err.message) + '); everything was put back');
     }
     moved.push(dir);
+    // What the folder holds as it was moved aside, for the restore check;
+    // one that cannot be listed is named then and not compared.
+    try { listings.set(dir, listData(asideOf(dir))); } catch (err) { listings.set(dir, err.code || err.message); }
     // Written after every move, so a run that is stopped leaves an exact record.
     writeFileSync(path.join(backupDir, 'moved.json'), JSON.stringify(moved, null, 2));
   }
@@ -440,6 +465,83 @@ export function restoreAppData() {
   return testDataLeft;
 }
 
+// ---------------------------------------------------------------------------
+// The restore check (DM-249's launched half). A test that went on after a
+// signal could launch the app again over the restored data, and a launch of
+// this branch's build removes the 1.0.0 app's folder.txt (Folder::load). The
+// Product Owner must never read the person's data to see whether it is back,
+// so the run checks it itself. As it moves a folder aside it lists what the
+// folder holds (listData: every entry's path inside it, its kind, and for
+// anything but a folder its size and modification time; lstat and readdir
+// only, so no file is ever opened). After the restore it lists each folder it
+// put back again and compares, then waits 3 s and compares once more, to
+// catch a late writer, and checks that no app the run launched is still
+// running. Any difference names the paths only and counts as the person's
+// data not back: exit code 6, after a signal as well.
+// ---------------------------------------------------------------------------
+export const RESTORE_RECHECK_MS = 3000;
+let recheckMs = RESTORE_RECHECK_MS;
+// For the harness's own safety suite only, whose many runs would each wait
+// the 3 s; its restore check cases keep the 3 s, and config.mjs checks that
+// no other test file names this.
+export function setRestoreRecheckForTests(ms) { recheckMs = ms; }
+const listings = new Map();
+export function listData(top) {
+  const entries = new Map();
+  const walk = (p, rel) => {
+    const st = lstatSync(p, { bigint: true });
+    if (st.isDirectory()) {
+      entries.set(rel, 'folder');
+      for (const name of readdirSync(p).sort()) walk(path.join(p, name), rel ? path.join(rel, name) : name);
+    } else {
+      entries.set(rel, (st.isFile() ? 'file' : st.isSymbolicLink() ? 'link' : 'other') + ', ' + st.size + ' bytes, modified ' + st.mtimeNs);
+    }
+  };
+  walk(top, '');
+  return entries;
+}
+// Compares each folder put back with its listing from the move aside, at
+// once and recheckMs later, then looks for a launched app still running.
+// Returns what it found, by path and pid only.
+export async function checkRestore() {
+  const compare = () => {
+    const found = [];
+    for (const [dir, before] of listings) {
+      if (typeof before === 'string') continue;
+      let now;
+      try {
+        now = listData(dir);
+      } catch (err) {
+        if (err.code !== 'ENOENT') { found.push(dir + ' (could not be listed after the restore: ' + (err.code || err.message) + ')'); continue; }
+        now = new Map();
+      }
+      for (const [rel, what] of before) {
+        if (!now.has(rel)) found.push(path.join(dir, rel) + ' (gone)');
+        else if (now.get(rel) !== what) found.push(path.join(dir, rel) + ' (changed)');
+      }
+      for (const rel of now.keys()) if (!before.has(rel)) found.push(path.join(dir, rel) + ' (new)');
+    }
+    return found;
+  };
+  const first = compare();
+  await sleep(recheckMs);
+  const changed = [...new Set([...first, ...compare()])];
+  const running = launches.filter(stillRunning).map((l) => 'pid ' + l.pid + ' (' + l.what + ')');
+  const unlisted = [...listings].filter(([, v]) => typeof v === 'string').map(([dir, v]) => dir + ' (' + v + ')');
+  const folders = listings.size - unlisted.length;
+  listings.clear();
+  return { folders, changed, running, unlisted, recheckMs };
+}
+// What the run prints for the check: one line when everything is as it was.
+export function restoreCheckLines({ folders, changed, running, unlisted, recheckMs }) {
+  const lines = [];
+  if (changed.length) lines.push('restore check: not as it was before the run: ' + changed.join('; '));
+  if (running.length) lines.push('restore check: still running, though this run launched it: ' + running.join('; '));
+  if (lines.length) return lines;
+  const said = folders === 1 ? '1 folder as it was' : folders + ' folders as they were';
+  return ['restore check: ' + said + ' (names, sizes and times; checked twice, ' + recheckMs / 1000 + ' s apart)' + (unlisted.length ? '; not listed when moved aside, so not checked: ' + unlisted.join('; ') : '')];
+}
+
 // The run's own safety: Ctrl+C and a kill are watched from the start, before
 // the app's data is moved aside, so a signal during the move cannot end the
 // run by its default action with a folder half moved and the next run
@@ -482,7 +584,8 @@ export function watchSignalsThenBackup(cleanup, { name = 'the run' } = {}) {
       }
       if (signalled) return;
       signalled = signal;
-      cleanup().finally(() => process.exit(130));
+      // 6 when the cleanup could not put the app's data back as it was.
+      cleanup().then((back) => process.exit(back === false ? 6 : 130), () => process.exit(130));
     });
   }
   backupAppData();
@@ -573,7 +676,8 @@ export async function run(tests, { name, needUnlocked = false, before = () => {}
   if (!takeLock(name)) { console.log(`${name}: not started: another GUI test run holds ${LOCK}. Errors: 0`); process.exit(5); }
   requireUnlocked = needUnlocked;
   // Ctrl+C or a kill puts everything back: the app stops, its data and the
-  // Downloads folder are restored, the lock is released. The cleanup runs
+  // Downloads folder are restored and checked, the lock is released. It
+  // answers whether the app's data is back as it was. The cleanup runs
   // once, and every caller, a signal's handler included, waits for that one
   // to finish (DM-248). From its first line no app may be launched again
   // (cleaningUp, refuseLaunchWhileEnding; DM-249).
@@ -587,7 +691,13 @@ export async function run(tests, { name, needUnlocked = false, before = () => {}
     try { collectDownloads(); } catch (err) { note('downloads: ' + err.message); }
     try { testDataLeft = restoreAppData(); } catch (err) { restored = false; testDataLeft = err.testDataLeft || []; console.log('Could not restore app data: ' + err.message); }
     for (const dir of testDataLeft) console.log('test data left behind: ' + dir + ' (macOS refused to remove it; remove it by hand, see wave-g/probe/DESIGN.md, Leftovers)');
+    if (restored) {
+      const check = await checkRestore();
+      for (const line of restoreCheckLines(check)) { note(line); console.log(line); }
+      if (check.changed.length || check.running.length) restored = false;
+    }
     dropLock();
+    return restored;
   })());
   markDownloads();
   runStartedAt = Date.now();
@@ -624,9 +734,10 @@ export async function run(tests, { name, needUnlocked = false, before = () => {}
   } finally {
     await cleanup();
   }
-  // A signal that came during the run's own cleanup waited for it; the data
-  // is back and the lock released, so the run ends as a signal ends it.
-  if (signalled) process.exit(130);
+  // A signal that came during the run's own cleanup waited for it; the lock
+  // is released, so the run ends as a signal ends it: 130, or 6 when the
+  // data is not back as it was.
+  if (signalled) process.exit(restored ? 130 : 6);
   console.log(`\nEvidence: ${EVIDENCE}`);
   console.log('Test containers on this Mac at the end of the run (names only, never opened): ' + (testContainers().join(', ') || 'none'));
   console.log(`${passed} passed, ${failed} failed, ${notRun} not run, ${passed + failed + notRun} total. Errors: ${failed + (restored ? 0 : 1)}`);

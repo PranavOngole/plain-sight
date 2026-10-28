@@ -41,6 +41,12 @@ const SIGNAL_SENT = 'signal-sent';
 // records its pid.
 const STANDIN = 'PLAIN_SIGHT_HARNESS_TEST_STANDIN';
 const STANDIN_PIDS = 'standin-pids.txt';
+// The late writer of the restore check's cases (round 10), written by the
+// parent into its temporary folder.
+const LATE = 'PLAIN_SIGHT_HARNESS_TEST_LATE';
+// The restore check's second look in a case that does not test the check:
+// 100 ms instead of 3 s, set through the harness's test-only setter.
+const RECHECK = 'PLAIN_SIGHT_HARNESS_TEST_RECHECK_MS';
 // The harness compiles its driver at import unless the file for this source
 // version exists. No case here runs the driver, so an empty file stands in
 // for it, in the child's own temporary folder.
@@ -98,6 +104,7 @@ if (process.argv[2] === '--child') {
   };
   syncBuiltinESMExports();
   const h = await import(pathToFileURL(HARNESS).href);
+  if (process.env[RECHECK]) h.setRestoreRecheckForTests(Number(process.env[RECHECK]));
   // The person's own data folders hold their data before the run; a test
   // copy's folders do not exist yet: its launch makes them. Two cases leave
   // one place of the real identifier's empty, so that the run itself makes
@@ -435,6 +442,39 @@ if (process.argv[2] === '--child') {
     // recorded its pid.
     async 'e2e-first-window-wait'() { await e2eSuite([]); },
     async 'e2e-probe-wait'() { await e2eSuite([HELPER, DOC_ON]); },
+    // DM-249's launched half, the restore check (round 10). The person's data
+    // holds a nested file as well, which the run must leave as it was.
+    async 'run-restore-clean'() {
+      personFile(dirs[1], path.join('notes', 'today.txt'), 'THE PERSON\'S NOTES');
+      await runSuite([{ name: 'a test that writes test data', fn: async () => { testData(dirs[0]); } }]);
+    },
+    async 'run-restore-late-change'() {
+      personFile(dirs[0], 'notes.txt', 'THE PERSON\'S NOTES');
+      await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[0], 'notes.txt'), 'change'); testData(dirs[0]); } }]);
+    },
+    async 'run-restore-late-remove'() {
+      writeFileSync(path.join(appSupport, 'folder.txt'), '/Users/someone/Notes');
+      await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(appSupport, 'folder.txt'), 'remove'); testData(dirs[0]); } }]);
+    },
+    async 'run-restore-late-change-signal'() {
+      personFile(dirs[0], 'notes.txt', 'THE PERSON\'S NOTES');
+      await runSuite([{ name: 'a test during which a signal comes', fn: async () => { lateWriter(path.join(dirs[0], 'notes.txt'), 'change'); testData(dirs[0]); console.log('IN TEST'); await h.sleep(5000); } }]);
+    },
+    // An app the run launched (spawnApp records it) that nothing stops: the
+    // suite gives no after().
+    async 'run-restore-live-app'() {
+      await runSuite([{ name: 'a test that launches an app and leaves it running', fn: async () => {
+        const child = h.spawnApp(process.env[STANDIN], { STANDIN_PIDS: standinEnv.STANDIN_PIDS });
+        current = { child, pid: child.pid };
+        await ready(current);
+        console.log('LEFT RUNNING ' + child.pid);
+      } }]);
+    },
+    // A file of the person's that no one may read (mode 000).
+    async 'run-restore-unreadable'() {
+      personFile(dirs[1], 'locked.txt', 'NOT FOR THE HARNESS', 0o000);
+      await runSuite([{ name: 'a test that writes test data', fn: async () => { testData(dirs[0]); } }]);
+    },
     // H5: a sandbox probe's container (the bundle under test carries an
     // sbprobe- identifier), refused like a test copy's.
     async 'run-probe-container-refused'() {
@@ -584,6 +624,16 @@ if (process.argv[2] === '--child') {
   // QA-01's E1: e2e.mjs run as it is, its app the stand-in. The child refuses
   // unless the app e2e.mjs would launch is that stand-in, in this file's own
   // temporary folder, so no test build is ever started.
+  // DM-249's launched half (round 10): a file of the person's, written into a
+  // data folder before the run; and a late writer (the parent's LATE script),
+  // started by a test and never recorded as an app, which waits until the
+  // marker of the target's folder holds the person's own words again, that
+  // is until the restore, then changes or removes the target 1 s later.
+  const personFile = (dir, rel, text, mode = 0o644) => { const file = path.join(dir, rel); mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, text); chmodSync(file, mode); };
+  const lateWriter = (target, action) => {
+    const folder = path.dirname(target);
+    spawn(process.execPath, [process.env[LATE], marker(folder), real(home, folder), target, action], { stdio: 'ignore', detached: true }).unref();
+  };
   const e2eSuite = async (windows) => {
     fake.windows = windows;
     mkdirSync(path.join(home, 'Downloads'), { recursive: true });
@@ -638,6 +688,25 @@ const shellQuoted = (p) => "'" + p.replace(/'/g, "'\\''") + "'";
 writeFileSync(STANDIN_EXE, '#!/bin/sh\nexec ' + shellQuoted(process.execPath) + ' ' + shellQuoted(STANDIN_APP) + '\n');
 chmodSync(STANDIN_EXE, 0o755);
 
+// The late writer of the restore check's cases (round 10): waits until a
+// file holds the given text (the person's marker, back after the restore),
+// then 1 s later changes the target or removes it; it ends by itself after
+// 30 s if the text never comes.
+const LATE_WRITER = path.join(ROOT, 'late-writer.mjs');
+writeFileSync(LATE_WRITER, [
+  "import { appendFileSync, readFileSync, rmSync } from 'node:fs';",
+  "const [watch, expect, target, action] = process.argv.slice(2);",
+  "const started = Date.now();",
+  "const look = setInterval(() => {",
+  "  let now = null;",
+  "  try { now = readFileSync(watch, 'utf8'); } catch { now = null; }",
+  "  if (now === expect) {",
+  "    clearInterval(look);",
+  "    setTimeout(() => { if (action === 'remove') rmSync(target, { force: true }); else appendFileSync(target, ' CHANGED LATE'); }, 1000);",
+  "  } else if (Date.now() - started > 30000) clearInterval(look);",
+  "}, 20);"
+].join('\n') + '\n');
+
 // A fake bundle under a test identifier, outside the fake home, for the
 // harness to read as PLAIN_SIGHT_APP (only its Info.plist is read).
 function fakeCopy(box, identifier) {
@@ -647,16 +716,17 @@ function fakeCopy(box, identifier) {
   return app;
 }
 
-function runCase(id, onOutput = () => {}, { app = null, tag = id } = {}) {
+function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100 } = {}) {
   const box = path.join(ROOT, tag);
   const home = path.join(box, 'home');
   const tmp = path.join(box, 'tmp');
   const evidence = path.join(box, 'evidence');
   for (const d of [home, tmp, evidence]) mkdirSync(d, { recursive: true });
-  const env = { ...process.env, HOME: home, TMPDIR: tmp, PLAIN_SIGHT_EVIDENCE: evidence, [BOX]: box, [STANDIN]: STANDIN_EXE };
+  const env = { ...process.env, HOME: home, TMPDIR: tmp, PLAIN_SIGHT_EVIDENCE: evidence, [BOX]: box, [STANDIN]: STANDIN_EXE, [LATE]: LATE_WRITER };
   // Nothing of the shell that runs npm test reaches the harness's settings.
   for (const name of ['PLAIN_SIGHT_E2E_DOWNLOADS', 'PLAIN_SIGHT_APP', 'PLAIN_SIGHT_IDLE_MIN', 'PLAIN_SIGHT_ONLY', 'PLAIN_SIGHT_ALLOW_REAL_ID']) delete env[name];
   if (app) env.PLAIN_SIGHT_APP = fakeCopy(box, app);
+  if (recheck !== null) env[RECHECK] = String(recheck);
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child', id], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   const feed = (chunk) => { out += chunk; onOutput(out, child, box); };
@@ -1080,6 +1150,104 @@ test('e2e.mjs\'s own launch() records the app before its waits, so a signal duri
   }
 });
 
+// DM-249's launched half (round 10). The Delivery Manager's check of a
+// launched run is a deliberate end-to-end run that gets kill -INT while a
+// test waits in stopApp() before a relaunch, then: the refusal line, exit
+// code 130, no app left, appdata-backup empty, no lock, and the person's
+// folder.txt as it was. The Product Owner must never read the person's data,
+// so the harness checks the restore itself (checkRestore): it lists every
+// folder it moves aside (paths, kinds, sizes and times; nothing is opened),
+// lists them again after the restore, at once and 3 s later, and looks for a
+// launched app still running. These cases hold each part, under the fake home.
+const restoredLine = (n) => new RegExp('^restore check: ' + n + ' folders as they were \\(names, sizes and times; checked twice, 3 s apart\\)$', 'm');
+test('the Delivery Manager\'s launched check, here under the fake home: stopApp() notes "stopping pid <n>" in run.log first, a SIGINT sent on that line refuses the relaunch, and the run ends with 130, no app left, the backup empty, the lock released, folder.txt as it was and the restore check clean (DM-249)', async () => {
+  let sent = 0;
+  let poll = null;
+  const r = await runCase('run-relaunch-folder', (out, child, box) => {
+    if (poll) return;
+    poll = setInterval(() => {
+      const log = path.join(box, 'evidence', 'run.log');
+      const m = existsSync(log) && readFileSync(log, 'utf8').match(/ stopping pid (\d+)$/m);
+      if (!m || sent) return;
+      sent = Number(m[1]);
+      clearInterval(poll);
+      child.kill('SIGINT');
+    }, 20);
+  }, { tag: 'run-driver-protocol', recheck: null });
+  clearInterval(poll);
+  const folderTxt = path.join(r.home, 'Library', 'Application Support', 'com.pranavongole.plainsight', 'folder.txt');
+  const later = existsSync(folderTxt) ? readFileSync(folderTxt, 'utf8') : null;
+  const s = await standinsAfter(r);
+  assert.ok(sent > 0, 'run.log named the pid being stopped and the signal was sent on that line; the child\'s output:\n' + r.out);
+  assert.deepEqual(s.pids, [sent], 'the pid run.log named is the app the test started, the only one');
+  ended(r, 130);
+  assert.ok(r.out.split('\n').some((line) => line.startsWith('stop - a test that restarts the app, as e2e.mjs does (') && refusedFor('SIGINT').test(line)), 'the refusal line; the child\'s output:\n' + r.out);
+  assert.deepEqual(s.running, [], 'no app is left');
+  assert.equal(later, '/Users/someone/Notes', 'folder.txt is as it was');
+  assert.match(r.out, restoredLine(r.dirs.length), 'the restore check is clean');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('the restore check: a run that puts the person\'s data back as it was says so in one line before its summary, with the number of folders it moved aside (DM-249)', async () => {
+  const r = await runCase('run-restore-clean', undefined, { recheck: null });
+  ended(r, 0);
+  const lines = r.out.split('\n');
+  const at = lines.findIndex((l) => restoredLine(r.dirs.length).test(l));
+  assert.ok(at >= 0, 'the clean line, with ' + r.dirs.length + ' folders; the child\'s output:\n' + r.out);
+  assert.ok(at < lines.findIndex((l) => /^\d+ passed, \d+ failed, /.test(l)), 'before the summary');
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 0$/m);
+  assert.equal(readFileSync(path.join(r.dirs[1], 'notes', 'today.txt'), 'utf8'), 'THE PERSON\'S NOTES', 'the nested file is back');
+  clean(r);
+});
+test('a file of the person\'s changed 1 s after the restore, by a writer the run never launched, is caught by the second look 3 s later: exit code 6, its path named (DM-249)', async () => {
+  const r = await runCase('run-restore-late-change', undefined, { recheck: null });
+  ended(r, 6);
+  assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(path.join(r.dirs[0], 'notes.txt')) + ' \\(changed\\)', 'm'), 'the path is named; the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /as they were \(names/, 'no clean line');
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 1$/m);
+  assert.match(r.out, /^Exit code: 6$/m);
+  assert.deepEqual(r.backups, [], 'the data was put back, then changed: no backup is left');
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('the person\'s folder.txt removed 1 s after the restore, as a launch of this branch\'s build removes it, is caught: exit code 6, its path named (DM-249, the shape of the Delivery Manager\'s AT-H8c)', async () => {
+  const r = await runCase('run-restore-late-remove', undefined, { recheck: null });
+  ended(r, 6);
+  const folderTxt = path.join(r.home, 'Library', 'Application Support', 'com.pranavongole.plainsight', 'folder.txt');
+  assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(folderTxt) + ' \\(gone\\)', 'm'), 'the path is named; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^Exit code: 6$/m);
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('the check runs on a signal\'s cleanup too: a late change after a Ctrl+C during a test ends the run with 6, not 130, its path named (DM-249)', async () => {
+  let sent = false;
+  const r = await runCase('run-restore-late-change-signal', (out, child) => { if (!sent && out.includes('IN TEST')) { sent = true; child.kill('SIGINT'); } }, { recheck: null });
+  assert.ok(sent, 'the signal was sent during the test; the child\'s output:\n' + r.out);
+  ended(r, 6);
+  assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(path.join(r.dirs[0], 'notes.txt')) + ' \\(changed\\)', 'm'), 'the path is named; the child\'s output:\n' + r.out);
+  assert.deepEqual(r.backups, [], 'no backup is left');
+  assert.equal(r.lock, false, 'the lock is released');
+});
+test('an app the run launched and nothing stopped is named by its pid after the restore: exit code 6 (DM-249)', async () => {
+  const r = await runCase('run-restore-live-app', undefined, { recheck: null });
+  const s = await standinsAfter(r);
+  ended(r, 6);
+  const pid = Number((r.out.match(/^LEFT RUNNING (\d+)$/m) || [])[1]);
+  assert.ok(pid > 0 && s.pids.includes(pid), 'the test left an app running; the child\'s output:\n' + r.out);
+  assert.ok(r.out.split('\n').includes('restore check: still running, though this run launched it: pid ' + pid + ' (' + STANDIN_EXE + ')'), 'it is named; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^Exit code: 6$/m);
+  clean(r);
+});
+test('the listing never opens a file: a file of the person\'s that no one may read (mode 000) leaves the check clean, and listData reads names, kinds, sizes and times only (DM-249)', async () => {
+  const r = await runCase('run-restore-unreadable', undefined, { recheck: null });
+  ended(r, 0);
+  assert.match(r.out, restoredLine(r.dirs.length), 'the check is clean; the child\'s output:\n' + r.out);
+  const src = readFileSync(HARNESS, 'utf8');
+  const start = src.indexOf('export function listData(');
+  const body = src.slice(start, src.indexOf('\n}\n', start));
+  assert.ok(start >= 0 && body.includes('lstatSync(p, { bigint: true })') && body.includes('readdirSync(p)'), 'listData lists with lstat and readdir');
+  assert.equal(/readFile|openSync|createReadStream|readSync|\bopen\(|\bfs\./.test(body), false, 'and calls nothing that opens a file');
+  clean(r);
+});
+
 // DM-247: three real-key tests (app.mjs) started from a first launch by
 // clearing the test data mid-run, which on a sandboxed copy removes the
 // copy's container; macOS refused that removal (EPERM) at the end of
@@ -1248,6 +1416,7 @@ try {
   // Any stand-in still running, found by its own script's path in this run's
   // temporary folder, which nothing else runs (DM-249).
   try { childProcess.execFileSync('pkill', ['-9', '-f', STANDIN_APP]); } catch { /* none left */ }
+  try { childProcess.execFileSync('pkill', ['-9', '-f', LATE_WRITER]); } catch { /* none left */ }
   rmSync(ROOT, { recursive: true, force: true });
 }
 if (existsSync(ROOT)) {

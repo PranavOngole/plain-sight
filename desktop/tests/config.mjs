@@ -498,7 +498,7 @@ test('no suite launches the app once the run is ending, and each suite\'s end st
     const refusal = body.lastIndexOf("refuseLaunchWhileEnding('the release app');", open);
     assert.ok(refusal >= 0 && open > refusal, file + ': the launch refuses before it opens the bundle once the run is ending');
     assert.equal(/\bawait\b/.test(body.slice(refusal, open)), false, file + ': with no wait between the refusal and the open');
-    assert.ok(body.includes("  launching = true;\n  let pid = 0;\n  try {\n    execFileSync('open', ['-n', " + bundle + "]);\n    pid = await until(() => instances().find((p) => !launched.includes(p)) || 0, 'the app process', 15000);\n    launched.push(pid);\n  } finally {\n    launching = false;\n  }\n"), file + ': a launch under way is marked until its copy is recorded');
+    assert.ok(body.includes("  launching = true;\n  let pid = 0;\n  try {\n    execFileSync('open', ['-n', " + bundle + "]);\n    pid = await until(() => instances().find((p) => !launched.includes(p)) || 0, 'the app process', 15000);\n    launched.push(pid);\n    recordLaunch(pid, " + bundle + ");\n  } finally {\n    launching = false;\n  }\n"), file + ': a launch under way is marked until its copy is recorded, here and with the harness for its restore check');
     assert.equal([...text.matchAll(/execFileSync\('open'/g)].length, 1, file + ' opens the bundle in one place only');
     const end = text.slice(text.indexOf('await run(tests, {'));
     assert.ok(end.includes("  after: async () => {\n") && end.includes("    await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});\n    const ours = () => instances().filter((p) => launched.includes(p));\n"), file + ': after() waits for a launch under way before it ends the copies');
@@ -521,6 +521,16 @@ test('e2e.mjs sets the app its after() stops right after spawnApp, before the la
   assert.ok(body.includes("  const child = spawnApp(EXE, { PLAIN_SIGHT_E2E_DIR: PROBE, PLAIN_SIGHT_E2E_DOWNLOADS: DOWNLOADS, PLAIN_SIGHT_E2E_SAVE_AS: DOWNLOADS, ...env });\n  const pid = child.pid;\n  app = { child, pid };\n  await firstWindow("), 'launch() sets app right after spawnApp and before its first wait');
   assert.ok(body.indexOf('  app = { child, pid };\n') >= 0 && body.indexOf('  app = { child, pid };\n') < body.indexOf('await '), 'the assignment comes before the first await of launch()');
   assert.equal([...body.matchAll(/\bapp = /g)].length, 1, 'launch() sets app in one place only');
+});
+
+// DM-249's launched half (round 10): the harness's restore check looks again
+// 3 s after the restore, to catch a late writer. Only its own safety suite may
+// shorten that, for the cases that do not test the check.
+test('the restore check waits 3 s before its second look, and no test file but the harness\'s safety suite shortens it (DM-249)', () => {
+  const tests = path.join(DESKTOP, 'tests');
+  assert.match(read(tests, 'harness.mjs'), /^export const RESTORE_RECHECK_MS = 3000;$/m, 'the second look comes 3 s after the restore');
+  const naming = readdirSync(tests).filter((f) => f.endsWith('.mjs') && read(tests, f).includes('setRestoreRecheckForTests')).sort();
+  assert.deepEqual(naming, ['config.mjs', 'harness-safety.mjs', 'harness.mjs'], 'named only by the harness, its safety suite and this check');
 });
 
 // The real-key save and folder tests (app.mjs) go to the test's own folder

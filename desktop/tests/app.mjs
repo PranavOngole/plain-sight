@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { webcrypto } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { DESKTOP, EVIDENCE, HOME, NotRun, alive, decryptRecord, drive, driveRaw, firstWindow, freshStart, note, refuseLaunchWhileEnding, run, sleep, until } from './harness.mjs';
+import { DESKTOP, EVIDENCE, HOME, NotRun, alive, decryptRecord, drive, driveRaw, firstWindow, freshStart, note, recordLaunch, refuseLaunchWhileEnding, run, sleep, until } from './harness.mjs';
 import { appMenuTitle, launchable, menuBarOf, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
@@ -65,6 +65,7 @@ async function launch() {
     execFileSync('open', ['-n', current.app]);
     pid = await until(() => instances().find((p) => !launched.includes(p)) || 0, 'the app process', 15000);
     launched.push(pid);
+    recordLaunch(pid, current.app);
   } finally {
     launching = false;
   }

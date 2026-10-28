@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { DESKTOP, EVIDENCE, HOME, NotRun, alive, drive, firstWindow, note, refuseLaunchWhileEnding, run, sleep, until } from './harness.mjs';
+import { DESKTOP, EVIDENCE, HOME, NotRun, alive, drive, firstWindow, note, recordLaunch, refuseLaunchWhileEnding, run, sleep, until } from './harness.mjs';
 import { appMenuTitle, launchable, menuBarOf, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
@@ -65,6 +65,7 @@ async function open() {
     execFileSync('open', ['-n', APP]);
     pid = await until(() => instances().find((p) => !launched.includes(p)) || 0, 'the app process', 15000);
     launched.push(pid);
+    recordLaunch(pid, APP);
   } finally {
     launching = false;
   }
