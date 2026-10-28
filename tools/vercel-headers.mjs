@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Writes vercel.json from index.html: the security headers Vercel serves with the
-// page, with a script policy that allows the page's own inline scripts by hash and
-// nothing else. Run it after any change to index.html and commit vercel.json with
+// page, with a script policy that allows scripts from the page's own origin and its
+// two inline scripts by hash, and nothing else. Run it after any change to index.html and commit vercel.json with
 // it; the test suite fails when the two disagree. No dependencies.
 import fs from 'node:fs';
 import path from 'node:path';

@@ -3143,7 +3143,8 @@ test('the phrase and password fields keep the browser\'s password manager out: n
     assert.match(css, /\.secret\.masked\s*\{[^}]*-webkit-text-security:\s*disc/, 'the mask lives in the stylesheet');
     assert.match(css, /\.card input\.secret\s*\{/, 'the field rule selects the class');
     assert.ok(!/input\[type="password"\]/.test(css), 'no rule depends on the password type any more');
-    assert.ok(p.$('#vault-phrase').matches('.vault input.secret:disabled'), 'the disabled phrase field keeps its disabled look');
+    assert.match(css, /\.vault input\.secret:disabled\s*\{[^}]*background/, 'the disabled rule selects the class and gives the disabled look');
+    assert.ok(p.$('#vault-phrase').matches('.vault input.secret:disabled'), 'the disabled phrase field matches the disabled rule');
     assert.deepEqual(p.errors, []);
     assert.deepEqual(q.errors, []);
   } finally { p.close(); q.close(); }
@@ -3391,7 +3392,7 @@ test('device vault: an older key\'s refused autosave does not lock a vault re-ke
     p.$('#vault-phrase').value = 'a brand new phrase here';
     p.start();                               // a phrase change: the new key derives while the old autosave still encrypts
     await sleep(500);
-    assert.ok(p.d.body.classList.contains('vault-open'), 'open under the new phrase while the old save still encrypts');
+    assert.ok(p.d.body.classList.contains('vault-open'), 'the vault is still open before the refusal (the re-key itself is proven by the copy at the end)');
     let refused = 0;
     proto.setItem = function (key, value) {
       if (key === 'plainSight.vault' && refused === 0) { refused += 1; const e = new p.w.Error('quota'); e.name = 'QuotaExceededError'; throw e; }   // the next vault write is refused, once
@@ -3474,6 +3475,7 @@ test('the header policy served from vercel.json keeps its shape: nothing but the
   assert.equal(get('Cross-Origin-Opener-Policy'), 'same-origin');
   assert.equal(get('Cross-Origin-Resource-Policy'), 'same-origin');
   assert.equal(headers.length, 7, 'seven headers, no more');
+  assert.deepEqual(csp.split('; ').map((d) => d.split(' ')[0]), ['default-src', 'script-src', 'style-src', 'img-src', 'base-uri', 'form-action', 'frame-ancestors'], 'no directive beyond the documented seven (the 1.3.11 gate\'s AC23)');
   const meta = HTML.match(/http-equiv="Content-Security-Policy"[^>]*content="([^"]+)"/)[1];
   assert.equal(meta, "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'", 'the meta policy is unchanged');
 });
@@ -4598,6 +4600,45 @@ test('honesty: no network API is called through a session that uses every new su
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 1.4.0 follow-ups on main after the merge (QA-F-10, the Save sentence)
+// ---------------------------------------------------------------------------
+test('save folder: with every name up to "(99)" taken, Save counts on to "(100)" and never writes over a file (QA-F-10)', async () => {
+  const folder = fakeFolder('Notes');
+  const p = await loadPage({ folder, storage: { 'plainSight.introSeen': '1' } });
+  try {
+    p.$('#btn-help').click();
+    p.$('#btn-folder').click();
+    await waitFor(() => /into the folder "Notes"/.test(p.$('#folder-status').textContent), 3000);
+    p.start();
+    p.type('new words');
+    const now = new Date(); const pad = (n) => String(n).padStart(2, '0');
+    const bases = [];
+    for (let s = 0; s < 3; s++) { const d = new Date(now.getTime() + s * 1000); bases.push(d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + '-' + pad(d.getMinutes()) + '-' + pad(d.getSeconds())); }
+    const taken = new Set();
+    for (const b of bases) { taken.add(b + '.txt'); for (let n = 2; n < 100; n++) taken.add(b + ' (' + n + ').txt'); }
+    for (const name of taken) folder.files.add(name);
+    p.$('#btn-save').click();
+    await waitFor(() => folder.written.length === 1, 3000);
+    const w = folder.written[0];
+    assert.equal(taken.has(w.name), false, 'an existing file is never written over: ' + w.name);
+    assert.ok(bases.some((b) => w.name === b + ' (100).txt'), 'the counter goes on past 99: ' + w.name);
+    assert.ok(/^Saved .* \(100\)\.txt in Notes$/.test(p.toast()), 'the toast names the file');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('the intro\'s Save sentence names every plain choice beside the encrypted file: a folder and a plain .txt, .md or .docx download (the 1.3.11 gate\'s AC19)', async () => {
+  const p = await loadPage();
+  try {
+    const li = [...p.d.querySelectorAll('#intro li')].find((el) => /^Save and open\./.test(el.textContent));
+    assert.ok(li, 'the intro has its Save and open item');
+    assert.match(li.textContent, /Save downloads your text as a \.sight file encrypted with AES-256-GCM/);
+    assert.match(li.textContent, /unless you chose a folder or a plain \.txt, \.md or \.docx download below, which save your words unencrypted\./);
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
 let passed = 0;
 let failed = 0;
 for (const t of tests) {

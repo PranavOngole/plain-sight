@@ -300,7 +300,7 @@
       <li><strong>Peek.</strong> Press <kbd data-mod>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>G</kbd> to see what you actually wrote. Press it again, or type anything, to hide it. You can read and copy your text, not edit earlier parts of it.</li>
       <li><strong>Copy.</strong> While peeking, press <kbd data-mod>Ctrl</kbd> + <kbd>C</kbd> to copy your real text to the clipboard.</li>
       <li><strong>Clear.</strong> Press <kbd>Esc</kbd> to erase the hidden text and the screen. The page also clears itself after 10 minutes in a background tab. A saved copy on this device, if you turned that on below, stays and is locked.</li>
-      <li><strong>Save and open.</strong> Save downloads your text as a <code>.sight</code> file encrypted with AES-256-GCM, the key derived from your password with PBKDF2 (SHA-256, 310,000 rounds), unless you chose a folder or the plain <code>.txt</code> download below, which write plain text. Open restores it and replaces what is on the page. There is no way to recover a forgotten password.</li>
+      <li><strong>Save and open.</strong> Save downloads your text as a <code>.sight</code> file encrypted with AES-256-GCM, the key derived from your password with PBKDF2 (SHA-256, 310,000 rounds), unless you chose a folder or a plain <code>.txt</code>, <code>.md</code> or <code>.docx</code> download below, which save your words unencrypted. Open restores it and replaces what is on the page. There is no way to recover a forgotten password.</li>
     </ol>
     <p class="note">Reloading or closing the tab erases the hidden text unless you keep a copy on this device. The header belongs to the cover: its word count counts the text on screen, not your words.</p>
     <!-- Device vault: optional, off by default. The hidden text is saved in
@@ -1362,7 +1362,7 @@
   // or an older file) gets a counter before the extension.
   async function folderWrite(content, base, ext) {
     let name = base + ext;
-    for (let n = 2; n < 100; n++) {
+    for (let n = 2; ; n++) {   // count on until a name is free, however many are taken, so a Save never writes over a file (QA-F-10)
       let exists = true;
       try { await folderHandle.getFileHandle(name, { create: false }); } catch (err) { exists = false; }
       if (!exists) break;
