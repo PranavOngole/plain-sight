@@ -91,12 +91,16 @@ if (process.argv[2] === '--child') {
   // hidden-document test for the front app's pid, and pgrep whether the app
   // is open. It answers from `fake`, the case's state; every other program
   // runs as it is (plutil reads a fake bundle's Info.plist).
-  const fake = { locked: false, idle: 600, windows: [], front: 4243, ps: null };
+  const fake = { locked: false, idle: 600, windows: [], front: 4243, ps: null, logDriver: false, codesign: null };
   const started = Date.now();
   const exec = childProcess.execFileSync;
   childProcess.execFileSync = (file, args = [], options) => {
     if (path.basename(String(file)) === DRIVER) {
       const command = String(args[0]);
+      // PO-R15-1 (round 16): the case that runs app.mjs logs every command,
+      // and answers the clipboard's save and restore and the front app's.
+      if (fake.logDriver) console.log('DRIVER ' + args.map(String).join(' '));
+      if (fake.logDriver && ['clip-save', 'clip-restore', 'front'].includes(command)) return JSON.stringify({ ok: true, standIn: true }) + '\n';
       const answer = command === 'trusted' ? { ok: true, accessibility: true }
         : command === 'session' ? { ok: true, locked: fake.locked, idle: fake.idle + (Date.now() - started) / 1000 }
           : command === 'cgwindows' ? { ok: true, windows: fake.windows }
@@ -104,6 +108,8 @@ if (process.argv[2] === '--child') {
               : { ok: false, error: 'the stand-in has no answer for ' + command };
       return JSON.stringify(answer) + '\n';
     }
+    // That case opens nothing: open, which would launch a bundle, is refused.
+    if (fake.logDriver && file === 'open') throw new Error('the case that runs app.mjs opens nothing');
     // pgrep -f for a path inside this case's own folder (round 13's copiesOf)
     // is the real pgrep, which finds only the case's own processes; any other
     // question, whether the app is open say, has no process here.
@@ -117,6 +123,15 @@ if (process.argv[2] === '--child') {
       return answer + '\n';
     }
     return exec(file, args, options);
+  };
+  // codesign, for the case that runs app.mjs on a fake bundle: no
+  // entitlements and a test identifier, as an unsandboxed test copy's
+  // signature reads (launch-guard.mjs asks through spawnSync). In every
+  // other case, and for every other program, the real one runs.
+  const spawnPlain = childProcess.spawnSync;
+  childProcess.spawnSync = (file, args = [], options) => {
+    if (fake.codesign && file === 'codesign') return { pid: 0, output: [], status: 0, signal: null, stdout: '', stderr: 'Identifier=' + fake.codesign + '\n' };
+    return spawnPlain(file, args, options);
   };
   syncBuiltinESMExports();
   const h = await import(pathToFileURL(HARNESS).href);
@@ -683,6 +698,18 @@ if (process.argv[2] === '--child') {
       console.log('QUIT ASKED ' + JSON.stringify(asked) + ' in ' + (Date.now() - t0) + ' ms');
       await h.until(() => copy.p.exitCode !== null || copy.p.signalCode !== null, 'the copy to be reaped', 3000).catch(() => {});
       console.log('COPY AFTER ' + JSON.stringify({ signals: existsSync(copy.file) ? readFileSync(copy.file, 'utf8').trim() : '', exitCode: copy.p.exitCode, signalCode: copy.p.signalCode }));
+    },
+    // PO-R15-1 (round 16): app.mjs itself, its run() under the fake home with
+    // the stand-in driver, which logs every command. PLAIN_SIGHT_ONLY matches
+    // no test, so no test runs and nothing is launched, and the log shows
+    // what the suite's before() and after() ask of the driver. run() ends the
+    // child.
+    async 'app-suite-clipboard'() {
+      fake.logDriver = true;
+      fake.codesign = TEST_COPY;
+      process.env.PLAIN_SIGHT_ONLY = '^no test has this name$';
+      mkdirSync(path.join(home, 'Downloads'), { recursive: true });   // as runSuite makes it: the run marks what Downloads holds
+      await import(pathToFileURL(path.join(HERE, 'app.mjs')).href);
     },
     // Round 13 item 2: a copy recorded through a linked folder (as /tmp and
     // /var lead to /private), whose process runs from the real folder.
@@ -2097,6 +2124,23 @@ test('the suites\' end (endCopies) gives a copy time to quit: an unrecorded copy
   } finally {
     endHolders(r);
   }
+});
+// PO-R15-1 (round 16): the round 15 pin on the real-key suite's clipboard
+// save read the call's text, which a condition in front of it keeps; the
+// Product Owner's PO3-SAVE-SKIPPED, if (false) in front, passed every suite.
+// This case runs app.mjs itself under the fake home with the stand-in driver
+// and no test to run, and reads what its before() and after() asked of the
+// driver, in order.
+test('the real-key suite saves the person\'s clipboard in before() and puts it back in after(), after the copies\' end and before the front app, as the stand-in driver sees it when app.mjs runs under the fake home with no test to run (PO-R15-1)', async () => {
+  const r = await runCase('app-suite-clipboard', undefined, { app: TEST_COPY, watchdog: 60000 });
+  ended(r, 0);
+  const file = path.join(ROOT, 'app-suite-clipboard', 'evidence', 'clipboard.plist');
+  const calls = r.out.split('\n').filter((l) => l.startsWith('DRIVER ')).map((l) => l.slice('DRIVER '.length));
+  assert.deepEqual(calls.filter((c) => /^(frontmost|front |clip-)/.test(c)), ['frontmost', 'clip-save ' + file, 'clip-restore ' + file, 'front 4243'], 'before(): the front app, then the clipboard saved; after(): the clipboard put back, then the front app; the child\'s output:\n' + r.out);
+  assert.equal(calls.some((c) => /^(quit-app|key|type|press|click|menu|focus)\b/.test(c)), false, 'nothing else was asked of the app: no test ran');
+  assert.match(r.out, /^0 passed, 0 failed, 0 not run, 0 total\. Errors: 0$/m, 'the run had no test to run');
+  assert.equal(r.lock, false, 'the lock is released');
+  clean(r);
 });
 // Round 13 item 2 (Developer N's round 12 observation): pgrep -f, which
 // finds the copies, matches a path anywhere in the arguments, while the rule
