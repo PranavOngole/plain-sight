@@ -1052,6 +1052,83 @@ test('the menu items click no hidden button: a button the page hides is left alo
 // A .sight file of the text, in the page's own format, so that a text with
 // carriage returns reaches the page unchanged (Open of a plain note turns
 // them into line feeds; the web suite opens the sample the same way).
+// Super Stealth (web 1.5.0, BR-46) in the app (round 16): the two notes on
+// the intro speak of a browser on the web; in the app each carries its own
+// words in data-app, true for the app. No app menu item takes Shift+H
+// (config.mjs), so Cmd+Shift+H and Ctrl+Shift+H reach the page as Cmd+Shift+G
+// and Ctrl+Shift+G do in the real-key runs; Option+Tab moves between the
+// page's buttons (the first real-key run counted Option+Tab presses), and
+// Tab alone does when Keyboard navigation is on in System Settings.
+test('in the app the two Super Stealth notes say what the app does, and on the web they keep the browser\'s words (web 1.5.0, BR-46)', async () => {
+  const app = ['Cmd + Shift + H (Ctrl + Shift + H works too). With the keyboard: Option+Shift+Tab to the button (Shift+Tab alone when Keyboard navigation is on in System Settings), then Enter the same number of times.', 'Kept only on this computer.'];
+  const web = ['Ctrl + Shift + H, on a Mac too (Cmd + Shift + H also works where the browser leaves it to the page; Safari also uses it for its home page, so use Ctrl there). With the keyboard: Shift+Tab to the button (Option+Shift+Tab in Safari), then Enter the same number of times.', 'Kept only in this browser (localStorage).'];
+  for (const [native, says, never] of [[fakeNative(), app, ['browser', 'Safari', 'localStorage']], [null, web, ['Keyboard navigation', 'this computer']]]) {
+    const p = await loadPage({ native });
+    try {
+      await p.settle();
+      const box = p.$('#stealth-box');
+      assert.deepEqual([...box.querySelectorAll('[data-app]')].map((el) => el.textContent), says, (native ? 'the app' : 'the web') + ': both notes say this');
+      for (const word of never) assert.equal(box.textContent.includes(word), false, (native ? 'the app' : 'the web') + ': no ' + JSON.stringify(word));
+      assert.match(box.textContent, /This screen comes back when you click the \? at the bottom right the number of times set here, quickly, or when you press /, 'the rest of the note is the same on both');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+});
+
+// DM-138 with DM-245 (round 16): main's queue runs folder writes one after
+// another, in the order Save was pressed, and the candidate marks the text
+// saved after a write that succeeded. Merged: a Save queued behind another
+// marks the text when its own write lands, and a failed write marks nothing
+// while the queue goes on to the next Save.
+test('in the app a folder Save queued behind another marks the text saved when its own write lands, and a failed write marks nothing while the next Save still writes (DM-138, DM-245)', async () => {
+  {
+    let release;
+    const native = fakeNative({ saved: { name: 'Notes' }, writeGate: new Promise((r) => { release = r; }) });
+    const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1' } });
+    try {
+      await p.settle(50);
+      p.type('first');
+      p.$('#btn-save').click();
+      await p.settle(40);
+      p.type(' and second');
+      p.$('#btn-save').click();
+      await p.settle(40);
+      assert.equal(native.calls.filter((c) => c[0] === 'writeTextFile').length, 1, 'the second write waits in the queue behind the first');
+      assert.equal(native.unsaved(), true, 'nothing is marked saved while the first write is under way');
+      release();
+      await until(() => native.calls.filter((c) => c[0] === 'writeTextFile').length === 2 && native.unsaved() === false, 'both writes to land');
+      assert.deepEqual(native.calls.filter((c) => c[0] === 'writeTextFile').map((c) => c[3]), ['first', 'first and second'], 'the writes ran in order, each with the text at its click');
+      assert.match(p.toast(), /^Saved .*\.txt in Notes$/, 'the second Save says where it wrote');
+      p.type('!');
+      assert.equal(native.unsaved(), true, 'a keystroke after the queued Save: unsaved again');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+  {
+    const native = fakeNative({ saved: { name: 'Notes' } });
+    const write = native.api.writeTextFile;
+    let fails = 1;
+    native.api.writeTextFile = async (base, ext, text) => {
+      if (fails-- > 0) { native.calls.push(['writeTextFile', base, ext, text]); throw new Error('disk full'); }
+      return write(base, ext, text);
+    };
+    const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1' } });
+    try {
+      await p.settle(50);
+      p.type('kept');
+      p.$('#btn-save').click();
+      await p.settle(80);
+      assert.equal(p.toast(), 'Could not write to the folder');
+      assert.equal(native.unsaved(), true, 'the failed write marked nothing');
+      p.$('#btn-save').click();
+      await p.settle(80);
+      assert.match(p.toast(), /^Saved .*\.txt in Notes$/, 'the queue went on after the failure: the next Save wrote');
+      assert.equal(native.unsaved(), false, 'and marked the text saved');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+});
+
 async function sightFile(w, text, password) {
   const salt = webcrypto.getRandomValues(new Uint8Array(16));
   const iv = webcrypto.getRandomValues(new Uint8Array(12));

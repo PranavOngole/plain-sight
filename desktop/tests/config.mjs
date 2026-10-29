@@ -652,6 +652,32 @@ test('the real-key open, save and folder tests press a panel\'s button only when
   assert.ok(text.includes('  mkdirSync(OPEN_FROM, { recursive: true });\n  const file = path.join(OPEN_FROM, OPEN_NAME);\n'), 'and sightFile writes it there');
 });
 
+// Super Stealth (web 1.5.0, BR-46): Cmd+Shift+H and Ctrl+Shift+H open the
+// intro, and in the app they reach the page only while no menu item takes
+// them first (round 16). menu.rs gives accelerators of its own to Quit,
+// Open... and Save... only; its predefined items take the keys muda 0.20.0
+// gives them on macOS (src/items/predefined.rs, `accelerator`), none of them
+// Shift+H: Hide Cmd+H and Hide Others Cmd+Option+H. app-run-1's read of the
+// menu bar (29 October) shows the same.
+test('no app menu item takes Shift+H, so Cmd+Shift+H and Ctrl+Shift+H reach the page and open the intro (Super Stealth, web 1.5.0)', () => {
+  const menu = read(path.join(DESKTOP, 'src-tauri', 'src'), 'menu.rs');
+  const calls = menu.split(/(?<!Predefined)MenuItem::with_id\(/).slice(1).map((chunk) => chunk.slice(0, chunk.indexOf(')?')).trim());
+  assert.equal(calls.length, 4, 'menu.rs makes four items of its own: Quit, Open..., Save... and Help');
+  for (const call of calls) assert.match(call, /(Some\("[^"]+"\)|None(::<&str>)?),?$/, 'each ends with its accelerator or None: ' + call);
+  const own = calls.map((call) => (call.match(/Some\("([^"]+)"\),?$/) || [])[1]).filter(Boolean).sort();
+  assert.deepEqual(own, ['CmdOrCtrl+O', 'CmdOrCtrl+Q', 'CmdOrCtrl+S'], 'menu.rs gives its own accelerators to Quit, Open... and Save... only; Help has none');
+  const KEYS = {
+    about: null, services: null, separator: null, show_all: null, maximize: null,
+    hide: 'Cmd+H', hide_others: 'Cmd+Option+H', minimize: 'Cmd+M', fullscreen: 'Ctrl+Cmd+F', close_window: 'Cmd+W',
+    undo: 'Cmd+Z', redo: 'Shift+Cmd+Z', cut: 'Cmd+X', copy: 'Cmd+C', paste: 'Cmd+V', select_all: 'Cmd+A'
+  };
+  const used = [...new Set([...menu.matchAll(/PredefinedMenuItem::([a-z_]+)\(/g)].map((m) => m[1]))].sort();
+  for (const item of used) assert.ok(Object.hasOwn(KEYS, item), 'a predefined item whose key this test knows: ' + item);
+  const keys = [...own, ...used.map((item) => KEYS[item]).filter(Boolean)];
+  assert.deepEqual(keys.filter((k) => /\bShift\b/.test(k) && /\+H$/.test(k)), [], 'no item takes Shift+H; the keys: ' + keys.join(', '));
+  assert.deepEqual(keys.filter((k) => /\+H$/.test(k)).sort(), ['Cmd+H', 'Cmd+Option+H'], 'the two items with H: Hide and Hide Others');
+});
+
 // PO-R14-1 (round 15): the real-key suite writes markers and paths to the
 // person's clipboard (pbcopy) and saves the clipboard first, so losing the
 // restore would leave the clipboard holding test text; the Product Owner's
