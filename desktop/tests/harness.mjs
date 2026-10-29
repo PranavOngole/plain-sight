@@ -671,7 +671,7 @@ export function watchSignalsThenBackup(cleanup, { name = 'the run' } = {}) {
     process.on(signal, () => {
       if (signalled || cleaningUp) {
         note(signal + ' while the run puts everything back: it waits for that');
-        console.log(name + ': ' + signal + ' came while the run puts the app\'s data back; the run ends with 130 once that is done');
+        console.log(name + ': ' + signal + ' came while the run puts the app\'s data back; the run ends once that is done, with 130, or 6 if the app\'s data is not back as it was');
       } else {
         note('stopped by ' + signal);
       }

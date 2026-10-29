@@ -1276,7 +1276,7 @@ test('a Ctrl+C while the run\'s own cleanup waits for the app to quit waits for 
   assert.ok(sent, 'the signal was sent while after() waited; the child\'s output:\n' + r.out);
   ended(r, 130);
   assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
-  assert.match(r.out, /^release: SIGINT came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the signal is reported');
+  assert.match(r.out, /^release: SIGINT came while the run puts the app's data back; the run ends once that is done, with 130, or 6 if the app's data is not back as it was$/m, 'the signal is reported');
   onceWithTheLock(r);
   clean(r);
   assert.equal(r.lock, false, 'the lock is released');
@@ -1291,7 +1291,7 @@ test('a second Ctrl+C, after a first one during a test started the cleanup, is r
   assert.ok(first && second, 'both signals were sent; the child\'s output:\n' + r.out);
   ended(r, 130);
   assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
-  assert.match(r.out, /^release: SIGINT came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the second signal is reported');
+  assert.match(r.out, /^release: SIGINT came while the run puts the app's data back; the run ends once that is done, with 130, or 6 if the app's data is not back as it was$/m, 'the second signal is reported');
   onceWithTheLock(r);
   clean(r);
   assert.equal(r.lock, false, 'the lock is released');
@@ -1306,7 +1306,7 @@ test('SIGTERM during a test and then SIGHUP during the cleanup, as a watcher\'s 
   assert.ok(term && hup, 'both signals were sent; the child\'s output:\n' + r.out);
   ended(r, 130);
   assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
-  assert.match(r.out, /^release: SIGHUP came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the SIGHUP is reported');
+  assert.match(r.out, /^release: SIGHUP came while the run puts the app's data back; the run ends once that is done, with 130, or 6 if the app's data is not back as it was$/m, 'the SIGHUP is reported');
   onceWithTheLock(r);
   assert.doesNotMatch(r.out, /TEST AFTER THE SIGNAL/, 'no test starts once a signal has come');
   clean(r);
@@ -1317,7 +1317,7 @@ test('SIGTERM during a test and then SIGHUP during the cleanup, as a watcher\'s 
 // a second signal: with each caller running its own cleanup (PO3-DM248) the
 // data still came back and every case above passed, but after() ran twice.
 test('the cleanup runs once: a Ctrl+C while the run\'s own cleanup waits in after(), then a second one, start no cleanup of their own: after() is called once, every folder is put back once, both signals are reported and deferred, exit code 130 (PO-R8-1; the Delivery Manager\'s AT-H9)', async () => {
-  const deferred = "release: SIGINT came while the run puts the app's data back; the run ends with 130 once that is done";
+  const deferred = "release: SIGINT came while the run puts the app's data back; the run ends once that is done, with 130, or 6 if the app's data is not back as it was";
   let first = false;
   let second = false;
   const r = await runCase('run-cleanup-once', (out, child) => {
@@ -1728,7 +1728,7 @@ test('a SIGINT while the run\'s own cleanup waits in after(), with a file of the
   const r = await runCase('run-late-change-in-after', (out, child) => { if (!sent && out.includes('IN AFTER')) { sent = true; child.kill('SIGINT'); } }, { recheck: null });
   assert.ok(sent, 'the signal was sent while after() waited; the child\'s output:\n' + r.out);
   ended(r, 6);
-  assert.match(r.out, /^release: SIGINT came while the run puts the app's data back; /m, 'the signal is reported');
+  assert.match(r.out, /^release: SIGINT came while the run puts the app's data back; the run ends once that is done, with 130, or 6 if the app's data is not back as it was$/m, 'the signal is reported, in words that hold for this run, which ends with 6 (round 13)');
   assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
   assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(path.join(r.dirs[0], 'notes.txt')) + ' \\(changed\\)', 'm'), 'the path is named; the child\'s output:\n' + r.out);
   assert.doesNotMatch(r.out, /as they were \(names/, 'no clean line');
@@ -2046,7 +2046,7 @@ test('a SIGQUIT while the run\'s own cleanup waits in after() waits for that cle
   assert.ok(sent, 'the signal was sent while after() waited; the child\'s output:\n' + r.out);
   ended(r, 130);
   assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
-  assert.match(r.out, /^release: SIGQUIT came while the run puts the app's data back; the run ends with 130 once that is done$/m, 'the SIGQUIT is reported by name');
+  assert.match(r.out, /^release: SIGQUIT came while the run puts the app's data back; the run ends once that is done, with 130, or 6 if the app's data is not back as it was$/m, 'the SIGQUIT is reported by name');
   onceWithTheLock(r);
   assert.ok(Date.now() - t0 > 3000, 'the run lived until the cleanup was done (after() holds 3 s)');
   clean(r);
