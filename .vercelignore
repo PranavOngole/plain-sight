@@ -1,5 +1,5 @@
-# Deploy nothing but the page and the covers. Everything else stays out,
-# including any tool or agent folder that appears in this directory.
+# Deploy nothing but the page, the covers and the header settings file (vercel.json, which is
+# not served). Everything else stays out, including any tool or agent folder that appears here.
 *
 !index.html
 !covers
