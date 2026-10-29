@@ -108,10 +108,13 @@ const DRIVER_SRC = path.join(HERE, 'drive.swift');
 const DRIVER = path.join(os.tmpdir(), 'plain-sight-drive-' + createHash('sha256').update(readFileSync(DRIVER_SRC)).digest('hex').slice(0, 12));
 if (!existsSync(DRIVER)) execFileSync('swiftc', ['-O', DRIVER_SRC, '-o', DRIVER], { stdio: 'inherit' });
 
+// A tree read of a panel can list every file of the folder it shows, more
+// than Node's 1 MB default output buffer, so the driver's output may be up to
+// 64 MB (round 14).
 export function driveRaw(...args) {
   let out;
   try {
-    out = execFileSync(DRIVER, args.map(String), { encoding: 'utf8', timeout: 30000 });
+    out = execFileSync(DRIVER, args.map(String), { encoding: 'utf8', timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
   } catch (err) {
     out = String(err.stdout || '');
   }

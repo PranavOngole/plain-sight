@@ -591,23 +591,67 @@ test('e2e.mjs starts the app only through spawnApp: execFileSync is all it takes
   assert.equal([...code.matchAll(/\bspawnApp\(EXE, /g)].length, 1, 'and to spawnApp in one place');
 });
 
-// The real-key save and folder tests (app.mjs) go to the test's own folder
-// through the panel's Go-to box and press the panel's default button only
-// after goTo, which cancels the panel when the panel does not show that
-// folder; before, the default button was pressed either way, and a Go-to box
-// that failed saved into the panel's start folder, the real Downloads or
-// Documents folder (DM-239 d).
-test('the real-key save and folder tests press a panel\'s default button only after the Go-to step that checks the panel shows the test\'s folder (DM-239 d)', () => {
+// The real-key open, save and folder tests (app.mjs) go to the test's own
+// folder through goTo, which fails (and inPanel cancels the panel) unless the
+// panel shows that folder, and press the panel's own button only after it,
+// through Accessibility; before, a Go-to box that failed left the default
+// button to act on the panel's start folder, the real Downloads or Documents
+// folder (DM-239 d). Round 14: the buttons are Accessibility presses, never
+// Return, which the robot's Go to Folder step sends only to that sheet.
+test('the real-key open, save and folder tests press a panel\'s own button, through Accessibility, only after the Go to Folder step that reads back the panel shows the test\'s folder (DM-239 d, round 14)', () => {
   const text = read(path.join(DESKTOP, 'tests'), 'app.mjs');
-  assert.match(text, /if \(!panelShowsFolder\(path\.basename\(folder\)\)\) \{\n    throw new Error\(/, 'goTo fails when the panel does not show the folder');
-  for (const [panel, folder] of [['savePanelShown', 'SAVE_AS'], ['folderSheetShown', 'BUILD_TEST']]) {
+  for (const [panel, go, button] of [
+    ['openPanelShown', 'await goTo(file, path.dirname(file));', "await pressPanelButton('Open');"],
+    ['savePanelShown', 'await goTo(SAVE_AS);', "await pressPanelButton('Save');"],
+    ['folderSheetShown', 'await goTo(BUILD_TEST);', "await pressPanelButton('Open', 'Choose');"]
+  ]) {
     const at = text.indexOf('await inPanel(' + panel + ', async () => {');
     assert.ok(at >= 0, 'the ' + panel + ' flow');
     const body = text.slice(at, text.indexOf('});', at));
-    assert.ok(body.indexOf('await goTo(' + folder + ');') >= 0, 'the ' + panel + ' flow goes to its own folder through goTo');
-    assert.ok(body.indexOf('await goTo(' + folder + ');') < body.indexOf("keys.press('return')"), 'and presses the default button only after it');
-    assert.equal(body.includes("press('cmd+shift+g')"), false, 'the Go-to keys are typed by goTo alone, which checks the panel');
+    assert.ok(body.indexOf(go) >= 0, 'the ' + panel + ' flow goes to its own folder through goTo');
+    assert.ok(body.indexOf(button) > body.indexOf(go), 'and presses the panel\'s own button after it, through Accessibility');
+    assert.equal(/keys\.press\('(return|enter|cmd\+shift\+g)'\)|drive\('type'|keys\.type\(/.test(body), false, 'the flow sends no Return and types nothing into the panel: goTo alone sends the Go to Folder keys');
   }
+  const press = text.slice(text.indexOf('async function pressPanelButton('), text.indexOf('\n}\n', text.indexOf('async function pressPanelButton(')));
+  assert.ok(press.includes("driveRaw('panel-button', app.pid, title)"), 'a panel\'s button is pressed through the driver\'s panel-button, an Accessibility press');
+});
+
+// PO-R13-1, the robot's route to a panel (round 14, the Delivery Manager's
+// preference): macOS draws the panels in their own process and the driver
+// posts keys only to the app's, so a typed path never reaches a panel. goTo
+// puts the path on the clipboard, opens the Go to Folder sheet with
+// Cmd+Shift+G, pastes with Cmd+V (the app's Paste, as Cmd+C reached the save
+// panel's field through the app's Copy in app-run-1) and goes with Return,
+// reading each step back through Accessibility before the next, and sends
+// Return only while the sheet's own field holds the path. Only a GUI run
+// reaches app.mjs, so the order is pinned here.
+test('the real-key Go to Folder step goes by the clipboard, reading each step back through Accessibility before the next, and types no path (PO-R13-1, round 14)', () => {
+  const text = read(path.join(DESKTOP, 'tests'), 'app.mjs');
+  const start = text.indexOf('async function goTo(target, folder = target) {');
+  assert.ok(start >= 0, 'app.mjs has goTo');
+  const body = text.slice(start, text.indexOf('\n}\n', start));
+  let at = -1;
+  for (const step of [
+    "execFileSync('pbcopy', [], { input: target });",
+    "await keys.press('cmd+shift+g');",
+    'await until(() => goToField() !== null, ',
+    "await keys.press('cmd+v');",
+    'await until(() => (goToField() || {}).value === target, ',
+    "await keys.press('return');",
+    'await until(() => goToField() === null && panelFolders().includes(name), '
+  ]) {
+    const next = body.indexOf(step);
+    assert.ok(next > at, 'goTo\'s steps in this order: ' + step);
+    at = next;
+  }
+  assert.equal([...body.matchAll(/keys\.press\('return'\)/g)].length, 1, 'goTo sends Return once, after the sheet\'s field is seen holding the path');
+  assert.equal(/drive\('type'|keys\.type\(/.test(body), false, 'goTo types no path');
+  assert.ok(body.includes("if (sheetUp) await keys.press('escape');"), 'a failed step closes a Go to Folder sheet left up before inPanel cancels the panel');
+  assert.match(text, /^const GO_TO_TITLE = 'Go to Folder';$/m, 'the sheet is the one titled "Go to Folder"');
+  assert.match(text, /^const GO_TO_FIELD = 'Enter a Path';$/m, 'its field is the one labelled "Enter a Path"');
+  const field = text.slice(text.indexOf('function goToField() {'), text.indexOf('\n}\n', text.indexOf('function goToField() {')));
+  assert.ok(field.includes('const sheet = nodes.find((n) => n.title === GO_TO_TITLE);') && field.includes('[n.title, n.description].includes(GO_TO_FIELD)'), 'goToField reads only the sheet\'s own field');
+  assert.equal(/drive\('type', app\.pid, (file|folder|target)/.test(text), false, 'app.mjs types no path anywhere');
 });
 
 // Round 13, item 5: e2e.mjs's forced-end test ended the app with

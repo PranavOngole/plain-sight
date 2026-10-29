@@ -205,13 +205,12 @@ async function sightFile(text, password) {
 // it is open the app takes no other input, so a test that fails with it open
 // cancels it (diag-open-panel, app-run-2).
 //
-// The steps inside a panel type into its Go-to box with keys the driver posts
-// to the app's own process, while macOS draws open and save panels in a
-// separate process (Apple's NSOpenPanel and NSSavePanel pages: always since
-// macOS 10.15, sandboxed or not). No real-key run has seen a panel take those
-// keys (wave-d app-run-1 to 4 on 21 October, wave-g app-run-1 on 29
-// October), so the steps fail until the driver reaches the panel's own
-// process (PO-R13-1). A failed step presses the panel's Cancel through
+// macOS draws open and save panels in a separate process (Apple's NSOpenPanel
+// and NSSavePanel pages: always since macOS 10.15, sandboxed or not), and the
+// driver posts keys only to the app's own process, so a key reaches a panel
+// only through the app; no real-key run saw a panel take a typed character
+// (PO-R13-1). The steps inside a panel go by the clipboard instead (goTo,
+// round 14). A failed step presses the panel's Cancel through
 // Accessibility (the driver's panel-button), noting each try in run.log,
 // whether or not the test's own check sees the panel: in app-run-1 the save
 // panel was smaller than that check expected, stayed up and blocked every
@@ -230,49 +229,134 @@ async function inPanel(isOpen, steps) {
     throw err;
   }
 }
-const openPanelBusy = () => (driveRaw('windows', app.pid).windows || []).some((w) => w.title === 'Open' && (w.sheets || []).length > 0);
-
-// Go to (Cmd+Shift+G) the test's own folder inside a save or folder panel,
-// typed with real keys. The panel's default button is pressed only once the
-// panel shows that folder by name (its location control, read through
-// Accessibility): if the Go-to box did not take the path, the default button
-// would save into or choose the panel's start folder, a personal one, which
-// no test may touch (DM-239 d), so the test fails here, naming the box, and
-// inPanel cancels the panel.
-function panelShowsFolder(name) {
-  const shows = (node) => Boolean(node) && typeof node === 'object'
-    && ([node.title, node.value, node.description].includes(name) || (node.children || []).some(shows));
-  return (drive('tree', app.pid, 16).windows || []).some(shows);
+// The panels, read through Accessibility (round 14): the app's dialogs (the
+// open panel) and the sheets on its windows (the save and folder panels),
+// with everything inside them, never the page. Each read is a driveRaw, so a
+// poll writes nothing to run.log; the depth reaches a panel's buttons, menus
+// and fields.
+const PANEL_DEPTH = 12;
+// The Go to Folder sheet on this macOS (FinderKit's GotoWindow.nib and
+// GotoWindow.loctable, read in round 14): a window titled "Go to Folder", a
+// path field labelled "Enter a Path", a list of completions and a close
+// button ("CloseButton", an xmark image). It has no Go button.
+const GO_TO_TITLE = 'Go to Folder';
+const GO_TO_FIELD = 'Enter a Path';
+const FIELD_ROLES = ['AXTextField', 'AXComboBox'];
+const isField = (node) => FIELD_ROLES.includes(node.role);
+const opensPanel = (node) => node.subrole === 'AXDialog' || node.role === 'AXSheet' || node.title === GO_TO_TITLE;
+function panelNodes() {
+  const found = [];
+  const walk = (node, inside) => {
+    if (!node || typeof node !== 'object') return;
+    const here = inside || opensPanel(node);
+    if (here) found.push(node);
+    for (const child of node.children || []) walk(child, here);
+  };
+  for (const w of driveRaw('tree', app.pid, PANEL_DEPTH).windows || []) walk(w, false);
+  return found;
 }
-async function goTo(folder) {
-  await keys.press('cmd+shift+g');
-  await sleep(1000);
-  drive('type', app.pid, folder, 10);
-  await sleep(800);
-  await keys.press('return');   // go to the folder
-  await sleep(1500);
-  if (!panelShowsFolder(path.basename(folder))) {
-    throw new Error('the panel\'s Go-to box did not take ' + folder + ': the panel does not show that folder, so the test cancels the panel instead of pressing its default button over the panel\'s start folder');
+function within(node, test) {
+  if (!node || typeof node !== 'object') return null;
+  if (test(node)) return node;
+  for (const child of node.children || []) {
+    const hit = within(child, test);
+    if (hit) return hit;
   }
-  note('the panel shows ' + path.basename(folder) + ' after the Go-to box');
+  return null;
+}
+// The Go to Folder sheet's own field: the first field inside a node titled
+// "Go to Folder", or a field labelled "Enter a Path"; never the save panel's
+// name field, so a Return sent while this field is seen can act on the sheet
+// alone. null while no such sheet is up.
+function goToField() {
+  const nodes = panelNodes();
+  const sheet = nodes.find((n) => n.title === GO_TO_TITLE);
+  return (sheet && within(sheet, isField)) || nodes.find((n) => isField(n) && [n.title, n.description].includes(GO_TO_FIELD)) || null;
+}
+// The folder a panel shows: the value of its location menu (the open panel's
+// folder menu, the save panel's "Where" menu), by name.
+const panelFolders = () => panelNodes().filter((n) => n.role === 'AXPopUpButton' && typeof n.value === 'string').map((n) => n.value);
+// What the panels show, for run.log when a step fails: the titles of their
+// windows, sheets and buttons, their menus' values and their fields' values,
+// leaving out every file list (its names can be the person's files).
+function panelSummary() {
+  const LISTS = ['AXOutline', 'AXTable', 'AXList', 'AXBrowser', 'AXGrid', 'AXRow', 'AXCell'];
+  const out = [];
+  const walk = (node, inside, listed) => {
+    if (!node || typeof node !== 'object') return;
+    const here = inside || opensPanel(node);
+    const inList = listed || LISTS.includes(node.role);
+    if (here && !inList) {
+      if (['AXWindow', 'AXSheet', 'AXButton'].includes(node.role) && node.title) out.push(node.role + ' ' + JSON.stringify(node.title));
+      if (node.role === 'AXPopUpButton' && typeof node.value === 'string') out.push('menu ' + JSON.stringify(node.value));
+      if (isField(node)) out.push('field ' + JSON.stringify(String(node.value ?? '')) + (node.description ? ' (' + node.description + ')' : ''));
+    }
+    for (const child of node.children || []) walk(child, here, inList);
+  };
+  try {
+    for (const w of driveRaw('tree', app.pid, PANEL_DEPTH).windows || []) walk(w, false, false);
+  } catch (err) {
+    out.push('(the tree could not be read: ' + err.message + ')');
+  }
+  return out;
 }
 
-// Open: the page's Open button, the system open panel, Go to (Cmd+Shift+G)
-// the file typed with real keys, the panel's Open button, then the page's
-// password dialog, typed with real keys.
+// Go to a folder, or to a file, whose folder the panel then shows with the
+// file selected, through the panel's Go to Folder sheet (round 14, PO-R13-1).
+// Every event stays on the app's own process, and each step is read back
+// through Accessibility before the next:
+// 1. the path on the clipboard (the run saved the person's clipboard before
+//    its first test and puts it back at its end);
+// 2. Cmd+Shift+G, then the Go to Folder sheet's field must be seen;
+// 3. Cmd+V, the app's Paste, then that field must hold exactly the path. A
+//    typed path never reaches a panel; the app's Edit actions do (Cmd+C put
+//    the save panel's proposed name on the clipboard through the app's Copy
+//    in app-run-1, 16:08:06.364: "VBWAIT: validate action", "sendAction:");
+// 4. Return, then the sheet must be gone and the panel must show the folder
+//    by its location menu. The sheet has no Go button. Return reached a
+//    panel as a key equivalent in wave-d app-run-1 and app-run-3 (21
+//    October: the folder panel's default button, with no other input), and
+//    it is sent only while the sheet's own field is seen holding the path.
+// A step not seen fails here, so no panel button is pressed over the
+// panel's start folder (DM-239 d) and inPanel cancels the panel. A Go to
+// Folder sheet left up would hold off the panel's Cancel, so a failure first
+// presses Esc, the sheet's close key, and notes what the panels show.
+async function goTo(target, folder = target) {
+  const name = path.basename(folder);
+  try {
+    execFileSync('pbcopy', [], { input: target });
+    await keys.press('cmd+shift+g');
+    await until(() => goToField() !== null, 'the panel\'s Go to Folder sheet after Cmd+Shift+G', 10000);
+    await keys.press('cmd+v');
+    await until(() => (goToField() || {}).value === target, 'the Go to Folder field to hold the pasted path', 10000);
+    await keys.press('return');   // go: only the sheet's field, seen holding the path, can take it
+    await until(() => goToField() === null && panelFolders().includes(name), 'the panel to show ' + name + ' after the Go to Folder sheet', 15000);
+  } catch (err) {
+    let sheetUp = false;
+    try { sheetUp = goToField() !== null; } catch { /* the read failed too */ }
+    if (sheetUp) await keys.press('escape');
+    note('the Go to Folder step failed' + (sheetUp ? ' with the sheet up (Esc pressed)' : '') + '; the panels show: ' + JSON.stringify(panelSummary()));
+    throw err;
+  }
+  note('the panel shows ' + name + ' after the Go to Folder sheet');
+}
+// A panel's own button, pressed through Accessibility (the driver's
+// panel-button), never by Return: the first of the titles the panel has.
+async function pressPanelButton(...titles) {
+  const pressed = await until(() => titles.find((title) => driveRaw('panel-button', app.pid, title).ok), 'the panel\'s ' + titles.join(' or ') + ' button', 5000);
+  note('panel-button ' + pressed + ' pressed');
+}
+
+// Open: the page's Open button, the system open panel, Go to the file by the
+// clipboard (goTo), the panel's Open button through Accessibility, then the
+// page's password dialog, typed with real keys.
 async function openWithKeys(file, password) {
   await pressControl('btn-open');
   await until(() => openPanelShown() && drive('cgwindows', app.pid).windows.some((w) => w.onscreen && w.layer === 8), 'the open panel on screen', 10000);
   await sleep(800);
   await inPanel(openPanelShown, async () => {
-    await keys.press('cmd+shift+g');
-    await sleep(1000);
-    drive('type', app.pid, file, 10);
-    await sleep(800);
-    await keys.press('return');   // go to the file, which is then selected
-    await until(() => !openPanelBusy(), 'the Go-to box to close', 8000);
-    await sleep(800);
-    await until(() => { drive('panel-button', app.pid, 'Open'); return true; }, 'the panel\'s Open button', 5000);
+    await goTo(file, path.dirname(file));   // the panel shows the file's folder, with the file selected
+    await pressPanelButton('Open');
     await until(() => !openPanelShown(), 'the open panel to close', 8000);
   });
   await sleep(700);
@@ -315,7 +399,7 @@ test('Save without a folder opens the system save panel; saved into the test\'s 
     await until(savePanelShown, 'the save panel on screen', 10000);
     note('windows with the save panel open: ' + JSON.stringify(drive('cgwindows', app.pid).windows.filter((x) => x.onscreen)));
     await goTo(SAVE_AS);
-    await keys.press('return');   // Save, the panel's default button, now that the panel shows the test's folder
+    await pressPanelButton('Save');   // through Accessibility, now that the panel shows the test's folder
     await until(() => !savePanelShown(), 'the save panel to close', 8000);
   });
   const fresh = await until(() => { const n = readdirSync(SAVE_AS); return n.length ? n : null; }, 'a file in the test\'s folder', 8000);
@@ -392,7 +476,7 @@ test('choosing the test\'s own folder in the picker (typed into its Go-to box), 
   mkdirSync(BUILD_TEST, { recursive: true });
   await inPanel(folderSheetShown, async () => {
     await goTo(BUILD_TEST);
-    await keys.press('return');   // choose it (the panel's default button), now that the panel shows the test's folder
+    await pressPanelButton('Open', 'Choose');   // the folder panel's default button (rfd sets no prompt, so NSOpenPanel's own "Open"), through Accessibility
     await until(() => !folderSheetShown(), 'the picker to close', 8000);
   });
   await keys.press('escape');   // Esc on the intro applies it like Start
