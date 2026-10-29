@@ -706,15 +706,17 @@ fn store(file: &Path, bookmark: &[u8]) -> io::Result<()> {
 }
 
 /// The page's rule for file names (index.html, folderWrite): the name itself,
-/// then " (2)", " (3)" and so on up to " (99)" before the extension. Folder
-/// files and downloads both take the first of these that is free.
+/// then " (2)", " (3)" and so on before the extension, with no last number, so
+/// the names never run out. The page counts on past " (99)" since 1.4.0
+/// (QA-F-10), and so does the app. Folder files take the first of these that
+/// is free; a file saved through the save panel is named there (D-49).
 pub fn numbered(name: &str) -> impl Iterator<Item = String> + '_ {
     let (stem, extension) = match name.rfind('.') {
         Some(dot) if dot > 0 => name.split_at(dot),
         _ => (name, ""),
     };
     std::iter::once(name.to_owned())
-        .chain((2..=99).map(move |n| format!("{stem} ({n}){extension}")))
+        .chain((2_u64..).map(move |n| format!("{stem} ({n}){extension}")))
 }
 
 /// A base name the page may write: exactly the moment "YYYY-MM-DD HH-MM-SS".
@@ -734,7 +736,8 @@ fn is_moment(base: &str) -> bool {
 /// Writes `bytes` into a new file in `dir` under the first free name and
 /// returns that name. create_new makes the system itself refuse a name that
 /// exists, even one another save created a moment ago, so no file is ever
-/// overwritten.
+/// overwritten; and since the names never run out, a save is never refused
+/// because every name is taken (QA-F-10).
 fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<String> {
     for candidate in numbered(name) {
         let path = dir.join(&candidate);
@@ -750,9 +753,10 @@ fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<String> {
         }
         return Ok(candidate);
     }
+    // numbered() has no last name, so the loop above only ends by a return.
     Err(io::Error::new(
         ErrorKind::AlreadyExists,
-        "every name up to (99) is taken",
+        "no free name was found",
     ))
 }
 
@@ -1136,18 +1140,61 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The name itself and " (2)" to " (last)", spelled out here rather than
+    /// taken from numbered(), so the counter's tests do not lean on it.
+    fn taken_names(stem: &str, ext: &str, last: u64) -> Vec<String> {
+        std::iter::once(format!("{stem}{ext}"))
+            .chain((2..=last).map(|n| format!("{stem} ({n}){ext}")))
+            .collect()
+    }
+
+    /// Every name up to " (99)" taken: the write goes on to " (100)", as the
+    /// page's folder Save does since 1.4.0 (QA-F-10), and no file is written
+    /// over.
     #[test]
-    fn when_every_name_up_to_99_is_taken_the_write_is_refused() {
-        let dir = scratch("refusal");
-        for name in numbered("2026-10-20 14-55-03.txt") {
+    fn when_every_name_up_to_99_is_taken_the_write_goes_to_100() {
+        let dir = scratch("past99");
+        let taken = taken_names("2026-10-20 14-55-03", ".txt", 99);
+        assert_eq!(taken.len(), 99);
+        for name in &taken {
             fs::write(dir.join(name), "older").unwrap();
         }
-        let err = write_new(&dir, "2026-10-20 14-55-03.txt", b"new").unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::AlreadyExists);
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 99, "nothing was added");
         assert_eq!(
-            fs::read_to_string(dir.join("2026-10-20 14-55-03 (99).txt")).unwrap(),
-            "older"
+            write_new(&dir, "2026-10-20 14-55-03.txt", b"new").unwrap(),
+            "2026-10-20 14-55-03 (100).txt"
+        );
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 100, "one file added");
+        assert_eq!(
+            fs::read(dir.join("2026-10-20 14-55-03 (100).txt")).unwrap(),
+            b"new"
+        );
+        for name in &taken {
+            assert_eq!(
+                fs::read_to_string(dir.join(name)).unwrap(),
+                "older",
+                "{name} is not written over"
+            );
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Further on: the name and " (2)" to " (150)" taken gives " (151)".
+    #[test]
+    fn when_every_name_up_to_150_is_taken_the_write_goes_to_151() {
+        let dir = scratch("past150");
+        let taken = taken_names("2026-10-20 14-55-03", ".md", 150);
+        assert_eq!(taken.len(), 150);
+        for name in &taken {
+            fs::write(dir.join(name), "older").unwrap();
+        }
+        assert_eq!(
+            write_new(&dir, "2026-10-20 14-55-03.md", b"new").unwrap(),
+            "2026-10-20 14-55-03 (151).md"
+        );
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 151, "one file added");
+        assert_eq!(
+            fs::read(dir.join("2026-10-20 14-55-03 (151).md")).unwrap(),
+            b"new"
         );
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1173,13 +1220,18 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The page's rule (index.html, folderWrite, since 1.4.0): the name, then
+    /// " (2)", " (3)" and so on with no last number (QA-F-10).
     #[test]
-    fn names_follow_the_page_rule_up_to_99() {
-        let names: Vec<String> = numbered("2026-10-20 14-55-03.txt").collect();
-        assert_eq!(names.len(), 99);
+    fn names_follow_the_page_rule_past_99() {
+        let names: Vec<String> = numbered("2026-10-20 14-55-03.txt").take(1000).collect();
+        assert_eq!(names.len(), 1000, "the names go on past (99)");
         assert_eq!(names[0], "2026-10-20 14-55-03.txt");
         assert_eq!(names[1], "2026-10-20 14-55-03 (2).txt");
         assert_eq!(names[98], "2026-10-20 14-55-03 (99).txt");
+        assert_eq!(names[99], "2026-10-20 14-55-03 (100).txt");
+        assert_eq!(names[150], "2026-10-20 14-55-03 (151).txt");
+        assert_eq!(names[999], "2026-10-20 14-55-03 (1000).txt");
         assert_eq!(numbered("notes").nth(1).unwrap(), "notes (2)");
         assert_eq!(numbered("a.b.txt").nth(1).unwrap(), "a.b (2).txt");
         assert_eq!(numbered(".sight").nth(1).unwrap(), ".sight (2)");

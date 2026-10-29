@@ -207,18 +207,25 @@ test('src-tauri/Info.plist, which Tauri merges into the app\'s, holds exactly th
   });
 });
 
-test('the app runs in the App Sandbox with exactly its three entitlements, none for the network and none for Downloads (D-37, D-14, D-49)', () => {
+test('the app runs in the App Sandbox with exactly its four entitlements, the network client among them and none for Downloads (D-37, D-14, D-49; the network client approved by Pranav on 28 October 2026)', () => {
   assert.equal(conf.bundle.macOS.entitlements, './Entitlements.plist');
   assert.notEqual(conf.bundle.macOS.hardenedRuntime, false, 'the hardened runtime stays on');
-  assert.deepEqual(readPlist(read(TAURI, 'Entitlements.plist')), {
+  const entitlements = readPlist(read(TAURI, 'Entitlements.plist'));
+  assert.deepEqual(entitlements, {
     'com.apple.security.app-sandbox': true,
     // The folder panel, the save panel (folder.rs) and the page's Open panel.
     // Save without a folder goes through the save panel, so no Downloads
     // entitlement is needed (D-49).
     'com.apple.security.files.user-selected.read-write': true,
     // The remembered folder is a security-scoped bookmark (bookmark.rs).
-    'com.apple.security.files.bookmarks.app-scope': true
+    'com.apple.security.files.bookmarks.app-scope': true,
+    // The system web view needs it to draw the page inside the App Sandbox:
+    // the sandboxed probe page gave no answer in 31 seconds without it
+    // (sbprobe-run-1, 26 October 2026). The app has no network code, the
+    // page's policy allows no request, and the network watch is the check.
+    'com.apple.security.network.client': true
   });
+  assert.equal(Object.keys(entitlements).length, 4, 'exactly four');
 });
 
 test('the one bundled resource brings the vault and the app\'s data folder into the container at the first sandboxed launch (D-37; macOS moved them in a probe build on 26 October 2026, though Apple\'s article says it copies them)', () => {

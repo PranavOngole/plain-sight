@@ -12,8 +12,10 @@
 // both work like Esc first (quit.rs), the window's title follows the page, and
 // the menu bar is the app's own (menu.rs), whose File and Help items press the
 // page's own buttons. The app runs in the macOS App
-// Sandbox with three entitlements (Entitlements.plist), so the chosen folder is
-// remembered as a security-scoped bookmark (bookmark.rs).
+// Sandbox with four entitlements (Entitlements.plist), so the chosen folder is
+// remembered as a security-scoped bookmark (bookmark.rs); one of the four is
+// the network client, which the system web view needs to draw the page in
+// the sandbox. The app itself has no network code.
 
 // No console window behind the app on Windows release builds (Windows comes later).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]

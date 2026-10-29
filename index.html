@@ -203,12 +203,12 @@
     font: 13px/1.5 var(--mono); padding: 8px;
     border: 1px solid var(--rule); border-radius: 6px; resize: vertical;
   }
-  /* The two fields are password fields, or the masked text fields the page makes of them where the browser can mask one
-     (Web_PS_010); the only text inputs inside a card are those two, so both forms get the same look. */
-  .card input[type="password"], .card input[type="text"] {
+  .card input.secret {
     width: 100%; display: block; font: 16px var(--sans); padding: 8px 10px;
     border: 1px solid var(--rule); border-radius: 6px;
   }
+  /* A phrase or password field turned into a text field keeps masking what is typed. */
+  .secret.masked { -webkit-text-security: disc; }
   /* The Open question for a plain note hides the field: display above would still draw a password field, and the field is a masked text field where the browser can mask one (QA-F-01). */
   .card input[hidden] { display: none; }
   .row { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; margin-top: 16px; }
@@ -222,7 +222,7 @@
   .vault label.check { display: flex; align-items: flex-start; gap: 8px; margin: 4px 0 8px; }
   .vault label.check input { margin-top: 3px; }
   .vault label[for] { display: block; margin: 6px 0 4px; font-size: 13px; }
-  .vault input[type="password"]:disabled { background: #f6f5f2; color: var(--muted); }
+  .vault input.secret:disabled { background: #f6f5f2; color: var(--muted); }
   #folder-box .row { justify-content: flex-start; margin-top: 8px; }
   .modes legend { padding: 0 6px; }
   .modes label { display: inline-flex; align-items: center; gap: 6px; margin: 4px 18px 0 0; }
@@ -300,7 +300,7 @@
       <li><strong>Peek.</strong> Press <kbd data-mod>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>G</kbd> to see what you actually wrote. Press it again, or type anything, to hide it. You can read and copy your text, not edit earlier parts of it.</li>
       <li><strong>Copy.</strong> While peeking, press <kbd data-mod>Ctrl</kbd> + <kbd>C</kbd> to copy your real text to the clipboard.</li>
       <li><strong>Clear.</strong> Press <kbd>Esc</kbd> to erase the hidden text and the screen. <span data-app="The app also clears itself after 10 minutes with its window minimized or hidden.">The page also clears itself after 10 minutes in a background tab.</span> A saved copy on this device, if you turned that on below, stays and is locked.</li>
-      <li><strong>Save and open.</strong> <span data-app="Save opens a save panel and writes your text where you put it, as">Save downloads your text as</span> a <code>.sight</code> file encrypted with AES-256-GCM, the key derived from your password with PBKDF2 (SHA-256, 310,000 rounds).<span data-app=" With a folder chosen below, Save writes a plain file straight into it."></span> Open restores it and replaces what is on the page. There is no way to recover a forgotten password.</li>
+      <li><strong>Save and open.</strong> <span data-app="Save opens a save panel and writes your text where you put it, as">Save downloads your text as</span> a <code>.sight</code> file encrypted with AES-256-GCM, the key derived from your password with PBKDF2 (SHA-256, 310,000 rounds), unless you chose a folder or a plain <code>.txt</code>, <code>.md</code> or <code>.docx</code> <span data-app="file">download</span> below, which save your words unencrypted.<span data-app=" With a folder chosen below, Save writes a plain file straight into it."></span> Open restores it and replaces what is on the page. There is no way to recover a forgotten password.</li>
     </ol>
     <p class="note"><span data-app="Closing the window or quitting erases the hidden text unless you keep a copy on this device.">Reloading or closing the tab erases the hidden text unless you keep a copy on this device.</span> The header belongs to the cover: its word count counts the text on screen, not your words.</p>
     <!-- Device vault: optional, off by default. The hidden text is saved in
@@ -310,7 +310,7 @@
       <legend><strong>Keep my text on this device</strong> (optional)</legend>
       <label class="check"><input type="checkbox" id="vault-on"> <span data-app="Save my text on this computer, encrypted, so I can come back to it later.">Save my text in this browser, encrypted, so I can come back to it later.</span></label>
       <label for="vault-phrase">Phrase, 12 characters or more</label>
-      <input id="vault-phrase" type="password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore disabled>
+      <input id="vault-phrase" class="secret" type="password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore disabled>
       <p class="note" id="vault-status">To come back to your text later: type your phrase on the blank page, then hold <kbd data-mod>Ctrl</kbd>, press <kbd>E</kbd>, then <kbd>Enter</kbd>. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.</p>
     </fieldset>
     <!-- Save location. Where the browser offers folder access (Chrome, Edge:
@@ -367,7 +367,7 @@
   <form id="pw-form" class="card" autocomplete="off">
     <h1 id="pw-title">Password</h1>
     <p id="pw-hint" class="note"></p>
-    <input id="pw-input" type="password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore aria-label="Password">
+    <input id="pw-input" class="secret" type="password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore aria-label="Password">
     <div class="row">
       <button id="pw-cancel" class="btn" type="button">Cancel</button>
       <button id="pw-ok" class="btn primary" type="submit">OK</button>
@@ -1044,7 +1044,7 @@
   }
 
   // Decrypts a record (a file or the device vault) with a password and
-  // returns { text, key, salt }. Throws on a wrong password or damaged data.
+  // returns { text, key, salt, iterations }. Throws on a wrong password or damaged data.
   async function decryptRecord(f, password) {
     if (!looksLikeCoverFile(f)) throw new Error('Not a ' + FILE_EXT + ' file');
     const iterations = f.iterations === undefined ? PBKDF2_ITERATIONS : f.iterations;
@@ -1203,7 +1203,7 @@
         }
       }
       if (!storageSet(STORAGE.vault, JSON.stringify(record))) {   // storage full or blocked: say so, and do not pretend to be saving
-        if (vaultOpen() && record.salt === bytesToBase64(vaultSalt)) {   // the text stays on the page, newer than the copy (QA-G-02)
+        if (vaultOpen() && record.salt === bytesToBase64(vaultSalt)) {   // the open vault's own save was refused: it cannot keep anything now, and the text stays on the page, newer than the copy (QA-G-02); an older key's refused save touches nothing
           vaultLock();
           const current = vaultStored();   // a new phrase's first write refused: the copy on the device is the earlier phrase's (DM-230)
           lockedTextSalts = new Set(current ? [record.salt, current.salt] : [record.salt]);
@@ -1401,7 +1401,7 @@
   async function folderWrite(content, base, ext) {
     if (native) return native.writeTextFile(base, ext, content);   // the app applies the same names and counter, never overwriting
     let name = base + ext;
-    for (let n = 2; n < 100; n++) {
+    for (let n = 2; ; n++) {   // count on until a name is free, however many are taken, so a Save never writes over a file (QA-F-10)
       let exists = true;
       try { await folderHandle.getFileHandle(name, { create: false }); } catch (err) { exists = false; }
       if (!exists) break;
@@ -1872,7 +1872,7 @@
     for (const [oldKey, newKey] of pairs) {
       const value = storageGet(oldKey);
       if (value === null) continue;
-      if (storageGet(newKey) === null) storageSet(newKey, value);
+      if (storageGet(newKey) === null && !storageSet(newKey, value)) continue;   // the write was refused: keep the old key for next time
       storageSet(oldKey, '');
     }
   }
@@ -1896,10 +1896,17 @@
     $('#btn-open').addEventListener('click', () => { blurActive(); fileInput.click(); });   // the panel opens even without encryption: a plain note needs none (QA-F-11)
     fileInput.addEventListener('change', onFileChosen);
     // A password field invites the browser's password manager: a save prompt on screen and the phrase in a synced
-    // keychain. Where the browser can mask a text field, the two fields become masked text fields instead, which no
-    // password manager treats as a password; elsewhere they stay password fields, so nothing typed shows.
+    // keychain. Where the browser can mask a text field, the two fields become masked text fields instead: the mask keeps
+    // what is typed off the screen and the fields carry the marks 1Password, LastPass and Bitwarden document for staying
+    // out of a field (none tried here), while Safari's own password menu still appears on the phrase field (seen by Pranav
+    // on 22 October 2026); elsewhere, and wherever the stylesheet's mask does not reach the field, they stay password
+    // fields, so nothing typed shows.
     if (window.CSS && CSS.supports && CSS.supports('-webkit-text-security', 'disc')) {
-      for (const el of [vaultPhraseEl, pwInput]) { el.type = 'text'; el.setAttribute('style', '-webkit-text-security: disc'); }
+      for (const el of [vaultPhraseEl, pwInput]) {
+        el.classList.add('masked');
+        el.type = 'text';
+        if (getComputedStyle(el).webkitTextSecurity !== 'disc') { el.type = 'password'; el.classList.remove('masked'); }   // the mask did not apply: stay a password field
+      }
     }
     $('#btn-help').addEventListener('click', () => { blurActive(); openIntro(); });
     $('#btn-start').addEventListener('click', startWriting);
