@@ -622,12 +622,17 @@ test('the vault in the release app keeps the text typed just before Cmd+Q, in it
   app = null;
 });
 
+// The person's clipboard, kept in the evidence folder for the run: the
+// tests write markers and paths to the clipboard (pbcopy), so before() saves
+// it before the first test, and after() puts it back (PO-R14-1, round 15).
+const CLIPBOARD = path.join(EVIDENCE, 'clipboard.plist');
+
 await run(tests, {
   name: 'app',
   needUnlocked: true,
   before: () => {
     frontBefore = driveRaw('frontmost').pid;
-    driveRaw('clip-save', path.join(EVIDENCE, 'clipboard.plist'));
+    note('clipboard saved: ' + JSON.stringify(driveRaw('clip-save', CLIPBOARD)));
   },
   after: async () => {
     // Every copy running from a bundle this run opened ends with the run,
@@ -640,9 +645,18 @@ await run(tests, {
     // later; a copy is a process whose program is one of the opened bundles'
     // executables, so a bystander whose arguments merely hold such a path is
     // never touched (round 13).
-    await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});
-    await endCopies(opened, (pid) => driveRaw('quit-app', pid));
-    driveRaw('clip-restore', path.join(EVIDENCE, 'clipboard.plist'));
-    if (frontBefore > 0) driveRaw('front', frontBefore);
+    // The clipboard goes back after the copies have ended, so that none
+    // writes to it afterwards, and before the front app comes back; in a
+    // finally, so nothing the wait or endCopies meets can skip it. The
+    // harness's cleanup calls after() on every path that ends a run once
+    // before() has run: a signal, a stop, a launch refused while the run
+    // ends, and the end itself (PO-R14-1, round 15).
+    try {
+      await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});
+      await endCopies(opened, (pid) => driveRaw('quit-app', pid));
+    } finally {
+      note('clipboard put back: ' + JSON.stringify(driveRaw('clip-restore', CLIPBOARD)));
+      if (frontBefore > 0) driveRaw('front', frontBefore);
+    }
   }
 });

@@ -508,7 +508,9 @@ test('no suite launches the app once the run is ending, and each suite\'s end st
     assert.ok(body.includes("  launching = true;\n  let pid = 0;\n  try {\n    execFileSync('open', ['-n', " + bundle + "]);\n    pid = await until(() => instances().find((p) => !launched.includes(p)) || 0, 'the app process', 15000);\n    launched.push(pid);\n    recordLaunch(pid, " + bundle + ");\n  } finally {\n    launching = false;\n  }\n"), file + ': a launch under way is marked until its copy is recorded, here and with the harness for its restore check');
     assert.equal([...text.matchAll(/execFileSync\('open'/g)].length, 1, file + ' opens the bundle in one place only');
     const end = text.slice(text.indexOf('await run(tests, {'));
-    assert.ok(end.includes("  after: async () => {\n") && end.includes("    await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});\n    await endCopies("), file + ': after() waits for a launch under way before it ends the copies');
+    // Round 15: app.mjs's after() holds these two lines in a try, whose
+    // finally puts the clipboard back (PO-R14-1), so they may sit deeper.
+    assert.ok(end.includes("  after: async () => {\n") && /\n +await until\(\(\) => !launching, 'a launch under way to record its copy', 16000\)\.catch\(\(\) => \{\}\);\n +await endCopies\(/.test(end), file + ': after() waits for a launch under way before it ends the copies');
   }
 });
 
@@ -648,6 +650,36 @@ test('the real-key open, save and folder tests press a panel\'s button only when
   assert.ok(body.includes('const held = readdirSync(folder).sort();\n  if (JSON.stringify(held) !== JSON.stringify(holds)) {\n    throw new Error('), 'and unless that folder holds exactly what the test put there');
   assert.match(text, /^const OPEN_FROM = path\.join\(EVIDENCE, 'folders', 'Opened from the panel'\);$/m, 'the open test\'s file has a folder of its own under the evidence directory');
   assert.ok(text.includes('  mkdirSync(OPEN_FROM, { recursive: true });\n  const file = path.join(OPEN_FROM, OPEN_NAME);\n'), 'and sightFile writes it there');
+});
+
+// PO-R14-1 (round 15): the real-key suite writes markers and paths to the
+// person's clipboard (pbcopy) and saves the clipboard first, so losing the
+// restore would leave the clipboard holding test text; the Product Owner's
+// PO1-NO-CLIP-RESTORE, the restore removed, passed every suite. Pinned: the
+// save in before(), which the harness runs before the first test; the
+// restore in after(), after endCopies, before the front app, in a finally;
+// and the harness's cleanup, which calls after() and which both the signal
+// handler and the run's own end reach.
+test('the real-key suite saves the person\'s clipboard before its first test and puts it back in after(), after endCopies and before the front app, in a finally that the harness reaches on every path that ends a run (PO-R14-1, round 15)', () => {
+  const text = read(path.join(DESKTOP, 'tests'), 'app.mjs');
+  assert.match(text, /^const CLIPBOARD = path\.join\(EVIDENCE, 'clipboard\.plist'\);$/m, 'the clipboard is kept in the evidence folder');
+  const hooks = text.slice(text.indexOf('await run(tests, {'));
+  const before = hooks.slice(hooks.indexOf('  before: () => {'), hooks.indexOf('  after: async () => {'));
+  assert.ok(before.includes("driveRaw('clip-save', CLIPBOARD)"), 'before() saves the clipboard');
+  const after = hooks.slice(hooks.indexOf('  after: async () => {'));
+  const ends = after.indexOf('await endCopies(opened, ');
+  const fin = after.indexOf('} finally {');
+  const restore = after.indexOf("driveRaw('clip-restore', CLIPBOARD)");
+  const front = after.indexOf("driveRaw('front', frontBefore)");
+  assert.ok(ends >= 0, 'after() ends the copies');
+  assert.ok(fin > ends && restore > fin, 'and then puts the clipboard back, in a finally');
+  assert.ok(front > restore, 'before the front app comes back');
+  assert.equal([...text.matchAll(/driveRaw\('clip-(save|restore)', /g)].length, 2, 'the clipboard is saved and put back in these two places only');
+  const harness = read(path.join(DESKTOP, 'tests'), 'harness.mjs');
+  assert.ok(harness.includes('      try { await after(); } catch (err) { note(\'after: \' + err.message); }\n'), 'the harness\'s cleanup calls after()');
+  assert.ok(harness.includes('      cleanup().then((back) => process.exit(back === false ? 6 : 130), () => process.exit(130));\n'), 'a signal ends the run through that cleanup');
+  assert.ok(harness.includes('    await before();\n    for (const t of tests) {\n'), 'before() runs before the first test');
+  assert.ok(harness.includes('  } finally {\n    await cleanup();\n  }\n'), 'and every other end of the run, a stop and a refused launch among them, goes through that cleanup');
 });
 
 // PO-R13-1, the robot's route to a panel (round 14, the Delivery Manager's
