@@ -616,6 +616,12 @@ let recheckMs = RESTORE_RECHECK_MS;
 // the 3 s; its restore check cases keep the 3 s, and config.mjs checks that
 // no other test file names this.
 export function setRestoreRecheckForTests(ms) { recheckMs = ms; }
+// For the same suite only: a stand-in for the whole restore check, to give
+// the run a check that fails in a way no fake home can make once ps's own
+// failure is caught (QA-G-48, round 13); config.mjs checks that no other
+// test file names this.
+let restoreCheck = () => checkRestore();
+export function setRestoreCheckForTests(fn) { restoreCheck = fn; }
 const listings = new Map();
 export function listData(top) {
   const entries = new Map();
@@ -831,20 +837,33 @@ export async function run(tests, { name, needUnlocked = false, before = () => {}
   let cleaning = null;
   let restored = true;
   let testDataLeft = [];
+  // A restore check that fails, for any reason, is reported and counts as
+  // the data not back as it was, and the lock is released in a finally, so
+  // nothing the cleanup meets can leave it behind (QA-G-48, round 13).
   const cleanup = () => (cleaning ||= (async () => {
     cleaningUp = true;
-    stopGuard();
-    try { await after(); } catch (err) { note('after: ' + err.message); }
-    try { collectDownloads(); } catch (err) { note('downloads: ' + err.message); }
-    try { testDataLeft = restoreAppData(); } catch (err) { restored = false; testDataLeft = err.testDataLeft || []; console.log('Could not restore app data: ' + err.message); }
-    for (const dir of testDataLeft) console.log('test data left behind: ' + dir + ' (macOS refused to remove it; remove it by hand, see wave-g/probe/DESIGN.md, Leftovers)');
-    if (restored) {
-      const check = await checkRestore();
-      for (const line of restoreCheckLines(check)) { note(line); console.log(line); }
-      if (check.changed.length || check.running.length || check.unknown.length) restored = false;
+    try {
+      stopGuard();
+      try { await after(); } catch (err) { note('after: ' + err.message); }
+      try { collectDownloads(); } catch (err) { note('downloads: ' + err.message); }
+      try { testDataLeft = restoreAppData(); } catch (err) { restored = false; testDataLeft = err.testDataLeft || []; console.log('Could not restore app data: ' + err.message); }
+      for (const dir of testDataLeft) console.log('test data left behind: ' + dir + ' (macOS refused to remove it; remove it by hand, see wave-g/probe/DESIGN.md, Leftovers)');
+      if (restored) {
+        try {
+          const check = await restoreCheck();
+          for (const line of restoreCheckLines(check)) { note(line); console.log(line); }
+          if (check.changed.length || check.running.length || check.unknown.length) restored = false;
+        } catch (err) {
+          restored = false;
+          const line = 'restore check: could not finish, so the app\'s data is not known to be back as it was: ' + failureOf(err);
+          note(line);
+          console.log(line);
+        }
+      }
+      return restored;
+    } finally {
+      dropLock();
     }
-    dropLock();
-    return restored;
   })());
   markDownloads();
   runStartedAt = Date.now();

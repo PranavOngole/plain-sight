@@ -623,6 +623,13 @@ if (process.argv[2] === '--child') {
         process.env.PATH = bin + path.delimiter + process.env.PATH;
       } }]);
     },
+    // QA-G-48 (round 13): a restore check that fails for a reason no fake
+    // home can make once ps's own failure is caught: a stand-in check
+    // (setRestoreCheckForTests) that throws, standing for any other fault.
+    async 'run-check-fails'() {
+      h.setRestoreCheckForTests(async () => { throw new Error('a stand-in restore check that fails'); });
+      await runSuite([{ name: 'a test that passes', fn: async () => {} }]);
+    },
     // Round 13 item 4 (the Product Owner's decision on DISH I-21): the end of
     // the suites that open bundles (endCopies), with a copy the run never
     // recorded (a program at the bundle's executable, which ignores SIGTERM)
@@ -1974,6 +1981,26 @@ test('a ps that fails while the restore check asks about a recorded copy is a re
   assert.match(r.out, /^Exit code: 6$/m);
   assert.equal(r.lock, false, 'the lock is released');
   clean(r);
+});
+// QA-G-48 (round 13): QA-01 asked for the whole restore check inside a
+// try/catch and the lock's release in a finally. Once ps's own failure is
+// caught, nothing a fake home can make throws in the check, so a stand-in
+// check that throws stands for any other fault. Two tests read the same case:
+// the first holds the catch; the second holds the finally on its own, since
+// with the catch removed only the finally releases the lock.
+test('a restore check that fails for any reason is a reported outcome: "restore check: could not finish, ..." with the reason, exit code 6, the summary printed and the lock released (QA-G-48)', async () => {
+  const r = await runCase('run-check-fails', undefined, { watchdog: 40000 });
+  ended(r, 6);
+  assert.ok(r.out.split('\n').includes('restore check: could not finish, so the app\'s data is not known to be back as it was: a stand-in restore check that fails'), 'the failure is named with its reason; the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /as they were \(names/, 'no clean line');
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 1$/m, 'the summary is printed');
+  assert.match(r.out, /^Exit code: 6$/m);
+  assert.equal(r.lock, false, 'the lock is released');
+  clean(r);
+});
+test('the run\'s lock is released in a finally: after a restore check that fails, no lock is left, whether or not the failure is caught on the way (QA-G-48)', async () => {
+  const r = await runCase('run-check-fails', undefined, { watchdog: 40000 });
+  assert.equal(r.lock, false, 'the lock is released; the child\'s output:\n' + r.out);
 });
 // Round 13 item 4 (the Product Owner's decision of 28 October on DISH I-21):
 // the release and real-key suites' after() ended every pgrep -f match of a

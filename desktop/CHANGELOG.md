@@ -61,7 +61,7 @@ Wave G, round 13, 29 October 2026, Developer N (appstore-candidate).
 - The line printed for a signal that comes while the run puts the data back says the run ends "with 130, or 6 if the app's data is not back as it was", as it does.
 - The release and real-key suites end their copies through the harness's endCopies, which takes a process for a copy only when ps names the bundle's executable as its program, recorded or not (the Product Owner's decision on DISH I-21): a bystander whose arguments merely hold that path is never asked to quit or killed.
 - e2e.mjs's forced-end test kills the app through its child (app.child.kill), which sends nothing once Node has seen the child end, never by its pid.
-- A ps that fails while the restore check asks about a recorded copy is a reported outcome (DM-259, QA-G-48): the pid is named "(could not be checked: ps failed: <reason>)", the run ends with 6, prints its summary and releases the lock. Before, it ended with 1, a stack and the lock left behind.
+- A ps that fails while the restore check asks about a recorded copy is a reported outcome (DM-259, QA-G-48): the pid is named "(could not be checked: ps failed: <reason>)", the run ends with 6, prints its summary and releases the lock. Before, it ended with 1, a stack and the lock left behind. Any other failure of the check is reported the same way ("restore check: could not finish, ..." with the reason, exit 6), and the cleanup releases the lock in a finally, so nothing it meets can leave the lock behind.
 - A test that plan() refuses a build number that is not a string though it reads as a whole number: a number, an array and an object (QA-G-50).
 
 ## Round 12 (Developer N, the harness)

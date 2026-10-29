@@ -539,6 +539,16 @@ test('the restore check waits 3 s before its second look, and no test file but t
   assert.deepEqual(naming, ['config.mjs', 'harness-safety.mjs', 'harness.mjs'], 'named only by the harness, its safety suite and this check');
 });
 
+// QA-G-48 (round 13): the safety suite gives the run a restore check that
+// fails (setRestoreCheckForTests), to show that any failure of the check is
+// reported and leaves no lock behind. No other test file may replace the
+// check.
+test('no test file but the harness\'s safety suite replaces the restore check with a stand-in (QA-G-48)', () => {
+  const tests = path.join(DESKTOP, 'tests');
+  const naming = readdirSync(tests).filter((f) => f.endsWith('.mjs') && read(tests, f).includes('setRestoreCheckForTests')).sort();
+  assert.deepEqual(naming, ['config.mjs', 'harness-safety.mjs', 'harness.mjs'], 'named only by the harness, its safety suite and this check');
+});
+
 // DISH I-14 and QA-01's observation 6 (its T4): a launch whose wait for its
 // pid timed out never recorded its copy, and after() ended only the copies it
 // had recorded, so such a copy outlived the run. Both suites' after() now end
