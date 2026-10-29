@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { webcrypto } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { DESKTOP, EVIDENCE, HOME, NotRun, alive, decryptRecord, drive, driveRaw, firstWindow, freshStart, note, recordLaunch, refuseLaunchWhileEnding, run, sleep, until } from './harness.mjs';
+import { DESKTOP, EVIDENCE, HOME, NotRun, alive, copiesOf, decryptRecord, drive, driveRaw, endCopies, firstWindow, freshStart, note, recordLaunch, refuseLaunchWhileEnding, run, sleep, until } from './harness.mjs';
 import { appMenuTitle, launchable, menuBarOf, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
@@ -39,15 +39,11 @@ let frontBefore = -1;
 
 const launched = [];
 
-// Every running copy of the release app, from any bundle this run opened.
+// Every running copy of the release app, from any bundle this run opened: a
+// process whose program, as ps names it, is that bundle's executable
+// (harness.mjs, copiesOf; round 13).
 function instances() {
-  const pids = new Set();
-  for (const bundle of opened) {
-    try {
-      for (const p of execFileSync('pgrep', ['-f', path.join(bundle, 'Contents/MacOS/plain-sight')], { encoding: 'utf8' }).trim().split('\n').map(Number)) if (Number.isInteger(p) && p > 0) pids.add(p);
-    } catch { /* none running from this bundle */ }
-  }
-  return [...pids];
+  return [...new Set(opened.flatMap((bundle) => copiesOf(bundle)))];
 }
 
 // Opened the way a person opens it, through LaunchServices. A copy left
@@ -526,9 +522,12 @@ await run(tests, {
     // observation 6). The run starts only when no copy of the app is running
     // (mayStart), so these are the run's own. A launch under way when the run
     // began to end records its copy first (DM-249).
+    // endCopies asks each copy to quit and ends any copy still running 5 s
+    // later; a copy is a process whose program is one of the opened bundles'
+    // executables, so a bystander whose arguments merely hold such a path is
+    // never touched (round 13).
     await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});
-    for (const pid of instances()) driveRaw('quit-app', pid);
-    await until(() => !instances().length, 'every copy running from a bundle this run opened to end', 5000).catch(() => instances().forEach((p) => { try { process.kill(p, 'SIGKILL'); } catch { /* it has ended */ } }));
+    await endCopies(opened, (pid) => driveRaw('quit-app', pid));
     driveRaw('clip-restore', path.join(EVIDENCE, 'clipboard.plist'));
     if (frontBefore > 0) driveRaw('front', frontBefore);
   }

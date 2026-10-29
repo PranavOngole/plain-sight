@@ -104,6 +104,10 @@ if (process.argv[2] === '--child') {
               : { ok: false, error: 'the stand-in has no answer for ' + command };
       return JSON.stringify(answer) + '\n';
     }
+    // pgrep -f for a path inside this case's own folder (round 13's copiesOf)
+    // is the real pgrep, which finds only the case's own processes; any other
+    // question, whether the app is open say, has no process here.
+    if (file === 'pgrep' && args[0] === '-f' && String(args[1] || '').startsWith(box + path.sep)) return exec(file, args, options);
     if (file === 'pgrep') throw Object.assign(new Error('pgrep found no process'), { status: 1, stdout: '' });
     // ps, for a case that gives its answers by pid (fake.ps): the line, or
     // none for no such process, when ps exits with 1 (round 12).
@@ -603,6 +607,25 @@ if (process.argv[2] === '--child') {
       await waitsFor(holder.pid);
       await holderAfter(holder);
     },
+    // Round 13 item 4 (the Product Owner's decision on DISH I-21): the end of
+    // the suites that open bundles (endCopies), with a copy the run never
+    // recorded (a program at the bundle's executable, which ignores SIGTERM)
+    // and a bystander whose arguments merely hold that path (node, with the
+    // path as an argument). The driver's quit-app has no answer here, so the
+    // copy is ended by the SIGKILL 5 s later.
+    async 'end-copies'() {
+      const copy = await pidHolder(copyExecutable(), 'stays', 'COPY');
+      const bystander = await pidHolder(process.execPath, 'stays', 'BYSTANDER', [copyExecutable()]);
+      console.log('COPIES ' + JSON.stringify(h.copiesOf(copyBundle)) + ' of ' + JSON.stringify([copy.pid, bystander.pid]));
+      const asked = [];
+      const t0 = Date.now();
+      await h.endCopies([copyBundle], (pid) => { asked.push(pid); throw new Error('the stand-in driver has no quit-app'); });
+      console.log('QUIT ASKED ' + JSON.stringify(asked) + ' in ' + (Date.now() - t0) + ' ms');
+      await h.sleep(300);
+      for (const [name, holder] of [['COPY', copy], ['BYSTANDER', bystander]]) {
+        console.log(name + ' AFTER ' + JSON.stringify({ signals: existsSync(holder.file) ? readFileSync(holder.file, 'utf8').trim() : '', stillRuns: holder.p.exitCode === null && holder.p.signalCode === null }));
+      }
+    },
     // Round 13 item 2: a copy recorded through a linked folder (as /tmp and
     // /var lead to /private), whose process runs from the real folder.
     async 'copy-through-link'() {
@@ -869,10 +892,10 @@ if (process.argv[2] === '--child') {
     await waitsFor(holder.pid);
     await holderAfter(holder);
   };
-  const pidHolder = async (program, mode = 'stays', label = program === process.execPath ? 'HOLDER' : 'COPY') => {
+  const pidHolder = async (program, mode = 'stays', label = program === process.execPath ? 'HOLDER' : 'COPY', extra = []) => {
     holders += 1;
     const file = path.join(box, 'holder-' + holders + '-signals');
-    const p = spawn(program, [process.env[HOLDER_ENV], file, mode], { stdio: 'ignore' });
+    const p = spawn(program, [process.env[HOLDER_ENV], file, mode, ...extra], { stdio: 'ignore' });
     console.log(label + ' ' + p.pid + ' ' + file);
     await h.until(() => existsSync(file + '.ready'), 'the pid holder to take signals', 10000);
     return { p, pid: p.pid, file };
@@ -1844,7 +1867,7 @@ test('an app the run launched and nothing stopped is named by its pid after the 
 // program had taken read as a copy still running, a false exit 6 (QA-01's
 // observation 9). The pid holder stands for the program macOS gave the pid
 // to; each case ends it by the file it records signals in.
-const holdersOf = (r) => [...r.out.matchAll(/^(HOLDER|COPY|OTHER) (\d+) (\S+)$/gm)].map((m) => ({ kind: m[1], pid: Number(m[2]), file: m[3] }));
+const holdersOf = (r) => [...r.out.matchAll(/^(HOLDER|COPY|OTHER|BYSTANDER) (\d+) (\S+)$/gm)].map((m) => ({ kind: m[1], pid: Number(m[2]), file: m[3] }));
 const endHolders = (r) => { for (const { file } of holdersOf(r)) { try { childProcess.execFileSync('pkill', ['-9', '-f', file]); } catch { /* it has ended */ } } };
 const stopCurrentLine = (r) => (r.out.match(/^STOP CURRENT (.*) after (\d+) ms; current\(\) asked (\d+) time\(s\)$/m) || []).slice(1);
 const otherProgramNote = (pid) => ' pid ' + pid + ' now runs another program: not stopped';
@@ -1921,6 +1944,28 @@ for (const [id, what] of [
     }
   });
 }
+// Round 13 item 4 (the Product Owner's decision of 28 October on DISH I-21):
+// the release and real-key suites' after() ended every pgrep -f match of a
+// bundle's executable, recorded or not, so a bystander whose arguments merely
+// held that path would have been asked to quit and, 5 s later, killed. Both
+// now hand their bundles to the harness's endCopies, which takes a process
+// for a copy only when ps names the bundle's executable as its program.
+test('the suites\' end (endCopies) ends a copy the run never recorded, whose program is the bundle\'s executable, and never touches a bystander whose arguments merely hold that path (round 13, item 4; DISH I-21)', async () => {
+  const r = await runCase('end-copies', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 0);
+    const holders = holdersOf(r);
+    const copy = holders.find((x) => x.kind === 'COPY');
+    const bystander = holders.find((x) => x.kind === 'BYSTANDER');
+    assert.ok(copy && bystander, 'both started; the child\'s output:\n' + r.out);
+    assert.ok(r.out.includes('COPIES ' + JSON.stringify([copy.pid]) + ' of '), 'copiesOf finds the copy alone; the child\'s output:\n' + r.out);
+    assert.match(r.out, new RegExp('^QUIT ASKED \\[' + copy.pid + '\\] in \\d+ ms$', 'm'), 'only the copy is asked to quit');
+    assert.match(r.out, /^COPY AFTER \{"signals":"","stillRuns":false\}$/m, 'the copy was ended (by the SIGKILL, which it cannot record)');
+    assert.match(r.out, /^BYSTANDER AFTER \{"signals":"","stillRuns":true\}$/m, 'the bystander got no signal and still runs');
+  } finally {
+    endHolders(r);
+  }
+});
 // Round 13 item 2 (Developer N's round 12 observation): pgrep -f, which
 // finds the copies, matches a path anywhere in the arguments, while the rule
 // compared ps's name with the recorded path exactly, so a copy recorded

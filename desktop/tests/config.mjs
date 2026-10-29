@@ -435,8 +435,7 @@ test('the real-key suite looks for running copies in every bundle the run opened
   const start = text.indexOf('function instances() {');
   assert.ok(start >= 0, 'app.mjs has instances()');
   const body = text.slice(start, text.indexOf('\n}\n', start));
-  assert.ok(body.includes('\n  for (const bundle of opened) {\n'), 'instances() looks in every bundle the run opened');
-  assert.ok(body.includes("execFileSync('pgrep', ['-f', path.join(bundle, 'Contents/MacOS/plain-sight')]"), 'by each bundle\'s own executable');
+  assert.ok(body.includes('opened.flatMap((bundle) => copiesOf(bundle))'), 'instances() looks in every bundle the run opened, for a process whose program is that bundle\'s own executable (the harness\'s copiesOf, round 13)');
 });
 
 // DM-241: macOS titles the app menu with the bundle's name, which is "Plain
@@ -508,7 +507,7 @@ test('no suite launches the app once the run is ending, and each suite\'s end st
     assert.ok(body.includes("  launching = true;\n  let pid = 0;\n  try {\n    execFileSync('open', ['-n', " + bundle + "]);\n    pid = await until(() => instances().find((p) => !launched.includes(p)) || 0, 'the app process', 15000);\n    launched.push(pid);\n    recordLaunch(pid, " + bundle + ");\n  } finally {\n    launching = false;\n  }\n"), file + ': a launch under way is marked until its copy is recorded, here and with the harness for its restore check');
     assert.equal([...text.matchAll(/execFileSync\('open'/g)].length, 1, file + ' opens the bundle in one place only');
     const end = text.slice(text.indexOf('await run(tests, {'));
-    assert.ok(end.includes("  after: async () => {\n") && end.includes("    await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});\n    for (const pid of instances()) "), file + ': after() waits for a launch under way before it ends the copies');
+    assert.ok(end.includes("  after: async () => {\n") && end.includes("    await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});\n    await endCopies("), file + ': after() waits for a launch under way before it ends the copies');
   }
 });
 
@@ -553,9 +552,10 @@ test('the release and real-key suites\' after() ends every copy running from a b
     const start = end.indexOf('  after: async () => {\n');
     assert.ok(start >= 0, file + ' has an after()');
     const after = end.slice(start, end.indexOf('\n  }\n', start));
-    assert.ok(after.includes('    for (const pid of instances()) '), file + ': after() asks every running copy to quit');
-    assert.ok(after.includes('    await until(() => !instances().length, '), file + ': and waits until none runs');
-    assert.ok(after.includes('.catch(() => instances().forEach('), file + ': then ends any copy still running');
+    // Since round 13 after() hands every bundle the run opened to the
+    // harness's endCopies, which asks each copy to quit and ends any copy
+    // still running 5 s later; harness-safety.mjs runs it under a fake home.
+    assert.ok(after.includes('    await endCopies(' + (file === 'app.mjs' ? 'opened' : '[APP]') + ', '), file + ': after() ends every copy running from a bundle the run opened, through endCopies');
     assert.equal(/launched\.includes/.test(after), false, file + ': whether the run recorded it or not');
   }
 });

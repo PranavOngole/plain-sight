@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { DESKTOP, EVIDENCE, HOME, NotRun, alive, drive, firstWindow, note, recordLaunch, refuseLaunchWhileEnding, run, sleep, until } from './harness.mjs';
+import { DESKTOP, EVIDENCE, HOME, NotRun, alive, copiesOf, drive, endCopies, firstWindow, note, recordLaunch, refuseLaunchWhileEnding, run, sleep, until } from './harness.mjs';
 import { appMenuTitle, launchable, menuBarOf, webDataFolder } from './launch-guard.mjs';
 
 const APP = process.env.PLAIN_SIGHT_APP || path.join(DESKTOP, 'src-tauri/target/release/bundle/macos/Plain Sight.app');
@@ -37,9 +37,10 @@ let app = null;
 let watch = null;
 const launched = [];
 
-// Every running copy of the release app.
+// Every running copy of the release app: a process whose program, as ps
+// names it, is the bundle's executable (harness.mjs, copiesOf; round 13).
 function instances() {
-  try { return execFileSync('pgrep', ['-f', EXE], { encoding: 'utf8' }).trim().split('\n').map(Number).filter((p) => Number.isInteger(p) && p > 0); } catch { return []; }
+  return copiesOf(APP);
 }
 const documentWindows = () => drive('cgwindows', app.pid).windows.filter((w) => w.layer === 0 && w.onscreen);
 
@@ -183,9 +184,12 @@ await run(tests, {
     // observation 6). The run starts only when no copy of the app is running
     // (mayStart), so these are the run's own. A launch under way when the run
     // began to end records its copy first (DM-249).
+    // endCopies asks each copy to quit and ends any copy still running 5 s
+    // later; a copy is a process whose program is the bundle's executable,
+    // so a bystander whose arguments merely hold that path is never touched
+    // (round 13).
     await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});
-    for (const pid of instances()) { try { drive('quit-app', pid); } catch (err) { note('quit-app ' + pid + ': ' + err.message); } }
-    await until(() => !instances().length, 'every copy running from the bundle to end', 5000).catch(() => instances().forEach((p) => { try { process.kill(p, 'SIGKILL'); } catch { /* it has ended */ } }));
+    await endCopies([APP], (pid) => drive('quit-app', pid));
     if (watch && watch.child.exitCode === null) watch.child.kill('SIGTERM');
   }
 });

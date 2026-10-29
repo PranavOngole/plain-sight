@@ -312,6 +312,44 @@ export function alive(pid) {
   return launch ? stillRuns(launch) : anyProcess(pid);
 }
 
+// The copies of a bundle running now, recorded or not (DISH I-14): the
+// processes pgrep -f finds by the bundle's executable, kept only when ps
+// names that executable as their own program, compared as for a recorded
+// copy, so a process whose arguments merely hold the path (an editor or a
+// log reader, say) is never taken for a copy (round 13, the Product Owner's
+// decision of 28 October on DISH I-21). For app.mjs and release.mjs, whose
+// copies LaunchServices starts.
+export function copiesOf(bundle) {
+  const exe = path.join(bundle, 'Contents', 'MacOS', 'plain-sight');
+  const own = realPathOf(path.resolve(exe));
+  let found = [];
+  try {
+    found = execFileSync('pgrep', ['-f', exe], { encoding: 'utf8' }).trim().split('\n').map(Number).filter((p) => Number.isInteger(p) && p > 0);
+  } catch {
+    return [];
+  }
+  return found.filter((pid) => {
+    try {
+      const program = programOf(pid);
+      return program !== null && realPathOf(program) === own;
+    } catch {
+      return false;
+    }
+  });
+}
+// The end of a suite whose copies LaunchServices starts (app.mjs,
+// release.mjs): every copy running from its bundles is asked to quit
+// (`quit`, the driver's quit-app), and a copy still running 5 s later is
+// ended with SIGKILL. Only copiesOf's copies are asked or ended, so no other
+// process is ever quit or killed.
+export async function endCopies(bundles, quit) {
+  const running = () => [...new Set(bundles.flatMap((bundle) => copiesOf(bundle)))];
+  for (const pid of running()) {
+    try { quit(pid); } catch (err) { note('quit-app ' + pid + ': ' + err.message); }
+  }
+  await until(() => !running().length, 'every copy running from the bundles to end', 5000).catch(() => running().forEach((pid) => { try { process.kill(pid, 'SIGKILL'); } catch { /* it has ended */ } }));
+}
+
 // Starts an executable with its output in the evidence folder; never once the
 // run is ending (refuseLaunchWhileEnding, DM-249).
 export function spawnApp(exe, env = {}) {
