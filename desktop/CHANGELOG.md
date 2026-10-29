@@ -50,6 +50,13 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 15
+
+Wave G, round 15, 29 October 2026, Developer N (appstore-candidate).
+
+- The real-key suite's clipboard save and restore are pinned (PO-R14-1). The suite writes markers and paths to the person's clipboard, and the Product Owner's PO1-NO-CLIP-RESTORE, the restore removed, passed every suite. before() saves the clipboard into the evidence folder before the first test; after() puts it back after the copies end and before the front app returns, now in a finally so that nothing the wait or endCopies meets can skip it; both note their result in run.log. A config pin holds the save, the restore, their order and the harness cleanup that calls after() on every path that ends a run (a signal, a stop, a launch refused while the run ends, the end itself). The DM-249 pin reads the two lines before endCopies at any indentation, since they now sit in the try.
+- A fake-home case holds endCopies' grace (PO-R14-2): an unrecorded copy that quits about 1 s after the quit request ends by its own quit, with no SIGKILL, and the end waits for it. The Product Owner's PO3-NO-GRACE, the wait made 0, had passed every suite at 5dcf726.
+
 ## Round 14
 
 Wave G, round 14, 29 October 2026, Developer N (appstore-candidate).
