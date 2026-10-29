@@ -87,7 +87,7 @@ test('the command writes tauri.appstore.conf.json as APPSTORE.md step 6 shows it
   assert.deepEqual(r.stdout.split('\n').filter((l) => l.startsWith('written: ')), ['written: ' + path.join(out, CONFIG_NAME), 'written: ' + path.join(out, ENTITLEMENTS_NAME)]);
 });
 
-test('the command writes Entitlements.appstore.plist as an XML property list that plutil reads back: every entitlement of Entitlements.plist, plus com.apple.application-identifier (<team>.<identifier of tauri.conf.json>) and com.apple.developer.team-identifier (<team>), and nothing else', () => {
+test('the command writes Entitlements.appstore.plist as an XML property list that plutil reads back: every entitlement of Entitlements.plist (four, the network client among them), plus com.apple.application-identifier (<team>.<identifier of tauri.conf.json>) and com.apple.developer.team-identifier (<team>), six in all and nothing else', () => {
   const out = freshOut();
   assert.equal(run(args({ out })).status, 0);
   const file = path.join(out, ENTITLEMENTS_NAME);
@@ -99,19 +99,22 @@ test('the command writes Entitlements.appstore.plist as an XML property list tha
   assert.equal(read['com.apple.developer.team-identifier'], 'ABCDE12345');
   assert.deepEqual(Object.keys(read).sort(), [...Object.keys(everyday), 'com.apple.application-identifier', 'com.apple.developer.team-identifier'].sort(), 'the keys of Entitlements.plist plus the two');
   assert.equal(Object.keys(read).length, Object.keys(everyday).length + 2);
+  assert.equal(read['com.apple.security.network.client'], true, 'the network client carries over');
+  assert.equal(Object.keys(read).length, 6, 'six in all, as APPSTORE.md steps 6 and 9 say: the four of Entitlements.plist and the two');
 });
 
-test('the entitlements are read from Entitlements.plist each time, so one added there later (com.apple.security.network.client) carries over, and the identifier and the minimum macOS come from tauri.conf.json', () => {
+test('the entitlements are read from Entitlements.plist each time, so one added there later (a stand-in, com.apple.security.print, which the app does not carry) carries over, and the identifier and the minimum macOS come from tauri.conf.json', () => {
   const inputs = path.join(ROOT, 'inputs');
   mkdirSync(inputs);
   const entitlementsFile = path.join(inputs, 'Entitlements.plist');
-  execFileSync('plutil', ['-convert', 'xml1', '-o', entitlementsFile, '-'], { input: JSON.stringify({ ...everyday, 'com.apple.security.network.client': true }) });
+  assert.equal(everyday['com.apple.security.print'], undefined, 'the stand-in is not one of the app\'s own');
+  execFileSync('plutil', ['-convert', 'xml1', '-o', entitlementsFile, '-'], { input: JSON.stringify({ ...everyday, 'com.apple.security.print': true }) });
   const tauriConfFile = path.join(inputs, 'tauri.conf.json');
   writeFileSync(tauriConfFile, JSON.stringify({ identifier: 'com.example.later', bundle: { macOS: { minimumSystemVersion: '13.0' } } }));
   const out = freshOut();
   write(plan(parseArgs(args({ out }), { cwd: ROOT }), { entitlementsFile, tauriConfFile }));
   const read = plistOf(path.join(out, ENTITLEMENTS_NAME));
-  assert.deepEqual(read, { ...everyday, 'com.apple.security.network.client': true, [APPLICATION_IDENTIFIER]: TEAM + '.com.example.later', [TEAM_IDENTIFIER]: TEAM });
+  assert.deepEqual(read, { ...everyday, 'com.apple.security.print': true, [APPLICATION_IDENTIFIER]: TEAM + '.com.example.later', [TEAM_IDENTIFIER]: TEAM });
   assert.equal(JSON.parse(readFileSync(path.join(out, CONFIG_NAME), 'utf8')).bundle.macOS.minimumSystemVersion, '13.0');
 });
 

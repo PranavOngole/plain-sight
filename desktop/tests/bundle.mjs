@@ -54,8 +54,11 @@ function domNodes(html) {
 const plist = (xml) => JSON.parse(execFileSync('plutil', ['-convert', 'json', '-o', '-', '-'], { input: xml, encoding: 'utf8' }));
 
 // Keys the built Info.plist must not hold (QA-G-26, B22): a bundle-level
-// network allowance (NSAppTransportSecurity) would loosen the no-network
-// promise behind the entitlement check's back. Read through plutil from the
+// network allowance (NSAppTransportSecurity) would loosen the system's
+// network rules for the app behind the entitlement check's back, the more
+// so since the app carries the network client entitlement (28 October
+// 2026) and its own code and the page's policy keep it off the network.
+// Read through plutil from the
 // built file, so a tampered copy of the bundle is caught; config.mjs holds
 // the function to a scratch property list on every npm test.
 export const FORBIDDEN_INFO_KEYS = ['NSAppTransportSecurity'];
@@ -79,14 +82,15 @@ test('the container migration manifest is the repository\'s, byte for byte (D-37
   assert.equal(sha(bundled), sha(readFileSync(path.join(DESKTOP, 'src-tauri/container-migration.plist'))));
 });
 
-test('the signature carries exactly the three entitlements of Entitlements.plist: the App Sandbox, no network, no Downloads (D-37, D-49)', () => {
+test('the signature carries exactly the four entitlements of Entitlements.plist: the App Sandbox, the network client and no other network entitlement, no Downloads (D-37, D-49; the network client approved by Pranav on 28 October 2026)', () => {
   const shown = spawnSync('codesign', ['-d', '--entitlements', '-', '--xml', APP], { encoding: 'utf8' });
   assert.equal(shown.status, 0, shown.stderr);
   const signed = plist(shown.stdout);
   assert.deepEqual(signed, plist(readFileSync(path.join(DESKTOP, 'src-tauri/Entitlements.plist'))));
-  assert.deepEqual(Object.keys(signed).sort(), ['com.apple.security.app-sandbox', 'com.apple.security.files.bookmarks.app-scope', 'com.apple.security.files.user-selected.read-write'], 'exactly three');
+  assert.deepEqual(Object.keys(signed).sort(), ['com.apple.security.app-sandbox', 'com.apple.security.files.bookmarks.app-scope', 'com.apple.security.files.user-selected.read-write', 'com.apple.security.network.client'], 'exactly four');
   assert.equal(signed['com.apple.security.app-sandbox'], true, 'sandboxed');
-  assert.deepEqual(Object.keys(signed).filter((k) => k.startsWith('com.apple.security.network.')), [], 'no network entitlement');
+  assert.deepEqual(Object.keys(signed).filter((k) => k.startsWith('com.apple.security.network.')), ['com.apple.security.network.client'], 'the network client only, no network server');
+  assert.equal(signed['com.apple.security.network.client'], true, 'the network client: the system web view needs it to draw the page in the sandbox');
   assert.equal(signed['com.apple.security.files.downloads.read-write'], undefined, 'no Downloads entitlement: Save without a folder goes through the save panel');
 });
 
