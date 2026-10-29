@@ -685,7 +685,7 @@ test('Save writes a .sight with a 16-byte salt, 12-byte IV and data; Open restor
     assert.equal(await p.readReal(), 'hello world', 'every refusal left the buffer alone');
     // Nothing on the console object touches the buffer.
     assert.deepEqual(Object.keys(p.w.PlainSight).sort(), ['coverFailed', 'coverId', 'coverIds', 'coverText', 'ready', 'selectedCoverId', 'setCover', 'version']);
-    assert.equal(p.w.PlainSight.version, '1.4.0');
+    assert.equal(p.w.PlainSight.version, '1.5.0');
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
 });
@@ -4635,6 +4635,250 @@ test('the intro\'s Save sentence names every plain choice beside the encrypted f
     assert.ok(li, 'the intro has its Save and open item');
     assert.match(li.textContent, /Save downloads your text as a \.sight file encrypted with AES-256-GCM/);
     assert.match(li.textContent, /unless you chose a folder or a plain \.txt, \.md or \.docx download below, which save your words unencrypted\./);
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+// ---------------------------------------------------------------------------
+// Super Stealth (BR-46, 1.5.0): the ? button opens the intro after the set number of quick clicks; the chord always does.
+// ---------------------------------------------------------------------------
+function introOpen(p) { return !p.$('#intro').hidden; }
+function clickHelp(p, n = 1) { for (let i = 0; i < n; i++) p.$('#btn-help').click(); }
+function pickClicks(p, value) { const sel = p.$('#help-clicks'); sel.value = value; sel.dispatchEvent(new p.w.Event('change', { bubbles: true })); }
+
+test('Super Stealth: with nothing set, one click on ? opens the intro, as before, and the setting shows 1', async () => {
+  const p = await loadPage();
+  try {
+    p.start();
+    assert.equal(introOpen(p), false);
+    clickHelp(p);
+    assert.equal(introOpen(p), true, 'one click opens the intro by default');
+    assert.equal(p.$('#help-clicks').value, '1', 'the setting shows the default');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Super Stealth: with three set, one or two quick clicks show nothing, the third opens the intro, and the series starts again after it', async () => {
+  const p = await loadPage({ storage: { 'plainSight.helpClicks': '3' } });
+  try {
+    p.start();
+    clickHelp(p, 2);
+    assert.equal(introOpen(p), false, 'two clicks are not enough');
+    clickHelp(p);
+    assert.equal(introOpen(p), true, 'the third quick click opens the intro');
+    assert.equal(p.$('#help-clicks').value, '3');
+    p.start();
+    clickHelp(p);
+    assert.equal(introOpen(p), false, 'after the intro closes the count starts again');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Super Stealth: clicks further apart than the window start a new series and open nothing', async () => {
+  const p = await loadPage({ storage: { 'plainSight.helpClicks': '3' } });
+  try {
+    p.start();
+    clickHelp(p); await sleep(700); clickHelp(p); await sleep(700); clickHelp(p);
+    assert.equal(introOpen(p), false, 'three slow clicks open nothing');
+    clickHelp(p, 2);   // with the click just before: three within the window
+    assert.equal(introOpen(p), true, 'three quick clicks open it');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Super Stealth: a choice made on the intro is kept on this device and applies after a reload; an untouched setting is not stored', async () => {
+  const p = await loadPage();
+  try {
+    p.start();
+    clickHelp(p);
+    p.start();
+    assert.equal(p.storageDump()['plainSight.helpClicks'], undefined, 'an untouched setting is not stored, so a later default applies to it');
+    clickHelp(p);
+    pickClicks(p, '4');
+    p.start();
+    assert.equal(p.storageDump()['plainSight.helpClicks'], '4', 'the choice is kept');
+    clickHelp(p, 3);
+    assert.equal(introOpen(p), false, 'three clicks are not enough now');
+    clickHelp(p);
+    assert.equal(introOpen(p), true, 'the fourth opens it');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+  const q = await loadPage({ storage: { 'plainSight.helpClicks': '4' } });
+  try {
+    q.start();
+    clickHelp(q, 3);
+    assert.equal(introOpen(q), false, 'the setting survives a reload');
+    clickHelp(q);
+    assert.equal(introOpen(q), true);
+    assert.equal(q.$('#help-clicks').value, '4', 'the intro shows the kept choice');
+    assert.deepEqual(q.errors, []);
+  } finally { q.close(); }
+});
+
+test('Super Stealth: a stored value outside 1 to 5, or not a number, reads as the default', async () => {
+  for (const bad of ['0', '9', 'abc', '']) {
+    const p = await loadPage({ storage: { 'plainSight.helpClicks': bad } });
+    try {
+      p.start();
+      clickHelp(p);
+      assert.equal(introOpen(p), true, 'one click opens the intro for the stored value ' + JSON.stringify(bad));
+      assert.equal(p.$('#help-clicks').value, '1');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+});
+
+test('Super Stealth: another tab\'s change redraws the setting on an open intro, never over a choice being made here, and a clear brings the default back', async () => {
+  const p = await loadPage();
+  try {
+    p.start();
+    clickHelp(p);
+    assert.equal(p.$('#help-clicks').value, '1');
+    p.w.localStorage.setItem('plainSight.helpClicks', '3');
+    p.w.dispatchEvent(new p.w.StorageEvent('storage', { key: 'plainSight.helpClicks', oldValue: null, newValue: '3' }));
+    assert.equal(p.$('#help-clicks').value, '3', 'the open intro follows the other tab');
+    pickClicks(p, '2');
+    p.w.localStorage.setItem('plainSight.helpClicks', '5');
+    p.w.dispatchEvent(new p.w.StorageEvent('storage', { key: 'plainSight.helpClicks', oldValue: '3', newValue: '5' }));
+    assert.equal(p.$('#help-clicks').value, '2', 'the choice being made here stands');
+    p.start();
+    assert.equal(p.storageDump()['plainSight.helpClicks'], '2', 'and Start keeps it');
+    clickHelp(p);
+    assert.equal(introOpen(p), false);
+    clickHelp(p);
+    assert.equal(introOpen(p), true, 'two clicks open it now');
+    p.w.localStorage.clear();
+    p.w.dispatchEvent(new p.w.StorageEvent('storage', { key: null, oldValue: null, newValue: null }));
+    assert.equal(p.$('#help-clicks').value, '1', 'a clear by another document shows the default again');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Super Stealth: Ctrl+Shift+H or Cmd+Shift+H opens the intro whatever the click setting, does nothing over a dialog, and leaves the hidden text alone', async () => {
+  const p = await loadPage({ storage: { 'plainSight.helpClicks': '5' } });
+  try {
+    p.start();
+    p.type('abc');
+    assert.equal(p.press('H', { ctrlKey: true, shiftKey: true }), true, 'the chord is the page\'s');
+    assert.equal(introOpen(p), true, 'the chord opens the intro');
+    p.start();
+    assert.equal(introOpen(p), false);
+    p.press('h', { metaKey: true, shiftKey: true });
+    assert.equal(introOpen(p), true, 'Cmd+Shift+H too');
+    p.start();
+    p.$('#btn-save').click();   // a dialog is waiting for a password
+    assert.equal(p.$('#pw').hidden, false);
+    p.press('H', { ctrlKey: true, shiftKey: true });
+    assert.equal(introOpen(p), false, 'no intro over a dialog');
+    p.press('Escape');
+    assert.equal(p.$('#pw').hidden, true);
+    assert.equal(await p.readReal(), 'abc', 'the hidden text is untouched');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Super Stealth: the intro names Ctrl + Shift + H on every platform, so a Mac is not pointed at the browser\'s own Cmd+Shift+H', async () => {
+  const p = await loadPage();
+  try {
+    const box = p.$('#stealth-box');
+    assert.ok(box, 'the Super Stealth box is on the intro');
+    assert.equal(box.querySelectorAll('[data-mod]').length, 0, 'no key name in the box is rewritten for the platform');
+    assert.match(box.textContent, /Ctrl \+ Shift \+ H, on a Mac too/, 'the chord is named as Ctrl on every platform');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+
+// ---------------------------------------------------------------------------
+// 1.5.0 extras from the 1.4.0 gate: DM-138 (two folder Saves in one second), and the guard gaps DX01, DX02, DX04, DX09.
+// ---------------------------------------------------------------------------
+async function folderReadyPage(folder) {
+  const p = await loadPage({ folder, storage: { 'plainSight.introSeen': '1' } });
+  p.$('#btn-help').click();
+  p.$('#btn-folder').click();
+  await waitFor(() => /into the folder "Notes"/.test(p.$('#folder-status').textContent), 3000);
+  p.start();
+  return p;
+}
+function momentBases(count) {
+  const now = new Date(); const pad = (n) => String(n).padStart(2, '0'); const out = [];
+  for (let s = 0; s < count; s++) { const d = new Date(now.getTime() + s * 1000); out.push(d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + '-' + pad(d.getMinutes()) + '-' + pad(d.getSeconds())); }
+  return out;
+}
+
+test('save folder: two Saves started in the same second write two files under two names, the first text first (DM-138)', async () => {
+  const folder = fakeFolder('Notes');
+  const p = await folderReadyPage(folder);
+  try {
+    p.type('first');
+    p.$('#btn-save').click();
+    p.type(' second');   // typed between the clicks, so the two Saves hold different text
+    p.$('#btn-save').click();
+    await waitFor(() => folder.written.length === 2, 6000);
+    assert.equal(folder.written.length, 2, 'two writes');
+    assert.notEqual(folder.written[0].name, folder.written[1].name, 'two different names, so neither file is written over');
+    assert.equal(folder.written[0].text, 'first', 'the first Save wrote the first text');
+    assert.equal(folder.written[1].text, 'first second', 'the second Save wrote the second');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('save folder: with every name up to "(250)" taken, Save counts on to "(251)": the counter has no cap above 99 either (DX01)', async () => {
+  const folder = fakeFolder('Notes');
+  const p = await folderReadyPage(folder);
+  try {
+    p.type('many');
+    const bases = momentBases(3);
+    const taken = new Set();
+    for (const b of bases) { taken.add(b + '.txt'); for (let n = 2; n <= 250; n++) taken.add(b + ' (' + n + ').txt'); }
+    for (const name of taken) folder.files.add(name);
+    p.$('#btn-save').click();
+    await waitFor(() => folder.written.length === 1, 6000);
+    const w = folder.written[0];
+    assert.equal(taken.has(w.name), false, 'no taken name is written over: ' + w.name);
+    assert.ok(bases.some((b) => w.name === b + ' (251).txt'), 'the counter goes on to 251: ' + w.name);
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('held Esc: the repeats of an Esc that closed the Save dialog, the Open question or the intro keep the page; a fresh Esc clears it (DM-231, DX02)', async () => {
+  const p = await loadPage();
+  const esc = (repeat) => p.d.dispatchEvent(new p.w.KeyboardEvent('keydown', { key: 'Escape', repeat, bubbles: true, cancelable: true }));
+  try {
+    p.start();
+    p.type('page words');
+    p.$('#btn-save').click();
+    assert.equal(p.$('#pw').hidden, false, 'the Save dialog is open');
+    esc(false);
+    assert.equal(p.$('#pw').hidden, true, 'Esc closed the Save dialog');
+    esc(true); esc(true); esc(true);
+    assert.equal(await p.readReal(), 'page words', 'its repeats kept the page');
+    chooseFile(p, new p.w.File(['NOTE'], 'note.txt', { type: 'text/plain' }));
+    await p.settle();
+    assert.equal(p.$('#pw').hidden, false, 'the Open question is open');
+    esc(false);
+    await p.settle();
+    esc(true); esc(true);
+    assert.equal(await p.readReal(), 'page words', 'the repeats of the Esc that closed the Open question kept the page, and the note did not open');
+    p.$('#btn-help').click();
+    assert.equal(p.$('#intro').hidden, false, 'the intro is open');
+    esc(false);
+    await p.settle();
+    assert.equal(p.$('#intro').hidden, true, 'Esc closed the intro');
+    esc(true); esc(true);
+    assert.equal(await p.readReal(), 'page words', 'the repeats of the Esc that closed the intro kept the page');
+    esc(false);
+    assert.equal(await p.readReal(), '', 'a fresh Esc clears the page');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('the masked fields keep the look of the password fields they replaced: the field rule and the disabled rule read as documented (DX04, DX09)', async () => {
+  const p = await loadPage();
+  try {
+    const css = [...p.d.querySelectorAll('style')].map((s) => s.textContent).join('\n');
+    assert.match(css, /\.card input\.secret \{\s*width: 100%; display: block; font: 16px var\(--sans\); padding: 8px 10px;\s*border: 1px solid var\(--rule\); border-radius: 6px;\s*\}/, 'the field rule: full width, the page font, its padding and border');
+    assert.match(css, /\.vault input\.secret:disabled \{ background: #f6f5f2; color: var\(--muted\); \}/, 'the disabled rule: the page\'s disabled background and muted text');
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
 });
