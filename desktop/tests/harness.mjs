@@ -53,14 +53,16 @@
 // then lists every test container on the Mac by name (never opened), the
 // summary and the exit code. Each run that puts the data back then checks it
 // (checkRestore, DM-249's launched half): the folders it moved aside are
-// listed when they move (every entry's path, kind, size and modification
-// time, never a file's contents) and again after the restore, at once and
-// 3 s later, and no app the run launched may still be running. stopApp
-// notes "stopping pid <n>" in run.log before it ends an app, so a driver can
-// send a signal while a test waits there. An app the run launched counts as
-// running by its own record only, never by its pid alone, since macOS hands
-// an ended app's pid to another program: a pid that now runs another program
-// is never signalled or waited on, and run.log says so (round 12).
+// listed when they move (every file's path, size and modification time and
+// every folder's path; never a file's contents) and again after the restore,
+// at once and 3 s later, and no app the run launched may still be running; a
+// folder it cannot list when it moves it aside is named in the clean line and
+// is not checked. stopApp notes "stopping pid <n>" in run.log before it ends
+// an app, so a driver can send a signal while a test waits there. An app the
+// run launched counts as running by its own record only, never by its pid
+// alone, since macOS hands an ended app's pid to another program: a pid that
+// now runs another program is never signalled or waited on, and run.log says
+// so (round 12).
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, webcrypto } from 'node:crypto';

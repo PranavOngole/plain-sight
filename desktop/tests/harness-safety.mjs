@@ -1490,7 +1490,9 @@ test('e2e.mjs\'s hidden-document test, its show bringing the page back: it passe
 // code 130, no app left, appdata-backup empty, no lock, and the person's
 // folder.txt as it was. The Product Owner must never read the person's data,
 // so the harness checks the restore itself (checkRestore): it lists every
-// folder it moves aside (paths, kinds, sizes and times; nothing is opened),
+// folder it moves aside (every file's path, size and modification time and
+// every folder's path; nothing is opened; a folder it cannot list then is
+// named in the clean line and not checked),
 // lists them again after the restore, at once and 3 s later, and looks for a
 // launched app still running. These cases hold each part, under the fake home.
 const restoredLine = (n) => new RegExp('^restore check: ' + n + ' folders as they were \\(names, sizes and times; checked twice, 3 s apart\\)$', 'm');
