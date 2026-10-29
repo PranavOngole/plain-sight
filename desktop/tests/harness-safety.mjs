@@ -607,6 +607,22 @@ if (process.argv[2] === '--child') {
       await waitsFor(holder.pid);
       await holderAfter(holder);
     },
+    // DM-259 and QA-G-48 (round 13): ps fails while the restore check asks
+    // about a recorded copy (the Delivery Manager's AT-P4, QA-01's
+    // ps-broken-run): a stand-in ps first on PATH that ends with 2 and "ps:
+    // fork: Resource temporarily unavailable", as ps does when the Mac can
+    // start no process.
+    async 'run-ps-broken'() {
+      const bin = path.join(box, 'bin');
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(path.join(bin, 'ps'), '#!/bin/sh\necho "ps: fork: Resource temporarily unavailable" >&2\nexit 2\n');
+      chmodSync(path.join(bin, 'ps'), 0o755);
+      await runSuite([{ name: 'a test that records a copy, after which ps breaks', fn: async () => {
+        testData(dirs[0]);
+        h.recordLaunch(7001, copyBundle);
+        process.env.PATH = bin + path.delimiter + process.env.PATH;
+      } }]);
+    },
     // Round 13 item 4 (the Product Owner's decision on DISH I-21): the end of
     // the suites that open bundles (endCopies), with a copy the run never
     // recorded (a program at the bundle's executable, which ignores SIGTERM)
@@ -1944,6 +1960,21 @@ for (const [id, what] of [
     }
   });
 }
+// DM-259 and QA-G-48 (round 13): the restore check asked ps about a recorded
+// copy outside any try, so a ps that failed ended the run with exit code 1,
+// a stack, no restore line, no summary and the lock left behind (the data
+// was back). A failure now names the pid and counts as not as it was.
+test('a ps that fails while the restore check asks about a recorded copy is a reported outcome: the pid named "(could not be checked: ps failed: ...)", exit code 6, the summary printed and the lock released (DM-259, QA-G-48)', async () => {
+  const r = await runCase('run-ps-broken', undefined, { watchdog: 40000 });
+  ended(r, 6);
+  const bundle = path.join(ROOT, 'run-ps-broken', 'copy', 'Plain Sight test copy.app');
+  assert.ok(r.out.split('\n').includes('restore check: could not tell whether an app this run launched still runs: pid 7001 (' + bundle + '; could not be checked: ps failed: fork: Resource temporarily unavailable)'), 'the pid is named with the reason; the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /as they were \(names/, 'no clean line');
+  assert.match(r.out, /^1 passed, 0 failed, 0 not run, 1 total\. Errors: 1$/m, 'the summary is printed');
+  assert.match(r.out, /^Exit code: 6$/m);
+  assert.equal(r.lock, false, 'the lock is released');
+  clean(r);
+});
 // Round 13 item 4 (the Product Owner's decision of 28 October on DISH I-21):
 // the release and real-key suites' after() ended every pgrep -f match of a
 // bundle's executable, recorded or not, so a bystander whose arguments merely

@@ -657,17 +657,33 @@ export async function checkRestore() {
   const first = compare();
   await sleep(recheckMs);
   const changed = [...new Set([...first, ...compare()])];
-  const running = launches.filter(stillRuns).map((l) => 'pid ' + l.pid + ' (' + l.what + ')');
+  // A copy whose program ps could not tell (ps itself failed: DM-259,
+  // QA-G-48) is named with the reason and counts as not as it was, since no
+  // one can say it has ended; before, the failure ended the run with exit
+  // code 1, no restore line, no summary and the lock left behind.
+  const running = [];
+  const unknown = [];
+  for (const l of launches) {
+    try {
+      if (stillRuns(l)) running.push('pid ' + l.pid + ' (' + l.what + ')');
+    } catch (err) {
+      unknown.push('pid ' + l.pid + ' (' + l.what + '; could not be checked: ps failed: ' + failureOf(err) + ')');
+    }
+  }
   const unlisted = [...listings].filter(([, v]) => typeof v === 'string').map(([dir, v]) => dir + ' (' + v + ')');
   const folders = listings.size - unlisted.length;
   listings.clear();
-  return { folders, changed, running, unlisted, recheckMs };
+  return { folders, changed, running, unknown, unlisted, recheckMs };
 }
+// The first line a failed program wrote to its error output, or the error's
+// own message, without a leading "ps: ".
+const failureOf = (err) => (String(err.stderr || '').trim().split('\n')[0] || String(err.message || err).split('\n')[0]).replace(/^ps: /, '');
 // What the run prints for the check: one line when everything is as it was.
-export function restoreCheckLines({ folders, changed, running, unlisted, recheckMs }) {
+export function restoreCheckLines({ folders, changed, running, unknown = [], unlisted, recheckMs }) {
   const lines = [];
   if (changed.length) lines.push('restore check: not as it was before the run: ' + changed.join('; '));
   if (running.length) lines.push('restore check: still running, though this run launched it: ' + running.join('; '));
+  if (unknown.length) lines.push('restore check: could not tell whether an app this run launched still runs: ' + unknown.join('; '));
   if (lines.length) return lines;
   const said = folders === 1 ? '1 folder as it was' : folders + ' folders as they were';
   return ['restore check: ' + said + ' (names, sizes and times; checked twice, ' + recheckMs / 1000 + ' s apart)' + (unlisted.length ? '; not listed when moved aside, so not checked: ' + unlisted.join('; ') : '')];
@@ -825,7 +841,7 @@ export async function run(tests, { name, needUnlocked = false, before = () => {}
     if (restored) {
       const check = await checkRestore();
       for (const line of restoreCheckLines(check)) { note(line); console.log(line); }
-      if (check.changed.length || check.running.length) restored = false;
+      if (check.changed.length || check.running.length || check.unknown.length) restored = false;
     }
     dropLock();
     return restored;
