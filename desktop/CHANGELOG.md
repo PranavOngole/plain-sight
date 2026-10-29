@@ -50,6 +50,15 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 16
+
+Wave G, round 16, 29 October 2026, Developer N (appstore-candidate).
+
+- Web 1.5.0 is merged into the candidate (origin/main 950c5f8: Super Stealth, BR-46, and DM-138's queued folder writes), as a merge commit with rerere off. Two conflicts were resolved. In onSave the folder write goes through main's queue, and markSaved still runs only after a write that succeeded. vercel.json holds the merged page's own inline script hash, written by `tools/vercel-headers.mjs`. The root package.json reads 1.5.0; the app does not read it (the bundle's version is tauri.conf.json's 1.0.0).
+- The two Super Stealth notes carry the app's own words in data-app: in the app Cmd + Shift + H opens the intro (Ctrl + Shift + H works too), Option+Shift+Tab reaches the ? button (Shift+Tab alone with Keyboard navigation on), and the setting is kept on this computer. A config case holds that no app menu item takes Shift+H (menu.rs's own keys and muda 0.20.0's predefined ones). native.mjs holds both notes' words, and that a queued folder Save marks the text saved when its own write lands, never after a failed write, while the queue goes on.
+- A real-key case for the launched suite (run by the Product Owner's watcher): the ? button at the default count and at a stored count of three, and Cmd+Shift+H opening the intro.
+- The real-key suite's clipboard save can no longer be skipped unseen (PO-R15-1). A fake-home case runs app.mjs itself with a stand-in driver and no test to run, and reads that before() saved the clipboard and after() put it back, after the copies' end and before the front app. The Product Owner's PO3-SAVE-SKIPPED, if (false) in front of the save, had passed every suite.
+
 ## Round 15
 
 Wave G, round 15, 29 October 2026, Developer N (appstore-candidate).
