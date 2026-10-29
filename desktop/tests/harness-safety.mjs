@@ -626,6 +626,14 @@ if (process.argv[2] === '--child') {
       await waitsFor(holder.pid);
       await holderAfter(holder);
     },
+    // QA-G-49 (round 13): QA-01's other names for the program that holds the
+    // pid (wave-g/qa/scripts/app/r12_pid_adv.mjs with r12_pid_child.mjs): a
+    // helper beside the copy's executable (its path starts with the copy's),
+    // a bundle named as the copy's with .bak after it, and the copy's whole
+    // path again under another folder (it ends with the copy's).
+    async 'pid-reused-helper'() { await heldBy(path.join(copyBundle, 'Contents', 'MacOS', 'plain-sight-helper')); },
+    async 'pid-reused-bak'() { await heldBy(path.join(copyBundle + '.bak', 'Contents', 'MacOS', 'plain-sight')); },
+    async 'pid-reused-nested'() { await heldBy(path.join(box, 'nested') + path.join(copyBundle, 'Contents', 'MacOS', 'plain-sight')); },
     // What ps can answer for a recorded copy's pid, given here: the copy's
     // executable; the flag E with only the short name, as ps showed a copy
     // ending just after a SIGTERM; the state Z; another program; no process.
@@ -849,6 +857,17 @@ if (process.argv[2] === '--child') {
     const exe = path.join(box, 'other', 'Plain Sight.app', 'Contents', 'MacOS', 'plain-sight');
     if (!existsSync(exe)) { mkdirSync(path.dirname(exe), { recursive: true }); fs.symlinkSync(process.execPath, exe); }
     return exe;
+  };
+  // QA-G-49: a recorded copy whose pid a program at `exe` (a link to node
+  // made there) holds.
+  const heldBy = async (exe) => {
+    mkdirSync(path.dirname(exe), { recursive: true });
+    if (!existsSync(exe)) fs.symlinkSync(process.execPath, exe);
+    const holder = await pidHolder(exe, 'stays', 'OTHER');
+    h.recordLaunch(holder.pid, copyBundle);
+    await stopCurrentFor({ pid: holder.pid });
+    await waitsFor(holder.pid);
+    await holderAfter(holder);
   };
   const pidHolder = async (program, mode = 'stays', label = program === process.execPath ? 'HOLDER' : 'COPY') => {
     holders += 1;
@@ -1880,6 +1899,28 @@ test('another Plain Sight holding a recorded copy\'s pid (a program at another b
     endHolders(r);
   }
 });
+// QA-G-49 (round 13): QA-01's breaks of the comparison, a copy taken to be
+// any program whose path ends in /plain-sight (its P1, the Product Owner's
+// PO4-EXE-SUFFIX), starts with the copy's executable (P2) or contains it
+// (P3), each need a holder whose program is not the copy's but shares part
+// of its path; the case above is P1's first.
+for (const [id, what] of [
+  ['pid-reused-helper', 'a helper beside the copy\'s executable (.../Contents/MacOS/plain-sight-helper, a path that starts with the copy\'s)'],
+  ['pid-reused-bak', 'a bundle named as the copy\'s with .bak after it (.../Plain Sight test copy.app.bak/Contents/MacOS/plain-sight)'],
+  ['pid-reused-nested', 'the copy\'s whole executable path again under another folder (a path that ends with the copy\'s)']
+]) {
+  test('a recorded copy\'s pid held by ' + what + ' is neither waited on nor signalled, and run.log says the pid now runs another program (QA-G-49)', async () => {
+    const r = await runCase(id, undefined, { watchdog: 40000 });
+    try {
+      ended(r, 0);
+      const [holder] = holdersOf(r);
+      assert.ok(holder && holder.kind === 'OTHER', 'the holder started; the child\'s output:\n' + r.out);
+      neitherWaitedOnNorSignalled(r, id, holder);
+    } finally {
+      endHolders(r);
+    }
+  });
+}
 // Round 13 item 2 (Developer N's round 12 observation): pgrep -f, which
 // finds the copies, matches a path anywhere in the arguments, while the rule
 // compared ps's name with the recorded path exactly, so a copy recorded
