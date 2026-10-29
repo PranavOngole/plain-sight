@@ -506,6 +506,13 @@ if (process.argv[2] === '--child') {
       personFile(dirs[0], 'notes.txt', 'THE PERSON\'S NOTES');
       await runSuite([{ name: 'a test during which a signal comes', fn: async () => { lateWriter(path.join(dirs[0], 'notes.txt'), 'change'); testData(dirs[0]); console.log('IN TEST'); await h.sleep(5000); } }]);
     },
+    // DISH-G-93 (round 12): the same late change, with the signal while the
+    // run's own cleanup waits in after(), so the run ends by run()'s own line
+    // for a signal that came during its cleanup.
+    async 'run-late-change-in-after'() {
+      personFile(dirs[0], 'notes.txt', 'THE PERSON\'S NOTES');
+      await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[0], 'notes.txt'), 'change'); testData(dirs[0]); } }], { after: slowAfter });
+    },
     // An app the run launched (spawnApp records it) that nothing stops: the
     // suite gives no after().
     async 'run-restore-live-app'() {
@@ -1557,6 +1564,24 @@ test('the check runs on a signal\'s cleanup too: a late change after a Ctrl+C du
   ended(r, 6);
   assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(path.join(r.dirs[0], 'notes.txt')) + ' \\(changed\\)', 'm'), 'the path is named; the child\'s output:\n' + r.out);
   assert.deepEqual(r.backups, [], 'no backup is left');
+  assert.equal(r.lock, false, 'the lock is released');
+});
+// DISH-G-93 (round 12): a signal that comes while the run's own cleanup waits
+// in after() is reported and waits for that cleanup, and the run then ends by
+// run()'s own line, `if (signalled) process.exit(restored ? 130 : 6)`. No case
+// sent a signal there with the data not back as it was, so DISH's H9 (that
+// line made exit 130) passed every case: a late change to the person's data
+// would have ended the run with 130, the signal's code, and read as clean.
+test('a SIGINT while the run\'s own cleanup waits in after(), with a file of the person\'s changed 1 s after the restore, ends the run with 6, not 130: the changed path named in the restore check\'s line, no clean line (DISH-G-93)', async () => {
+  let sent = false;
+  const r = await runCase('run-late-change-in-after', (out, child) => { if (!sent && out.includes('IN AFTER')) { sent = true; child.kill('SIGINT'); } }, { recheck: null });
+  assert.ok(sent, 'the signal was sent while after() waited; the child\'s output:\n' + r.out);
+  ended(r, 6);
+  assert.match(r.out, /^release: SIGINT came while the run puts the app's data back; /m, 'the signal is reported');
+  assert.match(r.out, /^AFTER DONE$/m, 'the cleanup went on to its end');
+  assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(path.join(r.dirs[0], 'notes.txt')) + ' \\(changed\\)', 'm'), 'the path is named; the child\'s output:\n' + r.out);
+  assert.doesNotMatch(r.out, /as they were \(names/, 'no clean line');
+  assert.deepEqual(r.backups, [], 'the data was put back, then changed: no backup is left');
   assert.equal(r.lock, false, 'the lock is released');
 });
 test('an app the run launched and nothing stopped is named by its pid after the restore: exit code 6 (DM-249)', async () => {
