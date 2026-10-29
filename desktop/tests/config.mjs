@@ -676,6 +676,20 @@ test('no app menu item takes Shift+H, so Cmd+Shift+H and Ctrl+Shift+H reach the 
   const keys = [...own, ...used.map((item) => KEYS[item]).filter(Boolean)];
   assert.deepEqual(keys.filter((k) => /\bShift\b/.test(k) && /\+H$/.test(k)), [], 'no item takes Shift+H; the keys: ' + keys.join(', '));
   assert.deepEqual(keys.filter((k) => /\+H$/.test(k)).sort(), ['Cmd+H', 'Cmd+Option+H'], 'the two items with H: Hide and Hide Others');
+  // PO-R16-1 (round 17): an item made another way (MenuItemBuilder, a
+  // CheckMenuItem, a later set_accelerator) is held too. Every string literal
+  // in menu.rs that reads as an accelerator is one of the three above; every
+  // .accelerator( or set_accelerator( call takes such a literal, or None; and
+  // no accelerator is built in code (Accelerator::new, Modifiers, Code),
+  // which this test could not read.
+  const ACCEL = /^((CmdOrCtrl|CommandOrControl|CmdOrControl|Cmd|Command|Super|Meta|Ctrl|Control|Alt|Option|Shift)\+)+[A-Za-z0-9]+$/i;
+  const accelerators = [...menu.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1].replace(/\s+/g, '')).filter((s) => ACCEL.test(s));
+  assert.deepEqual(accelerators.filter((s) => /(^|\+)shift\+/i.test(s) && /\+(key)?h$/i.test(s)), [], 'no string in menu.rs reads as a Shift+H accelerator; the accelerator strings: ' + accelerators.join(', '));
+  assert.deepEqual([...accelerators].sort(), ['CmdOrCtrl+O', 'CmdOrCtrl+Q', 'CmdOrCtrl+S'], 'the only accelerator strings in menu.rs are the three own ones');
+  for (const m of menu.matchAll(/(?:\.accelerator|set_accelerator)\s*\(\s*([^)]*)\)/g)) {
+    assert.match(m[1].trim(), /^((Some\(\s*)?"[^"]*"|None\b)/, 'an accelerator given in a call is a string this test reads: ' + m[0]);
+  }
+  assert.equal(/Accelerator::new|Modifiers::|Code::Key/.test(menu), false, 'no accelerator is built in code, which this test could not read');
 });
 
 // PO-R14-1 (round 15): the real-key suite writes markers and paths to the
