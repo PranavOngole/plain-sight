@@ -603,6 +603,15 @@ if (process.argv[2] === '--child') {
       await waitsFor(holder.pid);
       await holderAfter(holder);
     },
+    // PO-R12-1 (round 13): the same, with the pid held by another Plain Sight,
+    // a program at another bundle's .../Contents/MacOS/plain-sight.
+    async 'pid-reused-other-copy'() {
+      const holder = await pidHolder(otherCopyExecutable(), 'stays', 'OTHER');
+      h.recordLaunch(holder.pid, copyBundle);
+      await stopCurrentFor({ pid: holder.pid });
+      await waitsFor(holder.pid);
+      await holderAfter(holder);
+    },
     // What ps can answer for a recorded copy's pid, given here: the copy's
     // executable; the flag E with only the short name, as ps showed a copy
     // ending just after a SIGTERM; the state Z; another program; no process.
@@ -819,11 +828,19 @@ if (process.argv[2] === '--child') {
     if (!existsSync(exe)) { mkdirSync(path.dirname(exe), { recursive: true }); fs.symlinkSync(process.execPath, exe); }
     return exe;
   };
-  const pidHolder = async (program, mode = 'stays') => {
+  // PO-R12-1 (round 13): another Plain Sight, such as the person's own app
+  // in /Applications or another test copy, is a program at another bundle's
+  // .../Contents/MacOS/plain-sight; here a link to node at such a path.
+  const otherCopyExecutable = () => {
+    const exe = path.join(box, 'other', 'Plain Sight.app', 'Contents', 'MacOS', 'plain-sight');
+    if (!existsSync(exe)) { mkdirSync(path.dirname(exe), { recursive: true }); fs.symlinkSync(process.execPath, exe); }
+    return exe;
+  };
+  const pidHolder = async (program, mode = 'stays', label = program === process.execPath ? 'HOLDER' : 'COPY') => {
     holders += 1;
     const file = path.join(box, 'holder-' + holders + '-signals');
     const p = spawn(program, [process.env[HOLDER_ENV], file, mode], { stdio: 'ignore' });
-    console.log((program === process.execPath ? 'HOLDER ' : 'COPY ') + p.pid + ' ' + file);
+    console.log(label + ' ' + p.pid + ' ' + file);
     await h.until(() => existsSync(file + '.ready'), 'the pid holder to take signals', 10000);
     return { p, pid: p.pid, file };
   };
@@ -1794,7 +1811,7 @@ test('an app the run launched and nothing stopped is named by its pid after the 
 // program had taken read as a copy still running, a false exit 6 (QA-01's
 // observation 9). The pid holder stands for the program macOS gave the pid
 // to; each case ends it by the file it records signals in.
-const holdersOf = (r) => [...r.out.matchAll(/^(HOLDER|COPY) (\d+) (\S+)$/gm)].map((m) => ({ kind: m[1], pid: Number(m[2]), file: m[3] }));
+const holdersOf = (r) => [...r.out.matchAll(/^(HOLDER|COPY|OTHER) (\d+) (\S+)$/gm)].map((m) => ({ kind: m[1], pid: Number(m[2]), file: m[3] }));
 const endHolders = (r) => { for (const { file } of holdersOf(r)) { try { childProcess.execFileSync('pkill', ['-9', '-f', file]); } catch { /* it has ended */ } } };
 const stopCurrentLine = (r) => (r.out.match(/^STOP CURRENT (.*) after (\d+) ms; current\(\) asked (\d+) time\(s\)$/m) || []).slice(1);
 const otherProgramNote = (pid) => ' pid ' + pid + ' now runs another program: not stopped';
@@ -1829,6 +1846,22 @@ test('the same for a copy recorded through LaunchServices, as app.mjs and releas
     const [holder] = holdersOf(r);
     assert.ok(holder && holder.kind === 'HOLDER', 'the pid holder started; the child\'s output:\n' + r.out);
     neitherWaitedOnNorSignalled(r, 'pid-reused-copy', holder);
+  } finally {
+    endHolders(r);
+  }
+});
+// PO-R12-1 (round 13): the Product Owner's PO4-EXE-SUFFIX, a copy taken to
+// be any program whose path ends in /plain-sight, passed every case: no pid
+// holder was another Plain Sight, such as the person's own app in
+// /Applications or another test copy, which must never be taken for the
+// run's copy and signalled.
+test('another Plain Sight holding a recorded copy\'s pid (a program at another bundle\'s .../Contents/MacOS/plain-sight) is neither waited on nor signalled: stopCurrentApp returns within 2 s, the holder gets no signal and still runs, and run.log says the pid now runs another program (PO-R12-1)', async () => {
+  const r = await runCase('pid-reused-other-copy', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 0);
+    const [holder] = holdersOf(r);
+    assert.ok(holder && holder.kind === 'OTHER', 'the other Plain Sight started; the child\'s output:\n' + r.out);
+    neitherWaitedOnNorSignalled(r, 'pid-reused-other-copy', holder);
   } finally {
     endHolders(r);
   }
