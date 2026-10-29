@@ -478,6 +478,53 @@ test('a window blur ends a peek: after the About panel has had the focus, Cmd+C 
   await cleanPage();
 });
 
+// Super Stealth (web 1.5.0, BR-46) in the app (round 16): the ? button opens
+// the intro after the set number of quick clicks, the page's default until a
+// count is stored, and Cmd+Shift+H opens it whatever the count; no app menu
+// item takes Shift+H (config.mjs), so the page gets the chord. The clicks
+// are Accessibility presses about 150 ms apart, inside the page's 600 ms
+// window. The count is set as a person sets it, by typing its figure into the
+// focused setting, and Start keeps it. The folder tests that follow open a
+// fresh copy, which starts with nothing stored.
+const HELP_CLICKS_DEFAULT = Number(readFileSync(path.join(DESKTOP, '..', 'index.html'), 'utf8').match(/const HELP_CLICKS_DEFAULT = (\d+);/)[1]);
+const introShown = () => drive('text', app.pid, 'intro').present === true;
+const helpSetting = () => (drive('controls', app.pid).controls.find((c) => c.id === 'help-clicks') || {}).value;
+async function clickHelp(times) {
+  for (let i = 0; i < times; i++) {
+    drive('press', app.pid, 'btn-help');
+    await sleep(150);
+  }
+}
+test('Super Stealth in the app: the ? button opens the intro after the default count of quick clicks, then only after a stored count, and Cmd+Shift+H opens it whatever the count', async () => {
+  await cleanPage();
+  await reachPage();
+  assert.equal(introShown(), false, 'the intro is closed');
+  if (HELP_CLICKS_DEFAULT > 1) {
+    await clickHelp(HELP_CLICKS_DEFAULT - 1);
+    await sleep(1000);
+    assert.equal(introShown(), false, 'one click short of the default shows nothing');
+  }
+  await clickHelp(HELP_CLICKS_DEFAULT);
+  await until(introShown, 'the intro after ' + HELP_CLICKS_DEFAULT + ' quick click(s), the default', 3000);
+  note('the setting with nothing stored: ' + JSON.stringify(helpSetting()));
+  await focusControl('help-clicks');
+  await keys.type('3');
+  await until(() => /^3 /.test(String(helpSetting())), 'the setting to show 3 quick clicks', 3000);
+  await pressControl('btn-start');
+  await until(() => !introShown(), 'the intro to close after Start', 3000);
+  await clickHelp(1);
+  await sleep(1000);
+  assert.equal(introShown(), false, 'with 3 stored, one click on ? shows nothing');
+  await clickHelp(3);
+  await until(introShown, 'the intro after 3 quick clicks', 3000);
+  await pressControl('btn-start');
+  await until(() => !introShown(), 'the intro to close after Start', 3000);
+  await keys.press('cmd+shift+h');
+  await until(introShown, 'the intro after Cmd+Shift+H', 3000);
+  await pressControl('btn-start');
+  await cleanPage();
+});
+
 // Wave B: the real system folder picker, from the intro's folder button. The
 // folder the test chooses in the panel is its own, under the evidence
 // directory, made before the panel opens and removed after the file it holds
