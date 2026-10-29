@@ -47,6 +47,9 @@ const LATE = 'PLAIN_SIGHT_HARNESS_TEST_LATE';
 // The restore check's second look in a case that does not test the check:
 // 100 ms instead of 3 s, set through the harness's test-only setter.
 const RECHECK = 'PLAIN_SIGHT_HARNESS_TEST_RECHECK_MS';
+// The pid holder of the reused pid's cases (round 12), written by the parent
+// into its temporary folder.
+const HOLDER_ENV = 'PLAIN_SIGHT_HARNESS_TEST_HOLDER';
 // The harness compiles its driver at import unless the file for this source
 // version exists. No case here runs the driver, so an empty file stands in
 // for it, in the child's own temporary folder.
@@ -513,6 +516,56 @@ if (process.argv[2] === '--child') {
         console.log('LEFT RUNNING ' + child.pid);
       } }]);
     },
+    // Round 12, the reused pid (Developer N's round 11 observation): macOS
+    // hands an ended app's pid to another program. The app's child has ended
+    // here (Node has seen it end) while another live program holds its pid:
+    // the parent's pid holder, which stands for the program macOS gave the
+    // pid to. The suite's end (stopCurrentApp) and its waits (alive, until)
+    // must neither wait on nor signal it.
+    async 'pid-reused-child'() {
+      const gone = h.spawnApp('/usr/bin/true');
+      if (gone.exitCode === null && gone.signalCode === null) await new Promise((resolve) => gone.once('exit', resolve));
+      const holder = await pidHolder(process.execPath);
+      await stopCurrentFor({ child: gone, pid: holder.pid });
+      h.recordLaunch(holder.pid, '/usr/bin/true', gone);   // the launch's record, its pid now the holder's
+      await waitsFor(holder.pid);
+      await holderAfter(holder);
+    },
+    // The same for a copy recorded through LaunchServices, as app.mjs and
+    // release.mjs record each copy (by its bundle): the pid holder runs node,
+    // not the copy's executable.
+    async 'pid-reused-copy'() {
+      const holder = await pidHolder(process.execPath);
+      h.recordLaunch(holder.pid, copyBundle);
+      await stopCurrentFor({ pid: holder.pid });
+      await waitsFor(holder.pid);
+      await holderAfter(holder);
+    },
+    // A copy that still runs the copy's executable, recorded the same way, is
+    // stopped: the SIGTERM reaches it by its pid.
+    async 'copy-stopped'() {
+      const copy = await pidHolder(copyExecutable(), 'quits');
+      h.recordLaunch(copy.pid, copyBundle);
+      await stopCurrentFor({ pid: copy.pid });
+      await holderAfter(copy);
+    },
+    // The restore check (QA-01's observation 9): a recorded copy whose pid
+    // another program holds at the run's end is no app still running; a copy
+    // still running is one.
+    async 'run-copy-pid-reused'() {
+      await runSuite([{ name: 'a test that records a copy whose pid another program holds', fn: async () => {
+        testData(dirs[0]);
+        const holder = await pidHolder(process.execPath);
+        h.recordLaunch(holder.pid, copyBundle);
+      } }]);
+    },
+    async 'run-copy-left-running'() {
+      await runSuite([{ name: 'a test that leaves a copy running', fn: async () => {
+        testData(dirs[0]);
+        const copy = await pidHolder(copyExecutable(), 'quits');
+        h.recordLaunch(copy.pid, copyBundle);
+      } }]);
+    },
     // A file of the person's that no one may read (mode 000).
     async 'run-restore-unreadable'() {
       personFile(dirs[1], 'locked.txt', 'NOT FOR THE HARNESS', 0o000);
@@ -679,6 +732,49 @@ if (process.argv[2] === '--child') {
   const lateWriter = (target, action, folder = path.dirname(target)) => {
     spawn(process.execPath, [process.env[LATE], marker(folder), real(home, folder), target, action], { stdio: 'ignore', detached: true }).unref();
   };
+  // Round 12, the reused pid: a pid holder (the parent's script) started
+  // under the program given, ready once it can take signals; it prints its
+  // pid and the file it records signals in, by which the parent ends it. A
+  // copy's executable is <bundle>/Contents/MacOS/plain-sight, as
+  // LaunchServices starts it; here a link to node, so ps names the process
+  // by that path. stopCurrentFor races stopCurrentApp against 6 s, and its
+  // current() answers at most five times, so a stop that loops cannot hold
+  // the case; waitsFor is the suites' check and wait on an app's pid.
+  let holders = 0;
+  const copyBundle = path.join(box, 'copy', 'Plain Sight test copy.app');
+  const copyExecutable = () => {
+    const exe = path.join(copyBundle, 'Contents', 'MacOS', 'plain-sight');
+    if (!existsSync(exe)) { mkdirSync(path.dirname(exe), { recursive: true }); fs.symlinkSync(process.execPath, exe); }
+    return exe;
+  };
+  const pidHolder = async (program, mode = 'stays') => {
+    holders += 1;
+    const file = path.join(box, 'holder-' + holders + '-signals');
+    const p = spawn(program, [process.env[HOLDER_ENV], file, mode], { stdio: 'ignore' });
+    console.log((program === process.execPath ? 'HOLDER ' : 'COPY ') + p.pid + ' ' + file);
+    await h.until(() => existsSync(file + '.ready'), 'the pid holder to take signals', 10000);
+    return { p, pid: p.pid, file };
+  };
+  const stopCurrentFor = async (app) => {
+    let asked = 0;
+    const t0 = Date.now();
+    const how = await Promise.race([
+      h.stopCurrentApp(() => (asked++ < 5 ? app : null)).then(() => 'returned', (err) => 'threw ' + err.message),
+      h.sleep(6000).then(() => 'still waiting')
+    ]);
+    console.log('STOP CURRENT ' + how + ' after ' + (Date.now() - t0) + ' ms; current() asked ' + asked + ' time(s)');
+  };
+  const waitsFor = async (pid) => {
+    console.log('ALIVE ' + h.alive(pid));
+    const t0 = Date.now();
+    const how = await h.until(() => !h.alive(pid), 'the app to end', 3000).then(() => 'returned', (err) => 'threw ' + err.message);
+    console.log('WAIT ' + how + ' after ' + (Date.now() - t0) + ' ms');
+  };
+  const holderAfter = async (holder) => {
+    await h.sleep(300);
+    console.log('SIGNALS ' + ((existsSync(holder.file) ? readFileSync(holder.file, 'utf8').trim() : '') || 'none'));
+    console.log('STILL RUNS ' + (holder.p.exitCode === null && holder.p.signalCode === null));
+  };
   // QA-G-44 (N6): QA-01's L5 (r9_launch_adv.mjs with r9_launch_child.mjs,
   // case unkillable): an app that ignores SIGTERM, or freezes itself on it,
   // so only stopApp's SIGKILL after its 8 s wait ends it. The test tries to
@@ -812,6 +908,21 @@ writeFileSync(LATE_WRITER, [
   "}, 20);"
 ].join('\n') + '\n');
 
+// The pid holder of the reused pid's cases (round 12): a program that holds a
+// pid, standing for the one macOS gives an ended app's pid to. It records
+// each SIGTERM, SIGINT, SIGHUP and SIGQUIT it gets in the file it is given
+// (ending on none of them, so each stays on record), says it can take them
+// in that file's .ready, and ends by itself after 30 s; with "quits" it ends
+// on its first SIGTERM, as a copy of the app does.
+const HOLDER = path.join(ROOT, 'pid-holder.mjs');
+writeFileSync(HOLDER, [
+  "import { appendFileSync, writeFileSync } from 'node:fs';",
+  "const [file, mode] = process.argv.slice(2);",
+  "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT']) process.on(s, () => { appendFileSync(file, s + ' '); if (s === 'SIGTERM' && mode === 'quits') process.exit(0); });",
+  "writeFileSync(file + '.ready', String(process.pid));",
+  "setTimeout(() => process.exit(0), 30000);"
+].join('\n') + '\n');
+
 // A fake bundle under a test identifier, outside the fake home, for the
 // harness to read as PLAIN_SIGHT_APP (only its Info.plist is read).
 function fakeCopy(box, identifier) {
@@ -830,7 +941,7 @@ function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100,
   const tmp = path.join(box, 'tmp');
   const evidence = path.join(box, 'evidence');
   for (const d of [home, tmp, evidence]) mkdirSync(d, { recursive: true });
-  const env = { ...process.env, HOME: home, TMPDIR: tmp, PLAIN_SIGHT_EVIDENCE: evidence, [BOX]: box, [STANDIN]: STANDIN_EXE, [LATE]: LATE_WRITER };
+  const env = { ...process.env, HOME: home, TMPDIR: tmp, PLAIN_SIGHT_EVIDENCE: evidence, [BOX]: box, [STANDIN]: STANDIN_EXE, [LATE]: LATE_WRITER, [HOLDER_ENV]: HOLDER };
   // Nothing of the shell that runs npm test reaches the harness's settings.
   for (const name of ['PLAIN_SIGHT_E2E_DOWNLOADS', 'PLAIN_SIGHT_APP', 'PLAIN_SIGHT_IDLE_MIN', 'PLAIN_SIGHT_ONLY', 'PLAIN_SIGHT_ALLOW_REAL_ID']) delete env[name];
   if (app) env.PLAIN_SIGHT_APP = fakeCopy(box, app);
@@ -1458,6 +1569,106 @@ test('an app the run launched and nothing stopped is named by its pid after the 
   assert.match(r.out, /^Exit code: 6$/m);
   clean(r);
 });
+
+// Round 12, the reused pid (Developer N's round 11 observation, a data-safety
+// path by the Product Owner's rating): stopCurrentApp waited while
+// process.kill(pid, 0) answered, and stopApp signalled through child.kill,
+// which sends nothing once Node has seen the child end; macOS hands pids out
+// again, out of order, so an app whose pid another program had taken held the
+// cleanup, with the person's data aside and the lock held, for as long as
+// that program lived (19,772 ms in round 11's check). A copy recorded through
+// LaunchServices was judged by its pid alone as well, so a pid another
+// program had taken read as a copy still running, a false exit 6 (QA-01's
+// observation 9). The pid holder stands for the program macOS gave the pid
+// to; each case ends it by the file it records signals in.
+const holdersOf = (r) => [...r.out.matchAll(/^(HOLDER|COPY) (\d+) (\S+)$/gm)].map((m) => ({ kind: m[1], pid: Number(m[2]), file: m[3] }));
+const endHolders = (r) => { for (const { file } of holdersOf(r)) { try { childProcess.execFileSync('pkill', ['-9', '-f', file]); } catch { /* it has ended */ } } };
+const stopCurrentLine = (r) => (r.out.match(/^STOP CURRENT (.*) after (\d+) ms; current\(\) asked (\d+) time\(s\)$/m) || []).slice(1);
+const otherProgramNote = (pid) => ' pid ' + pid + ' now runs another program: not stopped';
+const neitherWaitedOnNorSignalled = (r, tag, holder) => {
+  const [how, ms] = stopCurrentLine(r);
+  assert.equal(how, 'returned', 'stopCurrentApp returned; the child\'s output:\n' + r.out);
+  assert.ok(Number(ms) < 2000, 'within 2 s: ' + ms + ' ms');
+  const log = runLog(tag);
+  assert.ok(log.includes(otherProgramNote(holder.pid) + '\n'), 'run.log says the pid now runs another program; run.log:\n' + log);
+  assert.ok(!log.includes(' stopping pid ' + holder.pid + '\n'), 'no stop was tried on that pid; run.log:\n' + log);
+  assert.match(r.out, /^ALIVE false$/m, 'alive() does not take the other program for the app');
+  const wait = r.out.match(/^WAIT (\S+) after (\d+) ms$/m) || [];
+  assert.ok(wait[1] === 'returned' && Number(wait[2]) < 1000, 'a wait for the app to end ends at once: ' + wait[0]);
+  assert.match(r.out, /^SIGNALS none$/m, 'the other program got no signal');
+  assert.match(r.out, /^STILL RUNS true$/m, 'and still runs');
+};
+test('an app whose child has ended while another program holds its pid is neither waited on nor signalled: stopCurrentApp returns within 2 s, a wait for the app ends at once, the other program gets no signal and still runs, and run.log says the pid now runs another program (round 12, the reused pid)', async () => {
+  const r = await runCase('pid-reused-child', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 0);
+    const [holder] = holdersOf(r);
+    assert.ok(holder && holder.kind === 'HOLDER', 'the pid holder started; the child\'s output:\n' + r.out);
+    neitherWaitedOnNorSignalled(r, 'pid-reused-child', holder);
+  } finally {
+    endHolders(r);
+  }
+});
+test('the same for a copy recorded through LaunchServices, as app.mjs and release.mjs record one: a pid that now runs another program than the copy\'s executable is neither waited on nor signalled (round 12, the reused pid)', async () => {
+  const r = await runCase('pid-reused-copy', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 0);
+    const [holder] = holdersOf(r);
+    assert.ok(holder && holder.kind === 'HOLDER', 'the pid holder started; the child\'s output:\n' + r.out);
+    neitherWaitedOnNorSignalled(r, 'pid-reused-copy', holder);
+  } finally {
+    endHolders(r);
+  }
+});
+test('a copy recorded through LaunchServices that still runs the copy\'s executable is stopped by its pid: stopCurrentApp sends it SIGTERM, it ends, and stopCurrentApp returns (round 12, the reused pid; the rule\'s other side)', async () => {
+  const r = await runCase('copy-stopped', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 0);
+    const [copy] = holdersOf(r);
+    assert.ok(copy && copy.kind === 'COPY', 'the copy started; the child\'s output:\n' + r.out);
+    const [how, ms] = stopCurrentLine(r);
+    assert.equal(how, 'returned', 'stopCurrentApp returned; the child\'s output:\n' + r.out);
+    assert.ok(Number(ms) < 3000, 'within 3 s: ' + ms + ' ms');
+    assert.match(r.out, /^SIGNALS SIGTERM$/m, 'the copy got one SIGTERM');
+    assert.match(r.out, /^STILL RUNS false$/m, 'and ended');
+    const log = runLog('copy-stopped');
+    assert.ok(log.includes(' stopping pid ' + copy.pid + '\n'), 'stopApp noted the stop; run.log:\n' + log);
+    assert.ok(!log.includes(otherProgramNote(copy.pid)), 'the copy was never taken for another program; run.log:\n' + log);
+  } finally {
+    endHolders(r);
+  }
+});
+const checkedLine = /^restore check: \d+ folders as they were \(names, sizes and times; checked twice, [\d.]+ s apart\)$/m;
+test('the restore check does not name a recorded copy whose pid another program holds at the run\'s end as still running: exit code 0, the clean line, and run.log says the pid now runs another program (round 12; QA-01\'s observation 9)', async () => {
+  const r = await runCase('run-copy-pid-reused', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 0);
+    const [holder] = holdersOf(r);
+    assert.ok(holder, 'the pid holder started; the child\'s output:\n' + r.out);
+    assert.match(r.out, checkedLine, 'the clean line; the child\'s output:\n' + r.out);
+    assert.doesNotMatch(r.out, /still running, though this run launched it/, 'no app named as still running');
+    assert.match(r.out, /^Exit code: 0$/m);
+    assert.ok(runLog('run-copy-pid-reused').includes(otherProgramNote(holder.pid) + '\n'), 'run.log says the pid now runs another program');
+    assert.ok(isAlive(holder.pid), 'the other program still runs');
+    clean(r);
+  } finally {
+    endHolders(r);
+  }
+});
+test('a recorded copy that still runs the copy\'s executable at the run\'s end is named by its pid: exit code 6 (round 12; the rule\'s other side)', async () => {
+  const r = await runCase('run-copy-left-running', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 6);
+    const [copy] = holdersOf(r);
+    assert.ok(copy && copy.kind === 'COPY', 'the copy started; the child\'s output:\n' + r.out);
+    const bundle = path.join(ROOT, 'run-copy-left-running', 'copy', 'Plain Sight test copy.app');
+    assert.ok(r.out.split('\n').includes('restore check: still running, though this run launched it: pid ' + copy.pid + ' (' + bundle + ')'), 'it is named; the child\'s output:\n' + r.out);
+    assert.match(r.out, /^Exit code: 6$/m);
+    clean(r);
+  } finally {
+    endHolders(r);
+  }
+});
 test('the listing never opens a file: a file of the person\'s that no one may read (mode 000) leaves the check clean, and listData reads names, kinds, sizes and times only (DM-249)', async () => {
   const r = await runCase('run-restore-unreadable', undefined, { recheck: null });
   ended(r, 0);
@@ -1679,6 +1890,7 @@ try {
   // temporary folder, which nothing else runs (DM-249).
   try { childProcess.execFileSync('pkill', ['-9', '-f', STANDIN_APP]); } catch { /* none left */ }
   try { childProcess.execFileSync('pkill', ['-9', '-f', LATE_WRITER]); } catch { /* none left */ }
+  try { childProcess.execFileSync('pkill', ['-9', '-f', HOLDER]); } catch { /* none left */ }
   rmSync(ROOT, { recursive: true, force: true });
 }
 if (existsSync(ROOT)) {

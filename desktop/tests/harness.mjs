@@ -57,7 +57,10 @@
 // time, never a file's contents) and again after the restore, at once and
 // 3 s later, and no app the run launched may still be running. stopApp
 // notes "stopping pid <n>" in run.log before it ends an app, so a driver can
-// send a signal while a test waits there.
+// send a signal while a test waits there. An app the run launched counts as
+// running by its own record only, never by its pid alone, since macOS hands
+// an ended app's pid to another program: a pid that now runs another program
+// is never signalled or waited on, and run.log says so (round 12).
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, webcrypto } from 'node:crypto';
@@ -218,8 +221,79 @@ export async function firstWindow(pid, want, what, ms) {
   }
 }
 
+// Every app process the run launched: spawnApp records its child, and the
+// suites that open a bundle through LaunchServices (app.mjs, release.mjs)
+// record each copy, with its bundle, as they find its pid. macOS hands pids
+// out again, and out of order, so once an app has ended its pid can belong to
+// another program (round 11: an app's pid held by a live process of another
+// program held stopCurrentApp for 19,772 ms). An app the run launched
+// therefore counts as running by its own record only, never by its pid (the
+// restore check's rule since round 10, everywhere since round 12):
+// - a child of the run (spawnApp) runs until Node has seen it end, its
+//   exitCode and signalCode. Node reaps its own children, so until then the
+//   pid is still the child's, and child.kill sends nothing once Node has seen
+//   the end;
+// - a copy opened through LaunchServices is no child of the run, so its pid
+//   counts as that copy only while the process with that pid runs the copy's
+//   executable, <bundle>/Contents/MacOS/plain-sight, the path the suites'
+//   pgrep -f finds their copies by. It is read with ps (programOf), which is
+//   part of macOS: no new dependency and nothing to build (the driver would
+//   need a new command and a rebuild), and it reads the same argument list
+//   pgrep -f matches.
+// A pid that now runs another program is never signalled and never waited
+// on, and run.log says so once: "pid <n> now runs another program: not
+// stopped".
+const launches = [];
+export function recordLaunch(pid, what, child = null) {
+  launches.push({ pid, what, child, exe: child ? null : path.resolve(what, 'Contents', 'MacOS', 'plain-sight') });
+}
+// The program the process with this pid runs, as ps names it (the first word
+// of its argument list: for an app LaunchServices started, the full path of
+// its executable), or null when no process runs with that pid: none has it,
+// or the one that has it has ended and waits to be reaped (state Z, which ps
+// shows as <defunct>).
+export function programOf(pid) {
+  let out;
+  try {
+    out = execFileSync('ps', ['-ww', '-p', String(pid), '-o', 'stat=', '-o', 'comm='], { encoding: 'utf8' });
+  } catch (err) {
+    if (err.status === 1 && !String(err.stdout || '').trim()) return null;
+    throw err;
+  }
+  const [, stat, program] = out.replace(/\n+$/, '').match(/^\s*(\S+)\s+(.*)$/s) || [];
+  return stat && !stat.startsWith('Z') ? program : null;
+}
+const anyProcess = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// Where a launch stands now: 'running', 'ended', or 'other' when its pid
+// belongs to another program.
+function launchState(launch) {
+  if (launch.child) return launch.child.exitCode === null && launch.child.signalCode === null ? 'running' : anyProcess(launch.pid) ? 'other' : 'ended';
+  const program = programOf(launch.pid);
+  return program === null ? 'ended' : program === launch.exe ? 'running' : 'other';
+}
+const otherProgram = new Set();
+function stillRuns(launch) {
+  const state = launchState(launch);
+  if (state === 'other' && !otherProgram.has(launch.pid)) {
+    otherProgram.add(launch.pid);
+    note('pid ' + launch.pid + ' now runs another program: not stopped');
+  }
+  return state === 'running';
+}
+// The launch a suite's app stands for: e2e.mjs's { child, pid } itself, or for
+// a copy's { pid } the latest launch recorded with that pid. A pid the run
+// never recorded has no executable to compare, so whatever runs there is
+// another program.
+const launchOf = (app) => (app.child ? app : launches.findLast((l) => l.pid === app.pid && !l.child) || { pid: app.pid, child: null, exe: null });
+
+// Whether a process is alive. A pid the run recorded as a launch answers by
+// the latest such launch (stillRuns), so the suites' waits for an app to end
+// and their checks that it still runs (alive(app.pid) in e2e.mjs, app.mjs and
+// release.mjs) never take another program for it. Any other pid, the lock's
+// holder say, by process.kill(pid, 0).
 export function alive(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  const launch = launches.findLast((l) => l.pid === pid);
+  return launch ? stillRuns(launch) : anyProcess(pid);
 }
 
 // Starts an executable with its output in the evidence folder; never once the
@@ -235,29 +309,32 @@ export function spawnApp(exe, env = {}) {
   return child;
 }
 
+// Ends an app the run launched: SIGTERM, then SIGKILL after 8 s. The note
+// "stopping pid <n>" comes first, before the app is looked at, so a driver can
+// send a signal while a test waits here (DM-249, DM-255); only an app that
+// still runs by its own record is signalled or waited on.
 export async function stopApp(app) {
   if (app) note('stopping pid ' + app.pid);
-  if (!app || !alive(app.pid)) return;
-  app.child.kill('SIGTERM');
-  await until(() => !alive(app.pid), 'the app to stop', 8000).catch(() => app.child.kill('SIGKILL'));
+  if (!app || !stillRuns(launchOf(app))) return;
+  signalApp(app, 'SIGTERM');
+  await until(() => !stillRuns(launchOf(app)), 'the app to stop', 8000).catch(() => signalApp(app, 'SIGKILL'));
+}
+// A child through Node, which sends nothing to a child it has seen end; a copy
+// opened through LaunchServices by its pid, only right after ps has shown that
+// the pid still runs the copy's executable (a pid handed out again between
+// that look and the signal is the gap left, microseconds wide).
+function signalApp(app, signal) {
+  if (app.child) { app.child.kill(signal); return; }
+  if (!stillRuns(launchOf(app))) return;
+  try { process.kill(app.pid, signal); } catch (err) { if (err.code !== 'ESRCH') throw err; }
 }
 // The end of a suite whose app the run spawns (e2e.mjs's after()): stops the
 // app that is current when each stop ends, until none is running, so a copy
 // that a test launched again while the cleanup waited for the old one is
 // stopped too, not left running over the restored data (DM-249).
 export async function stopCurrentApp(current) {
-  for (let app = current(); app && alive(app.pid); app = current()) await stopApp(app);
+  for (let app = current(); app && stillRuns(launchOf(app)); app = current()) await stopApp(app);
 }
-
-// Every app process the run launched, for the restore check at its end:
-// spawnApp records its child, and the suites that open a bundle through
-// LaunchServices record each copy as they find its pid. A child counts as
-// running until Node has seen it end, so a reused pid cannot be taken for it.
-const launches = [];
-export function recordLaunch(pid, what, child = null) {
-  launches.push({ pid, what, child });
-}
-const stillRunning = (l) => (l.child ? l.child.exitCode === null && l.child.signalCode === null : alive(l.pid));
 
 // ---------------------------------------------------------------------------
 // The app's data folders: moved aside before the run, put back after.
@@ -526,7 +603,7 @@ export async function checkRestore() {
   const first = compare();
   await sleep(recheckMs);
   const changed = [...new Set([...first, ...compare()])];
-  const running = launches.filter(stillRunning).map((l) => 'pid ' + l.pid + ' (' + l.what + ')');
+  const running = launches.filter(stillRuns).map((l) => 'pid ' + l.pid + ' (' + l.what + ')');
   const unlisted = [...listings].filter(([, v]) => typeof v === 'string').map(([dir, v]) => dir + ' (' + v + ')');
   const folders = listings.size - unlisted.length;
   listings.clear();
