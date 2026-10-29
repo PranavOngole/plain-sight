@@ -50,6 +50,20 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 13
+
+Wave G, round 13, 29 October 2026, Developer N (appstore-candidate).
+
+- The real-key suite no longer leaves a panel up for the tests after it (PO-R13-1, the test side). In app-run-1 (the sandboxed test copy of 5c5b749) the save panel came up 370 by 210, and the Save test, which waited for a second window wider than 400 before its panel guard, never saw it, so the panel stayed up and every later test failed. The Save test now waits for any second window inside the guard, and a failed panel step presses the panel's Cancel through Accessibility on every try and notes each try. The steps inside a panel still fail: they type into the panel's Go-to box with keys the driver posts to the app's own process, and macOS draws open and save panels in a separate process (Apple's NSOpenPanel and NSSavePanel pages), which in no real-key run since 21 October took those keys; how the driver reaches that process is for the Product Owner to decide.
+- Another Plain Sight holding a recorded copy's pid, a program at another bundle's .../Contents/MacOS/plain-sight, is never waited on or signalled (PO-R12-1): a fake-home case, on which the Product Owner's PO4-EXE-SUFFIX is red.
+- The program ps names and a copy's executable are compared exactly, each with its folders resolved, so a copy recorded through a linked folder (/tmp and /var lead to /private) still counts as itself; a case records a bundle through a folder link.
+- QA-01's three other holders of a recorded copy's pid are adopted (QA-G-49): a plain-sight-helper beside the copy's executable, a bundle named as the copy's with .bak after it, and the copy's whole path under another folder. Its P1, P2 and P3, the comparison loosened to a suffix, a prefix or a substring, are each red.
+- The line printed for a signal that comes while the run puts the data back says the run ends "with 130, or 6 if the app's data is not back as it was", as it does.
+- The release and real-key suites end their copies through the harness's endCopies, which takes a process for a copy only when ps names the bundle's executable as its program, recorded or not (the Product Owner's decision on DISH I-21): a bystander whose arguments merely hold that path is never asked to quit or killed.
+- e2e.mjs's forced-end test kills the app through its child (app.child.kill), which sends nothing once Node has seen the child end, never by its pid.
+- A ps that fails while the restore check asks about a recorded copy is a reported outcome (DM-259, QA-G-48): the pid is named "(could not be checked: ps failed: <reason>)", the run ends with 6, prints its summary and releases the lock. Before, it ended with 1, a stack and the lock left behind.
+- A test that plan() refuses a build number that is not a string though it reads as a whole number: a number, an array and an object (QA-G-50).
+
 ## Round 12 (Developer N, the harness)
 
 Wave G, round 12, 28 October 2026, the harness half (appstore-candidate).
