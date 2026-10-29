@@ -203,6 +203,7 @@
     font: 13px/1.5 var(--mono); padding: 8px;
     border: 1px solid var(--rule); border-radius: 6px; resize: vertical;
   }
+  .card select { font: 16px var(--sans); padding: 6px 8px; border: 1px solid var(--rule); border-radius: 6px; background: #fff; color: var(--ink); }
   .card input.secret {
     width: 100%; display: block; font: 16px var(--sans); padding: 8px 10px;
     border: 1px solid var(--rule); border-radius: 6px;
@@ -345,6 +346,21 @@
       </div>
       <p class="note" id="folder-note">With a folder chosen, Save writes a plain file named by the moment you press it, such as <code>2026-10-20 14-55-03.txt</code> (or <code>.md</code>, or <code>.docx</code> for Word), straight into that folder. Plain means anyone who can open the file can read it, and the computer indexes, previews and backs it up like any document; a synced folder uploads it. <span data-app="">Folder access exists in Chrome, Edge and other Chromium browsers; Brave needs a setting turned on; Safari and Firefox download instead.</span></p>
     </fieldset>
+    <!-- Super Stealth (BR-46): how many quick clicks on the ? button bring this screen back. Kept in localStorage
+         under plainSight.helpClicks only when the person changes it, so an untouched setting follows the default. -->
+    <fieldset class="vault" id="stealth-box">
+      <legend><strong>Super Stealth</strong></legend>
+      <p class="note">This screen comes back when you click the <kbd>?</kbd> at the bottom right the number of times set here, quickly, or when you press <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>H</kbd>, on a Mac too (Cmd + Shift + H also works where the browser leaves it to the page; Safari also uses it for its home page, so use Ctrl there). With the keyboard: Shift+Tab to the button (Option+Shift+Tab in Safari), then Enter the same number of times.</p>
+      <label for="help-clicks">Clicks on <kbd>?</kbd> that open this screen</label>
+      <select id="help-clicks">
+        <option value="1">1, a single click</option>
+        <option value="2">2 quick clicks</option>
+        <option value="3">3 quick clicks</option>
+        <option value="4">4 quick clicks</option>
+        <option value="5">5 quick clicks</option>
+      </select>
+      <p class="note">Kept only in this browser (localStorage). More clicks means a stray click shows nothing.</p>
+    </fieldset>
     <!-- Mode selector. The choice is kept in localStorage under plainSight.cover
          and the matching covers/<id>.js is imported. -->
     <fieldset class="modes">
@@ -388,6 +404,8 @@
   // ------------------------------------------------------------------
   const UNLOCK_WINDOW_MS = 2000;       // Cmd+E (Ctrl+E) must be followed by Cmd+Enter within this
   const VAULT_MIN_PHRASE = 12;         // shortest phrase the device vault accepts
+  const HELP_CLICKS_DEFAULT = 1;       // Super Stealth: clicks on ? that open the intro when nothing is set; 1 while the site is in development, 3 from go-live (BR-46)
+  const HELP_CLICK_WINDOW_MS = 600;    // a click more than this after the previous one starts a new series
   const VAULT_SAVE_DELAY_MS = 1500;    // autosave settles this long after the last keystroke
   const TYPO_RATE = 0.035;             // chance of a simulated typo at a word start
   const HIDDEN_WIPE_MS = 10 * 60 * 1000; // wipe after this long in a hidden tab
@@ -401,7 +419,8 @@
     vault: 'plainSight.vault',         // the encrypted copy of the hidden text, only when the vault is on
     folderVersion: 'plainSight.folderVersion',  // a timestamp that tells other tabs the save folder changed
     saveMode: 'plainSight.saveMode',   // 'sight' (encrypted download) or a plain format ('txt', 'md', 'docx') when no folder is in use
-    folderFormat: 'plainSight.folderFormat'   // the plain format Save writes into a chosen folder: 'txt' (the default), 'md' or 'docx'
+    folderFormat: 'plainSight.folderFormat',   // the plain format Save writes into a chosen folder: 'txt' (the default), 'md' or 'docx'
+    helpClicks: 'plainSight.helpClicks'   // Super Stealth: how many quick clicks on ? open the intro, '1' to '5'; absent means the default (BR-46)
   };
   const FILE_EXT = '.sight';
   // The plain formats Save can write, unencrypted: the text as it is, the text
@@ -452,6 +471,10 @@
   const loadNotice = $('#load-notice');
   const vaultOnEl = $('#vault-on');
   const vaultPhraseEl = $('#vault-phrase');
+  const helpClicksEl = $('#help-clicks');
+  let helpClickCount = 0;        // Super Stealth: the quick-click series on the ? button
+  let helpClickAt = 0;
+  let helpClicksDirty = false;   // the person changed the setting on the open intro: another tab's change must not redraw it, and Start keeps it
   const vaultStatusEl = $('#vault-status');
   const folderStatusEl = $('#folder-status');
   const folderHelpEl = $('#folder-help');
@@ -870,6 +893,7 @@
       if (e.altKey || dialogOpen() || !cover) return;
       const k = key.toLowerCase();
       if (e.shiftKey && k === 'g') { e.preventDefault(); togglePeek(); return; }
+      if (e.shiftKey && k === 'h') { e.preventDefault(); blurActive(); openIntro(); return; }   // Super Stealth: the intro comes back whatever the click setting (BR-46)
       if (!e.shiftKey && k === 'c' && peeking) { e.preventDefault(); copyReal(); return; }
       if (!e.shiftKey && k === 'e' && vaultStored()) { e.preventDefault(); unlockArmedAt = Date.now(); return; }
       if (!e.shiftKey && key === 'Enter' && unlockArmedAt && Date.now() - unlockArmedAt <= UNLOCK_WINDOW_MS) {
@@ -1225,6 +1249,7 @@
     const cleared = e.key === null;   // another document on this origin cleared the storage
     if (e.key === STORAGE.folderVersion) { onFolderChanged(); return; }
     if ((e.key === STORAGE.saveMode || e.key === STORAGE.folderFormat || cleared) && !introEl.hidden) folderRender();
+    if ((e.key === STORAGE.helpClicks || cleared) && !introEl.hidden && !helpClicksDirty) helpClicksEl.value = String(helpClicksSetting());   // another tab's change redraws the setting unless the person is changing it here (BR-46)
     if (!cleared && e.key !== STORAGE.vault) return;
     const copyChanged = cleared || !e.newValue || recordSalt(e.oldValue) !== recordSalt(e.newValue);   // deleted, re-keyed or new; not an autosave
     if (vaultOpen()) {
@@ -1282,6 +1307,7 @@
   // browser asks for permission again when it needs to.
   // ------------------------------------------------------------------
   let folderHandle = null;
+  let folderQueue = Promise.resolve();   // folder writes run one after another, in the order Save was pressed (DM-138)
   const FOLDER_DB = 'plainSight';
   const FOLDER_STORE = 'handles';
   // The desktop app (desktop/ in this repository) injects this adapter before
@@ -1401,7 +1427,7 @@
   async function folderWrite(content, base, ext) {
     if (native) return native.writeTextFile(base, ext, content);   // the app applies the same names and counter, never overwriting
     let name = base + ext;
-    for (let n = 2; ; n++) {   // count on until a name is free, however many are taken, so a Save never writes over a file (QA-F-10)
+    for (let n = 2; ; n++) {   // count on until a name is free, however many are taken, so a Save never writes over a file it found there (QA-F-10)
       let exists = true;
       try { await folderHandle.getFileHandle(name, { create: false }); } catch (err) { exists = false; }
       if (!exists) break;
@@ -1417,6 +1443,7 @@
   function setSaveMode(mode) { storageSet(STORAGE.saveMode, isPlainFormat(mode) ? mode : ''); }
   function folderFormat() { const f = storageGet(STORAGE.folderFormat); return isPlainFormat(f) ? f : 'txt'; }
   function setFolderFormat(f) { storageSet(STORAGE.folderFormat, f === 'md' || f === 'docx' ? f : ''); }
+  function helpClicksSetting() { const n = Number(storageGet(STORAGE.helpClicks)); return Number.isInteger(n) && n >= 1 && n <= 5 ? n : HELP_CLICKS_DEFAULT; }   // Super Stealth (BR-46)
 
   // What Save writes for a plain format: the text itself, or a Word document.
   // The app is given the text and makes the Word document itself, so its
@@ -1576,8 +1603,11 @@
       if (!(await folderReady())) { toast('No permission for the folder. Choose it again under the ? button.'); return; }
       if (folderHandle !== handle) { toast('The folder changed; press Save again'); return; }
       try {
-        const name = await folderWrite(plainContent(format, text), base, PLAIN_FORMATS[format].ext);
-        markSaved(at, wipes);
+        // Two Saves in the same second would both find the same name free; queued, the second sees the first's file (DM-138).
+        const write = folderQueue.then(() => folderWrite(plainContent(format, text), base, PLAIN_FORMATS[format].ext));
+        folderQueue = write.catch(() => {});
+        const name = await write;
+        markSaved(at, wipes);   // after a write that succeeded only: a failed one goes to the catch (DM-245, DM-138)
         toast('Saved ' + name + ' in ' + handle.name);
       } catch (err) {
         toast('Could not write to the folder');
@@ -1748,6 +1778,17 @@
       ? 'A saved copy is on this device. Type your phrase on the blank page, then hold ' + modKeyName() + ', press E, then Enter. Untick to delete the copy.'
       : 'To come back to your text later: type your phrase on the blank page, then hold ' + modKeyName() + ', press E, then Enter. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.';
   }
+  // Super Stealth (BR-46): the ? button opens the intro after the set number of quick clicks, one by default while the
+  // site is in development, so a stray click shows nothing. Enter or Space on the focused button fires the same clicks,
+  // and Ctrl or Cmd plus Shift plus H opens the intro whatever the setting.
+  function onHelpClick() {
+    const now = Date.now();
+    helpClickCount = now - helpClickAt <= HELP_CLICK_WINDOW_MS ? helpClickCount + 1 : 1;
+    helpClickAt = now;
+    if (helpClickCount < helpClicksSetting()) return;
+    blurActive();
+    openIntro();   // openIntro resets the count, so the next series starts from one
+  }
   function openIntro() {
     endPeek();
     customTextEl.value = customText;
@@ -1755,6 +1796,9 @@
     for (const radio of document.querySelectorAll('input[name="mode"]')) radio.checked = radio.value === current;
     vaultRender();
     folderRender();
+    helpClicksEl.value = String(helpClicksSetting());   // Super Stealth: drawn from storage; a change the person makes here is kept until Start
+    helpClicksDirty = false;
+    helpClickCount = 0;
     introEl.hidden = false;
     $('#btn-start').focus();
   }
@@ -1821,6 +1865,11 @@
     }
     const picked = document.querySelector('input[name="mode"]:checked');
     if (picked && COVER_IDS.includes(picked.value)) requestCover(picked.value);
+    if (helpClicksDirty) {   // Super Stealth: only a choice the person made is kept, so an untouched setting follows the default (BR-46)
+      const clicks = Number(helpClicksEl.value);
+      if (Number.isInteger(clicks) && clicks >= 1 && clicks <= 5) storageSet(STORAGE.helpClicks, String(clicks));
+      helpClicksDirty = false;
+    }
     blurActive();   // before hiding: a hidden element cannot be blurred
     introEl.hidden = true;
     repeatsAfterClose = true;   // Start pressed by a key still held, perhaps (DM-231)
@@ -1908,7 +1957,8 @@
         if (getComputedStyle(el).webkitTextSecurity !== 'disc') { el.type = 'password'; el.classList.remove('masked'); }   // the mask did not apply: stay a password field
       }
     }
-    $('#btn-help').addEventListener('click', () => { blurActive(); openIntro(); });
+    $('#btn-help').addEventListener('click', onHelpClick);
+    helpClicksEl.addEventListener('change', () => { helpClicksDirty = true; });   // the person's own change: kept at Start, and another tab's change no longer redraws it
     $('#btn-start').addEventListener('click', startWriting);
     vaultOnEl.addEventListener('change', () => { vaultPhraseEl.disabled = !vaultOnEl.checked; if (vaultOnEl.checked) vaultPhraseEl.focus(); });
     pwForm.addEventListener('submit', (e) => {
@@ -1952,7 +2002,7 @@
   // reads or returns the hidden buffer in any form, encrypted or not. Save and
   // Open are reachable only through their buttons.
   window.PlainSight = Object.freeze({
-    version: '1.4.0',
+    version: '1.5.0',
     coverIds: COVER_IDS.slice(),
     coverId: () => (cover ? cover.id : null),
     coverText: () => coverText,
