@@ -600,6 +600,18 @@ test('the real-key save and folder tests press a panel\'s default button only af
   }
 });
 
+// Round 13, item 5: e2e.mjs's forced-end test ended the app with
+// process.kill(app.pid, 'SIGKILL'); macOS hands an ended app's pid to another
+// program, so a kill by the pid can reach that program. The app is e2e.mjs's
+// child, and child.kill sends nothing once Node has seen it end. Only a GUI
+// run reaches the test, so it is pinned here.
+test('e2e.mjs signals the app it launched only through its child, never by its pid: its forced-end test sends SIGKILL with app.child.kill (round 13, item 5)', () => {
+  const e2e = read(path.join(DESKTOP, 'tests'), 'e2e.mjs');
+  const code = e2e.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+  assert.ok(code.includes("\n  app.child.kill('SIGKILL');   // through Node, which sends nothing to a child it has seen end; never by the pid (round 13)\n  await until(() => !alive(app.pid), 'the app to be gone', 8000);\n"), 'the forced end goes through the child');
+  assert.equal(/process\.kill\(/.test(code), false, 'and e2e.mjs calls process.kill nowhere');
+});
+
 // PO-R13-1 (round 13): in app-run-1 (29 October, the sandboxed test copy)
 // the Save test's check for a second window wider than 400 never saw the save
 // panel, which came up 370 by 210; the wait sat before inPanel, so nothing

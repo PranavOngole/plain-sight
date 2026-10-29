@@ -868,7 +868,7 @@ test('the window is marked not restorable, and macOS keeps no window state or pi
   await page.press('G', { meta: true, shift: true });
   assert.equal(await page.shown('real'), true, 'peeking');
   await sleep(3000);   // time for a periodic save of window state, if macOS does one
-  process.kill(app.pid, 'SIGKILL');
+  app.child.kill('SIGKILL');   // through Node, which sends nothing to a child it has seen end; never by the pid (round 13)
   await until(() => !alive(app.pid), 'the app to be gone', 8000);
   await sleep(1000);
   assertNoWindowState('after SIGKILL while peeking');
