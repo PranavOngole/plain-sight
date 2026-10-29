@@ -32,7 +32,9 @@
 // file that exists already (unless --force) or that is no plain file; and
 // anything it cannot read. The two files are written under temporary names
 // and then renamed into place as one step: when the second cannot be put in
-// place, the first is put back as it was (DM-253). No dependency: the
+// place, the first is put back as it was (DM-253); if even that fails, the
+// error says where the earlier configuration waits, and the two files are
+// from two runs until it is moved back (DM-256). No dependency: the
 // property lists go through macOS's plutil. Tested by
 // tests/appstore-config-tests.mjs.
 
@@ -149,7 +151,11 @@ export function plan(options, { entitlementsFile = path.join(TAURI, 'Entitlement
 // file. If the second rename then fails (an earlier entitlements file that
 // macOS will not let the command replace, say), the first file is put back as
 // it was: that earlier file, or no file when there was none. So a failed
-// write leaves neither half done, and the refusal says what is back. The
+// write leaves neither half done, and the refusal says what is back, unless
+// the put-back fails too: the error then says where the earlier
+// configuration waits (it is kept there), and the two files are from two
+// runs until it is moved back; with no earlier configuration, it names the
+// new one, which stays until it is removed by hand (DM-256). The
 // temporary files, and an earlier file kept and no longer needed, are
 // removed at the end. rename, link and unlink are handed in, so a test can
 // make one fail.
