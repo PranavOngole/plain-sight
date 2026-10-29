@@ -1728,9 +1728,8 @@
     helpClickCount = now - helpClickAt <= HELP_CLICK_WINDOW_MS ? helpClickCount + 1 : 1;
     helpClickAt = now;
     if (helpClickCount < helpClicksSetting()) return;
-    helpClickCount = 0;
     blurActive();
-    openIntro();
+    openIntro();   // openIntro resets the count, so the next series starts from one
   }
   function openIntro() {
     endPeek();
