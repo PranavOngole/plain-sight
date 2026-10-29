@@ -45,11 +45,15 @@ const documentWindows = () => drive('cgwindows', app.pid).windows.filter((w) => 
 
 // Opened the way a double-click opens it: through LaunchServices. A copy that
 // a failed test left running is ended first, so it is never taken for the new
-// one; a copy this run did not open is never touched. Never once the run is
-// ending (the check comes right before the open, with no wait between, since
-// the run may begin to end while an earlier copy ends); and a launch under
-// way when it began is marked (launching) until its copy is recorded, so that
-// after() ends that copy too (DM-249).
+// one. A copy this run never recorded (one whose pid the wait below did not
+// find in time) is not touched here: the assertion fails the test, and
+// after() ends it at the run's end with every other copy running from the
+// bundle, recorded or not (DISH I-14 and I-21; the run starts only when no
+// copy of the app is running, mayStart). Never once the run is ending (the
+// check comes right before the open, with no wait between, since the run may
+// begin to end while an earlier copy ends); and a launch under way when it
+// began is marked (launching) until its copy is recorded, so that after()
+// ends that copy too (DM-249).
 let launching = false;
 async function open() {
   for (const pid of instances()) {
