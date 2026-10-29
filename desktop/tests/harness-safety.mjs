@@ -669,6 +669,21 @@ if (process.argv[2] === '--child') {
       await h.sleep(300);
       console.log('BYSTANDER AFTER ' + JSON.stringify({ signals: existsSync(bystander.file) ? readFileSync(bystander.file, 'utf8').trim() : '', stillRuns: bystander.p.exitCode === null && bystander.p.signalCode === null }));
     },
+    // PO-R14-2 (round 15, the Product Owner's break PO3-NO-GRACE): the end of
+    // the suites that open bundles (endCopies) lets a copy quit through its
+    // page before any SIGKILL: an unrecorded copy (a program at the bundle's
+    // executable) that ends about 1 s after the quit request, here a SIGTERM
+    // through its child standing in for the driver's quit-app. The holder
+    // records the signals it gets; a SIGKILL shows as its signalCode.
+    async 'end-copies-grace'() {
+      const copy = await pidHolder(copyExecutable(), 'quits-in-1s', 'COPY');
+      const asked = [];
+      const t0 = Date.now();
+      await h.endCopies([copyBundle], (pid) => { asked.push(pid); if (pid === copy.pid) copy.p.kill('SIGTERM'); });
+      console.log('QUIT ASKED ' + JSON.stringify(asked) + ' in ' + (Date.now() - t0) + ' ms');
+      await h.until(() => copy.p.exitCode !== null || copy.p.signalCode !== null, 'the copy to be reaped', 3000).catch(() => {});
+      console.log('COPY AFTER ' + JSON.stringify({ signals: existsSync(copy.file) ? readFileSync(copy.file, 'utf8').trim() : '', exitCode: copy.p.exitCode, signalCode: copy.p.signalCode }));
+    },
     // Round 13 item 2: a copy recorded through a linked folder (as /tmp and
     // /var lead to /private), whose process runs from the real folder.
     async 'copy-through-link'() {
@@ -1120,7 +1135,7 @@ const HOLDER = path.join(ROOT, 'pid-holder.mjs');
 writeFileSync(HOLDER, [
   "import { appendFileSync, writeFileSync } from 'node:fs';",
   "const [file, mode] = process.argv.slice(2);",
-  "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT']) process.on(s, () => { appendFileSync(file, s + ' '); if (s === 'SIGTERM' && mode === 'quits') process.exit(0); });",
+  "for (const s of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT']) process.on(s, () => { appendFileSync(file, s + ' '); if (s === 'SIGTERM' && mode === 'quits') process.exit(0); if (s === 'SIGTERM' && mode === 'quits-in-1s') setTimeout(() => process.exit(0), 1000); });",
   "writeFileSync(file + '.ready', String(process.pid));",
   "setTimeout(() => process.exit(0), 30000);"
 ].join('\n') + '\n');
@@ -2060,6 +2075,25 @@ test('the suites\' end (endCopies) while ps fails never takes a bystander whose 
     assert.ok(asked && asked[1] === '[]', 'nothing is asked to quit; the child\'s output:\n' + r.out);
     assert.ok(Number(asked[2]) < 4000, 'and the end goes on at once, with no 5 s wait for a copy to end');
     assert.match(r.out, /^BYSTANDER AFTER \{"signals":"","stillRuns":true\}$/m, 'the bystander got no signal and still runs');
+  } finally {
+    endHolders(r);
+  }
+});
+// PO-R14-2 (round 15): the suites' end must let a copy quit through its
+// page, the quit request and then up to 5 s, before any SIGKILL. The Product
+// Owner's PO3-NO-GRACE, endCopies' wait made 0, passed every suite at
+// 5dcf726: a copy that quits a moment after the request would have been
+// killed.
+test('the suites\' end (endCopies) gives a copy time to quit: an unrecorded copy that ends about 1 s after the quit request ends by its own quit, with no SIGKILL, and the end waits for it (PO-R14-2)', async () => {
+  const r = await runCase('end-copies-grace', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 0);
+    const copy = holdersOf(r).find((x) => x.kind === 'COPY');
+    assert.ok(copy, 'the copy started; the child\'s output:\n' + r.out);
+    const asked = r.out.match(/^QUIT ASKED (\[[^\]]*\]) in (\d+) ms$/m);
+    assert.ok(asked && asked[1] === '[' + copy.pid + ']', 'the copy is asked to quit once; the child\'s output:\n' + r.out);
+    assert.match(r.out, /^COPY AFTER \{"signals":"SIGTERM","exitCode":0,"signalCode":null\}$/m, 'it ended by its own quit after the request: no SIGKILL');
+    assert.ok(Number(asked[2]) >= 900 && Number(asked[2]) < 5000, 'and the end waited for it, about 1 s, not the whole 5 s; took ' + asked[2] + ' ms');
   } finally {
     endHolders(r);
   }
