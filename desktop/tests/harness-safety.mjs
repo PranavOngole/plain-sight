@@ -603,6 +603,20 @@ if (process.argv[2] === '--child') {
       await waitsFor(holder.pid);
       await holderAfter(holder);
     },
+    // Round 13 item 2: a copy recorded through a linked folder (as /tmp and
+    // /var lead to /private), whose process runs from the real folder.
+    async 'copy-through-link'() {
+      const real = path.join(box, 'real-place');
+      const exe = path.join(real, 'Plain Sight test copy.app', 'Contents', 'MacOS', 'plain-sight');
+      mkdirSync(path.dirname(exe), { recursive: true });
+      fs.symlinkSync(process.execPath, exe);
+      fs.symlinkSync(real, path.join(box, 'linked-place'));
+      const copy = await pidHolder(exe, 'quits', 'COPY');
+      h.recordLaunch(copy.pid, path.join(box, 'linked-place', 'Plain Sight test copy.app'));
+      console.log('ALIVE ' + h.alive(copy.pid));
+      await stopCurrentFor({ pid: copy.pid });
+      await holderAfter(copy);
+    },
     // PO-R12-1 (round 13): the same, with the pid held by another Plain Sight,
     // a program at another bundle's .../Contents/MacOS/plain-sight.
     async 'pid-reused-other-copy'() {
@@ -1862,6 +1876,27 @@ test('another Plain Sight holding a recorded copy\'s pid (a program at another b
     const [holder] = holdersOf(r);
     assert.ok(holder && holder.kind === 'OTHER', 'the other Plain Sight started; the child\'s output:\n' + r.out);
     neitherWaitedOnNorSignalled(r, 'pid-reused-other-copy', holder);
+  } finally {
+    endHolders(r);
+  }
+});
+// Round 13 item 2 (Developer N's round 12 observation): pgrep -f, which
+// finds the copies, matches a path anywhere in the arguments, while the rule
+// compared ps's name with the recorded path exactly, so a copy recorded
+// through a linked folder would have been taken for another program.
+test('a copy recorded through a linked folder, whose process runs from the real folder, is still the copy: alive, stopped by its SIGTERM, and never noted as another program (round 13, item 2)', async () => {
+  const r = await runCase('copy-through-link', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 0);
+    const [copy] = holdersOf(r);
+    assert.ok(copy && copy.kind === 'COPY', 'the copy started; the child\'s output:\n' + r.out);
+    assert.match(r.out, /^ALIVE true$/m, 'alive() takes it for the copy; the child\'s output:\n' + r.out);
+    const [how, ms] = stopCurrentLine(r);
+    assert.equal(how, 'returned', 'stopCurrentApp returned');
+    assert.ok(Number(ms) < 3000, 'within 3 s: ' + ms + ' ms');
+    assert.match(r.out, /^SIGNALS SIGTERM$/m, 'the copy got one SIGTERM');
+    assert.match(r.out, /^STILL RUNS false$/m, 'and ended');
+    assert.ok(!runLog('copy-through-link').includes(otherProgramNote(copy.pid)), 'it was never taken for another program');
   } finally {
     endHolders(r);
   }

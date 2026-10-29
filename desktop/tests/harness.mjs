@@ -66,7 +66,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, webcrypto } from 'node:crypto';
-import { createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -241,13 +241,25 @@ export async function firstWindow(pid, want, what, ms) {
 //   pgrep -f finds their copies by. It is read with ps (programOf), which is
 //   part of macOS: no new dependency and nothing to build (the driver would
 //   need a new command and a rebuild), and it reads the same argument list
-//   pgrep -f matches.
+//   pgrep -f matches. The program ps names and the copy's executable are
+//   compared exactly, each with its folders resolved (realPathOf), so a copy
+//   recorded through a linked folder (/tmp and /var lead to /private on
+//   macOS) still counts as itself, and another Plain Sight, another bundle's
+//   plain-sight or a name that merely starts with the copy's, never does
+//   (round 13).
 // A pid that now runs another program is never signalled and never waited
 // on, and run.log says so once: "pid <n> now runs another program: not
 // stopped".
 const launches = [];
 export function recordLaunch(pid, what, child = null) {
-  launches.push({ pid, what, child, exe: child ? null : path.resolve(what, 'Contents', 'MacOS', 'plain-sight') });
+  launches.push({ pid, what, child, exe: child ? null : realPathOf(path.resolve(what, 'Contents', 'MacOS', 'plain-sight')) });
+}
+// An absolute path with its folders resolved through any link and its own
+// name kept, so an executable that is itself a link is still named by its own
+// path; anything else, or a path whose folder is gone, as it is.
+function realPathOf(p) {
+  if (typeof p !== 'string' || !p.startsWith('/')) return p;
+  try { return path.join(realpathSync(path.dirname(p)), path.basename(p)); } catch { return p; }
 }
 // The program the process with this pid runs, as ps names it (the first word
 // of its argument list: for an app LaunchServices started, the full path of
@@ -273,7 +285,7 @@ const anyProcess = (pid) => { try { process.kill(pid, 0); return true; } catch {
 function launchState(launch) {
   if (launch.child) return launch.child.exitCode === null && launch.child.signalCode === null ? 'running' : anyProcess(launch.pid) ? 'other' : 'ended';
   const program = programOf(launch.pid);
-  return program === null ? 'ended' : program === launch.exe ? 'running' : 'other';
+  return program === null ? 'ended' : realPathOf(program) === launch.exe ? 'running' : 'other';
 }
 const otherProgram = new Set();
 function stillRuns(launch) {
