@@ -91,7 +91,7 @@ if (process.argv[2] === '--child') {
   // hidden-document test for the front app's pid, and pgrep whether the app
   // is open. It answers from `fake`, the case's state; every other program
   // runs as it is (plutil reads a fake bundle's Info.plist).
-  const fake = { locked: false, idle: 600, windows: [], front: 4243, ps: null, logDriver: false, codesign: null };
+  const fake = { locked: false, idle: 600, windows: [], front: 4243, ps: null, logDriver: false, codesign: null, restoreRefused: false };
   const started = Date.now();
   const exec = childProcess.execFileSync;
   childProcess.execFileSync = (file, args = [], options) => {
@@ -100,7 +100,12 @@ if (process.argv[2] === '--child') {
       // PO-R15-1 (round 16): the case that runs app.mjs logs every command,
       // and answers the clipboard's save and restore and the front app's.
       if (fake.logDriver) console.log('DRIVER ' + args.map(String).join(' '));
-      if (fake.logDriver && ['clip-save', 'clip-restore', 'front'].includes(command)) return JSON.stringify({ ok: true, standIn: true }) + '\n';
+      // As the driver does, clip-save writes the clipboard into the file it is
+      // given (here a stand-in text), and clip-restore answers ok, or refuses
+      // in the case that has it refused (DISH-G-99, round 17).
+      if (fake.logDriver && command === 'clip-save') { writeFileSync(String(args[1]), 'STAND-IN CLIPBOARD\n'); return JSON.stringify({ ok: true, standIn: true }) + '\n'; }
+      if (fake.logDriver && command === 'clip-restore') return JSON.stringify(fake.restoreRefused ? { ok: false, error: 'the stand-in does not put the clipboard back' } : { ok: true, standIn: true }) + '\n';
+      if (fake.logDriver && command === 'front') return JSON.stringify({ ok: true, standIn: true }) + '\n';
       const answer = command === 'trusted' ? { ok: true, accessibility: true }
         : command === 'session' ? { ok: true, locked: fake.locked, idle: fake.idle + (Date.now() - started) / 1000 }
           : command === 'cgwindows' ? { ok: true, windows: fake.windows }
@@ -709,6 +714,16 @@ if (process.argv[2] === '--child') {
       fake.codesign = TEST_COPY;
       process.env.PLAIN_SIGHT_ONLY = '^no test has this name$';
       mkdirSync(path.join(home, 'Downloads'), { recursive: true });   // as runSuite makes it: the run marks what Downloads holds
+      await import(pathToFileURL(path.join(HERE, 'app.mjs')).href);
+    },
+    // DISH-G-99 (round 17): the same run with the clipboard's restore refused
+    // by the stand-in driver.
+    async 'app-suite-clipboard-refused'() {
+      fake.logDriver = true;
+      fake.codesign = TEST_COPY;
+      fake.restoreRefused = true;
+      process.env.PLAIN_SIGHT_ONLY = '^no test has this name$';
+      mkdirSync(path.join(home, 'Downloads'), { recursive: true });
       await import(pathToFileURL(path.join(HERE, 'app.mjs')).href);
     },
     // Round 13 item 2: a copy recorded through a linked folder (as /tmp and
@@ -2139,6 +2154,25 @@ test('the real-key suite saves the person\'s clipboard in before() and puts it b
   assert.deepEqual(calls.filter((c) => /^(frontmost|front |clip-)/.test(c)), ['frontmost', 'clip-save ' + file, 'clip-restore ' + file, 'front 4243'], 'before(): the front app, then the clipboard saved; after(): the clipboard put back, then the front app; the child\'s output:\n' + r.out);
   assert.equal(calls.some((c) => /^(quit-app|key|type|press|click|menu|focus)\b/.test(c)), false, 'nothing else was asked of the app: no test ran');
   assert.match(r.out, /^0 passed, 0 failed, 0 not run, 0 total\. Errors: 0$/m, 'the run had no test to run');
+  assert.equal(existsSync(file), false, 'the file that held the person\'s clipboard is removed once the clipboard is back (DISH-G-99)');
+  assert.ok(runLog('app-suite-clipboard').split('\n').some((l) => l.endsWith(' clipboard file removed')), 'and run.log says so');
+  assert.equal(r.lock, false, 'the lock is released');
+  clean(r);
+});
+// DISH-G-99 (round 17): the file holds the person's whole clipboard, every
+// item and type. Once the clipboard is back it is removed; when the driver
+// could not put it back, the file is the person's only copy, so it is kept
+// and the run says where, in run.log and in its output.
+test('when the clipboard cannot be put back, the file that holds the person\'s clipboard is kept and the run says where, in run.log and in its output (DISH-G-99)', async () => {
+  const r = await runCase('app-suite-clipboard-refused', undefined, { app: TEST_COPY, watchdog: 60000 });
+  ended(r, 0);
+  const file = path.join(ROOT, 'app-suite-clipboard-refused', 'evidence', 'clipboard.plist');
+  const line = 'the clipboard could not be put back: the person\'s clipboard is kept in ' + file;
+  assert.ok(r.out.split('\n').includes(line), 'the output says where; the child\'s output:\n' + r.out);
+  const log = runLog('app-suite-clipboard-refused');
+  assert.ok(log.split('\n').some((l) => l.endsWith(' ' + line)), 'and run.log too');
+  assert.equal(log.includes('clipboard file removed'), false, 'nothing says it was removed');
+  assert.equal(readFileSync(file, 'utf8'), 'STAND-IN CLIPBOARD\n', 'the file is kept as it was');
   assert.equal(r.lock, false, 'the lock is released');
   clean(r);
 });

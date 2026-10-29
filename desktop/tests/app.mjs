@@ -671,7 +671,8 @@ test('the vault in the release app keeps the text typed just before Cmd+Q, in it
 
 // The person's clipboard, kept in the evidence folder for the run: the
 // tests write markers and paths to the clipboard (pbcopy), so before() saves
-// it before the first test, and after() puts it back (PO-R14-1, round 15).
+// it before the first test, and after() puts it back (PO-R14-1, round 15)
+// and removes the file once it is back (DISH-G-99, round 17).
 const CLIPBOARD = path.join(EVIDENCE, 'clipboard.plist');
 
 await run(tests, {
@@ -702,7 +703,19 @@ await run(tests, {
       await until(() => !launching, 'a launch under way to record its copy', 16000).catch(() => {});
       await endCopies(opened, (pid) => driveRaw('quit-app', pid));
     } finally {
-      note('clipboard put back: ' + JSON.stringify(driveRaw('clip-restore', CLIPBOARD)));
+      // The file holds the person's whole clipboard: it goes once the
+      // clipboard is back; when the driver could not put it back, it is the
+      // person's only copy, so it is kept and the run says where.
+      const back = driveRaw('clip-restore', CLIPBOARD);
+      note('clipboard put back: ' + JSON.stringify(back));
+      if (back.ok) {
+        rmSync(CLIPBOARD, { force: true });
+        note('clipboard file removed');
+      } else {
+        const kept = 'the clipboard could not be put back: the person\'s clipboard is kept in ' + CLIPBOARD;
+        note(kept);
+        console.log(kept);
+      }
       if (frontBefore > 0) driveRaw('front', frontBefore);
     }
   }
