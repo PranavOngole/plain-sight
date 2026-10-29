@@ -192,6 +192,19 @@ test('a run without --build is refused and writes nothing: the refusal says to g
   assert.deepEqual(listing(out), [], 'nothing was written');
 });
 
+// QA-G-50 (round 13): plan() takes the build number as the command line hands
+// it, a string. A number, an array or an object that reads as a whole number
+// passes a check of its text alone, since a regular expression tests what it
+// is given as text (QA-01's W5, the type check dropped, passed every case), so
+// each is refused.
+test('plan() refuses a build number that is not a string though it reads as a whole number: a number, an array and an object are each refused, and nothing is written (QA-G-50)', () => {
+  const out = freshOut();
+  for (const build of [7, ['7'], { toString: () => '7' }]) {
+    assert.throws(() => write(plan({ ...parseArgs(args({ out }), { cwd: ROOT }), build })), (err) => err instanceof Refusal && /^the build number must be a whole number from 1, such as 1 or 2: /.test(err.message), 'plan() refuses the build ' + String(build) + ' given as ' + (Array.isArray(build) ? 'an array' : typeof build));
+  }
+  assert.deepEqual(listing(out), [], 'nothing was written');
+});
+
 test('output files that exist already are refused and kept as they were unless --force replaces them, and an output that is a link or a folder is refused even with --force', () => {
   const out = freshOut();
   writeFileSync(path.join(out, CONFIG_NAME), 'EARLIER\n');
