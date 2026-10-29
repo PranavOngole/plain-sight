@@ -90,7 +90,7 @@ test('the signature carries exactly the four entitlements of Entitlements.plist:
   assert.deepEqual(Object.keys(signed).sort(), ['com.apple.security.app-sandbox', 'com.apple.security.files.bookmarks.app-scope', 'com.apple.security.files.user-selected.read-write', 'com.apple.security.network.client'], 'exactly four');
   assert.equal(signed['com.apple.security.app-sandbox'], true, 'sandboxed');
   assert.deepEqual(Object.keys(signed).filter((k) => k.startsWith('com.apple.security.network.')), ['com.apple.security.network.client'], 'the network client only, no network server');
-  assert.equal(signed['com.apple.security.network.client'], true, 'the network client: the system web view needs it to draw the page in the sandbox');
+  assert.equal(signed['com.apple.security.network.client'], true, 'the network client: without it the sandboxed probe page gave no answer in 31 seconds (26 October)');
   assert.equal(signed['com.apple.security.files.downloads.read-write'], undefined, 'no Downloads entitlement: Save without a folder goes through the save panel');
 });
 

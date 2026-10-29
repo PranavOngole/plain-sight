@@ -219,10 +219,11 @@ test('the app runs in the App Sandbox with exactly its four entitlements, the ne
     'com.apple.security.files.user-selected.read-write': true,
     // The remembered folder is a security-scoped bookmark (bookmark.rs).
     'com.apple.security.files.bookmarks.app-scope': true,
-    // The system web view needs it to draw the page inside the App Sandbox:
-    // the sandboxed probe page gave no answer in 31 seconds without it
-    // (sbprobe-run-1, 26 October 2026). The app has no network code, the
-    // page's policy allows no request, and the network watch is the check.
+    // In the probe of 26 October 2026 the sandboxed page gave no answer in
+    // 31 seconds without it (sbprobe-run-1) and answered in 2.5 seconds with
+    // it, the one difference between the two probe builds. The app has no
+    // network code, the page's policy allows no request, and the network
+    // watch is the check.
     'com.apple.security.network.client': true
   });
   assert.equal(Object.keys(entitlements).length, 4, 'exactly four');
