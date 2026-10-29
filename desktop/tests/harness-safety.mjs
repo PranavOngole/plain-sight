@@ -649,6 +649,26 @@ if (process.argv[2] === '--child') {
         console.log(name + ' AFTER ' + JSON.stringify({ signals: existsSync(holder.file) ? readFileSync(holder.file, 'utf8').trim() : '', stillRuns: holder.p.exitCode === null && holder.p.signalCode === null }));
       }
     },
+    // PO-R13-2 (round 14, the Product Owner's break PO3-COPIES-PS-FAIL): the
+    // same end while ps fails, with a bystander whose arguments hold the
+    // bundle's executable path: a stand-in ps first on PATH ends with 2 and
+    // "ps: fork: Resource temporarily unavailable", as ps does when the Mac
+    // can start no process.
+    async 'end-copies-ps-broken'() {
+      const bystander = await pidHolder(process.execPath, 'stays', 'BYSTANDER', [copyExecutable()]);
+      const bin = path.join(box, 'bin');
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(path.join(bin, 'ps'), '#!/bin/sh\necho "ps: fork: Resource temporarily unavailable" >&2\nexit 2\n');
+      chmodSync(path.join(bin, 'ps'), 0o755);
+      process.env.PATH = bin + path.delimiter + process.env.PATH;
+      console.log('COPIES ' + JSON.stringify(h.copiesOf(copyBundle)) + ' of ' + JSON.stringify([bystander.pid]));
+      const asked = [];
+      const t0 = Date.now();
+      await h.endCopies([copyBundle], (pid) => { asked.push(pid); throw new Error('the stand-in driver has no quit-app'); });
+      console.log('QUIT ASKED ' + JSON.stringify(asked) + ' in ' + (Date.now() - t0) + ' ms');
+      await h.sleep(300);
+      console.log('BYSTANDER AFTER ' + JSON.stringify({ signals: existsSync(bystander.file) ? readFileSync(bystander.file, 'utf8').trim() : '', stillRuns: bystander.p.exitCode === null && bystander.p.signalCode === null }));
+    },
     // Round 13 item 2: a copy recorded through a linked folder (as /tmp and
     // /var lead to /private), whose process runs from the real folder.
     async 'copy-through-link'() {
@@ -2019,6 +2039,26 @@ test('the suites\' end (endCopies) ends a copy the run never recorded, whose pro
     assert.ok(r.out.includes('COPIES ' + JSON.stringify([copy.pid]) + ' of '), 'copiesOf finds the copy alone; the child\'s output:\n' + r.out);
     assert.match(r.out, new RegExp('^QUIT ASKED \\[' + copy.pid + '\\] in \\d+ ms$', 'm'), 'only the copy is asked to quit');
     assert.match(r.out, /^COPY AFTER \{"signals":"","stillRuns":false\}$/m, 'the copy was ended (by the SIGKILL, which it cannot record)');
+    assert.match(r.out, /^BYSTANDER AFTER \{"signals":"","stillRuns":true\}$/m, 'the bystander got no signal and still runs');
+  } finally {
+    endHolders(r);
+  }
+});
+// PO-R13-2 (round 14): copiesOf takes a pgrep -f match for a copy only when
+// ps names the bundle's executable as its program, and a ps that fails counts
+// as not a copy. No test held that: the Product Owner's PO3-COPIES-PS-FAIL,
+// a ps failure taken for a copy, passed every suite at a85b90f, and with it
+// endCopies would ask a bystander to quit and kill it 5 s later.
+test('the suites\' end (endCopies) while ps fails never takes a bystander whose arguments hold the bundle\'s executable for a copy: it is neither asked to quit nor signalled, still runs, and the end goes on at once (PO-R13-2)', async () => {
+  const r = await runCase('end-copies-ps-broken', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 0);
+    const bystander = holdersOf(r).find((x) => x.kind === 'BYSTANDER');
+    assert.ok(bystander, 'the bystander started; the child\'s output:\n' + r.out);
+    assert.ok(r.out.includes('COPIES [] of [' + bystander.pid + ']'), 'copiesOf takes no copy while ps fails; the child\'s output:\n' + r.out);
+    const asked = r.out.match(/^QUIT ASKED (\[[^\]]*\]) in (\d+) ms$/m);
+    assert.ok(asked && asked[1] === '[]', 'nothing is asked to quit; the child\'s output:\n' + r.out);
+    assert.ok(Number(asked[2]) < 4000, 'and the end goes on at once, with no 5 s wait for a copy to end');
     assert.match(r.out, /^BYSTANDER AFTER \{"signals":"","stillRuns":true\}$/m, 'the bystander got no signal and still runs');
   } finally {
     endHolders(r);
