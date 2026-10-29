@@ -461,6 +461,9 @@ if (process.argv[2] === '--child') {
     // as in e2e-run-4, or brings it back.
     async 'e2e-show-stays-hidden'() { await e2eHidden(false); },
     async 'e2e-show-returns'() { await e2eHidden(true); },
+    // PO-R11-1 (round 12): the show leaves the page hidden, and a person
+    // touches the Mac while the window's state is read at the timeout.
+    async 'e2e-touch-at-evidence'() { await e2eHidden(false, true); },
     // DM-249's launched half, the restore check (round 10). The person's data
     // holds a nested file as well, which the run must leave as it was.
     async 'run-restore-clean'() {
@@ -872,15 +875,23 @@ if (process.argv[2] === '--child') {
   // probe folder: the page's visibility, the window actions and windowState.
   // The test launches nothing; the child refuses as e2eSuite does unless the
   // app e2e.mjs would launch is the stand-in.
-  const e2eHidden = async (showBringsItBack) => {
+  const e2eHidden = async (showBringsItBack, touchAtTimeout = false) => {
     const probe = path.join(h.EVIDENCE, 'probe');
     let visibility = 'visible';
+    let windowStates = 0;
     const answerFor = (req) => {
       if (req.eval === 'document.visibilityState') return { ok: true, value: visibility };
       if (req.window === 'minimize' || req.window === 'hide') { visibility = 'hidden'; return { ok: true }; }
       if (req.window === 'unminimize' || (req.window === 'show' && showBringsItBack)) { visibility = 'visible'; return { ok: true }; }
       if (req.window === 'show') return { ok: true };
-      if (req.windowState === true) return { ok: true, value: { fakeHook: true, occlusionVisible: visibility === 'visible', appActive: visibility === 'visible', appHidden: false } };
+      if (req.windowState === true) {
+        // PO-R11-1: the second read of the window's state is the timeout's; a
+        // person touches the Mac as it is given, so the driver's next look at
+        // the session finds the Mac just used.
+        windowStates += 1;
+        if (touchAtTimeout && windowStates === 2) fake.idle = -(Date.now() - started) / 1000;
+        return { ok: true, value: { fakeHook: true, occlusionVisible: visibility === 'visible', appActive: visibility === 'visible', appHidden: false } };
+      }
       return { ok: false, error: 'the fake hook has no answer for ' + JSON.stringify(req) };
     };
     setInterval(() => {
@@ -1482,6 +1493,26 @@ test('e2e.mjs\'s hidden-document test, its show bringing the page back: it passe
   assert.ok(log.includes(BEFORE_RECORD), 'the record before the minimize; run.log:\n' + log);
   assert.ok(!log.includes(' window state at the timeout '), 'no record at a timeout; run.log:\n' + log);
   clean(r);
+});
+// PO-R11-1 (round 12): the Product Owner's break PO2-TOUCH-EVID took the
+// rethrow out of windowEvidence's read helper and every case passed, so
+// nothing held that a person at the keyboard still stops the run while the
+// window's state is read: the touch would have been noted as a part not read
+// and the test counted as failed. The stays-hidden show again, with the
+// driver's stand-in finding the Mac just used once the hook has given the
+// timeout's window state.
+test('a person who touches the Mac while e2e.mjs reads the window\'s state at the hidden-document test\'s timeout stops the run as a touch: exit code 3, the test not counted as failed, the data back and the restore check clean (PO-R11-1)', async () => {
+  const r = await runCase('e2e-touch-at-evidence');
+  ended(r, 3);
+  assert.ok(r.out.split('\n').some((l) => l.startsWith('stop - ' + HIDDEN_TEST + ' (keyboard or mouse used during the run (idle ')), 'the test stopped for the touch; the child\'s output:\n' + r.out);
+  assert.ok(!r.out.split('\n').includes('FAIL - ' + HIDDEN_TEST), 'and was not counted as failed');
+  assert.match(r.out, /^0 passed, 0 failed, 1 not run, 1 total\. Errors: 0$/m);
+  assert.match(r.out, /^Exit code: 3$/m);
+  assert.match(r.out, checkedLine, 'the restore check is clean');
+  const log = runLog('e2e-touch-at-evidence');
+  assert.equal(log.split('\n').filter((l) => l.includes(' probe {"windowState":true} -> ')).length, 2, 'the window\'s state was read before the minimize and at the timeout; run.log:\n' + log);
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released');
 });
 
 // DM-249's launched half (round 10). The Delivery Manager's check of a

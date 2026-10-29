@@ -663,6 +663,18 @@ test('the e2e hook\'s show unhides the app and then activates it, as a Dock clic
   assert.equal(/\buntil\(/.test(body), false, 'and no wait of the test goes around it');
 });
 
+// PO-R11-1 (round 12): the Product Owner's PO2-TOUCH-EVID took the rethrow
+// out of windowEvidence's read helper and every suite passed. Pinned here as
+// well as run in harness-safety.mjs: a person's touch during the evidence
+// read stops the run, and only another error is noted as a part not read.
+test('e2e.mjs\'s window evidence lets a person\'s touch stop the run: its read helper rethrows UserActivity before it notes a part it could not read (PO-R11-1)', () => {
+  const e2e = read(path.join(DESKTOP, 'tests'), 'e2e.mjs');
+  const start = e2e.indexOf('\nasync function windowEvidence(when) {\n');
+  assert.ok(start >= 0, 'e2e.mjs has windowEvidence()');
+  const body = e2e.slice(start, e2e.indexOf('\n}\n', start));
+  assert.ok(body.includes("    } catch (err) {\n      if (err instanceof UserActivity) throw err;\n      parts.push(label + ' could not be read: ' + err.message);\n    }\n"), 'the read helper rethrows a touch before it notes a part as not read');
+});
+
 test('the web deployment allowlist is unchanged (DR-10)', () => {
   const lines = read(ROOT, '.vercelignore').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
   assert.deepEqual(lines, ['*', '!index.html', '!covers', '!covers/**', '!vercel.json']);
