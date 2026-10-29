@@ -126,7 +126,9 @@ if (process.argv[2] === '--child') {
   const unseeded = { 'run-real-container-made': realContainer, 'run-real-cookies-made': realCookies }[which];
   const dirs = h.DATA_DIRS.filter((d) => !isTestFolder(d) && d !== unseeded);
   console.log('DIRS ' + JSON.stringify(dirs.map((d) => path.relative(home, d))));
-  for (const d of dirs) { mkdirSync(d, { recursive: true }); writeFileSync(marker(d), real(home, d)); }
+  // A second run in the fake home of a case under way (QA-01's L6) seeds
+  // nothing: the person's data is the first run's.
+  if (which !== 'second-run') for (const d of dirs) { mkdirSync(d, { recursive: true }); writeFileSync(marker(d), real(home, d)); }
   const intact = () => dirs.forEach((d) => assert.equal(existsSync(marker(d)) ? readFileSync(marker(d), 'utf8') : null, real(home, d), 'the data in ' + d + ' is as it was'));
   const backups = () => (existsSync(BACKUP_ROOT(home)) ? readdirSync(BACKUP_ROOT(home)) : []);
   const cleanup = async () => { h.restoreAppData(); };
@@ -520,6 +522,49 @@ if (process.argv[2] === '--child') {
       personFile(dirs[0], 'notes.txt', 'THE PERSON\'S NOTES');
       await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[0], 'notes.txt'), 'change'); testData(dirs[0]); } }], { after: slowAfter });
     },
+    // QA-G-46 (round 12): QA-01's restore check cases for its R2, R6, R7,
+    // R15, R16 and R19 (wave-g/qa/scripts/app/r10_restore_adv.mjs, groups A,
+    // L and P, with r10_restore_child.mjs and r10_writer.mjs), on this
+    // file's late writer. A.size-mtime-kept: a file grown 1 s after the
+    // restore, its modification time put back to the nanosecond.
+    async 'run-late-grow-same-time'() {
+      personFile(dirs[0], 'notes.txt', 'THE PERSON\'S NOTES');
+      console.log('MTIME ' + fs.statSync(path.join(dirs[0], 'notes.txt'), { bigint: true }).mtimeNs);
+      await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[0], 'notes.txt'), 'grow-same-time'); testData(dirs[0]); } }]);
+    },
+    // A.remove-top: a whole data folder the run put back, removed 1 s later.
+    async 'run-late-folder-removed'() {
+      personFile(dirs[1], path.join('notes', 'today.txt'), 'THE PERSON\'S NOTES');
+      await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(dirs[1], 'remove-folder', dirs[1]); testData(dirs[0]); } }]);
+    },
+    // A.hidden: a new hidden file, 1 s after the restore.
+    async 'run-late-hidden-file'() {
+      await runSuite([{ name: 'a test that leaves a late writer behind', fn: async () => { lateWriter(path.join(dirs[1], '.late-hidden'), 'create'); testData(dirs[0]); } }]);
+    },
+    // L7: a run the person stopped (3 on its own) whose data a late writer
+    // then changed.
+    async 'run-late-change-stopped'() {
+      personFile(dirs[0], 'notes.txt', 'THE PERSON\'S NOTES');
+      await runSuite([{ name: 'a test the person interrupts, with a late writer behind', fn: async () => { lateWriter(path.join(dirs[0], 'notes.txt'), 'change'); testData(dirs[0]); throw new h.UserActivity('keyboard or mouse used during the run (idle 0.0 s)'); } }]);
+    },
+    // L6: the parent starts a second run in this fake home half a second
+    // after the restore, during the second look; the test holds a second, so
+    // the parent sees the backup folder before it goes.
+    async 'run-held-through-check'() {
+      await runSuite([{ name: 'a test that takes a second', fn: async () => { testData(dirs[0]); await h.sleep(1000); } }]);
+    },
+    async 'second-run'() {
+      await h.run([{ name: 'a second run', fn: async () => { console.log('SECOND RAN'); } }], { name: 'second', needUnlocked: false });
+    },
+    // P.source as behaviour: stopApp on an app that has already ended.
+    async 'stop-ended-app'() {
+      const gone = h.spawnApp('/usr/bin/true');
+      if (gone.exitCode === null && gone.signalCode === null) await new Promise((resolve) => gone.once('exit', resolve));
+      const t0 = Date.now();
+      await h.stopApp({ child: gone, pid: gone.pid });
+      console.log('STOPPED ' + gone.pid + ' after ' + (Date.now() - t0) + ' ms');
+      await h.sleep(300);
+    },
     // An app the run launched (spawnApp records it) that nothing stops: the
     // suite gives no after().
     async 'run-restore-live-app'() {
@@ -580,6 +625,7 @@ if (process.argv[2] === '--child') {
         testData(dirs[0]);
         const holder = await pidHolder(process.execPath);
         h.recordLaunch(holder.pid, copyBundle);
+        console.log('ALIVE ' + h.alive(holder.pid));   // the rule's note, made well before the run ends
       } }]);
     },
     async 'run-copy-left-running'() {
@@ -907,9 +953,13 @@ chmodSync(STANDIN_EXE, 0o755);
 // rewrites it with as many bytes, every one an x, and same-bytes writes its
 // own bytes again, which changes only its modification time (PO-R10-1);
 // create makes a new file there, and seal takes every permission from a
-// folder, so that no one may list it (DM-257).
+// folder, so that no one may list it (DM-257); grow-same-time appends to the
+// target and puts its modification time back to the nanosecond (cp -p to a
+// reference beside this script, then touch -r, as QA-01's writer does), and
+// remove-folder removes a whole folder (QA-G-46).
 const LATE_WRITER = path.join(ROOT, 'late-writer.mjs');
 writeFileSync(LATE_WRITER, [
+  "import { execFileSync } from 'node:child_process';",
   "import { appendFileSync, chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';",
   "import path from 'node:path';",
   "const [watch, expect, target, action] = process.argv.slice(2);",
@@ -925,6 +975,8 @@ writeFileSync(LATE_WRITER, [
   "      else if (action === 'same-bytes') writeFileSync(target, readFileSync(target));",
   "      else if (action === 'create') { mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, 'MADE AFTER THE RESTORE'); }",
   "      else if (action === 'seal') chmodSync(target, 0o000);",
+  "      else if (action === 'grow-same-time') { const ref = path.join(path.dirname(process.argv[1]), 'time-ref-' + process.pid); execFileSync('cp', ['-p', target, ref]); appendFileSync(target, ' MORE'); execFileSync('touch', ['-r', ref, target]); rmSync(ref); }",
+  "      else if (action === 'remove-folder') rmSync(target, { recursive: true, force: true });",
   "      else appendFileSync(target, ' CHANGED LATE');",
   "    }, 1000);",
   "  } else if (Date.now() - started > 30000) clearInterval(look);",
@@ -1599,6 +1651,93 @@ test('a SIGINT while the run\'s own cleanup waits in after(), with a file of the
   assert.doesNotMatch(r.out, /as they were \(names/, 'no clean line');
   assert.deepEqual(r.backups, [], 'the data was put back, then changed: no backup is left');
   assert.equal(r.lock, false, 'the lock is released');
+});
+
+// QA-G-46 (round 12): twelve of QA-01's breaks of the restore check (R1, R2,
+// R3, R5, R6, R7, R8, R14, R15, R16, R18 and R19 of its r10_mutate_new.py)
+// passed every candidate suite at 46d6f62. On 4c5cc55 round 11's cases turn
+// R1, R3, R5 and R8 red, and on this round's code DISH-G-93's case above
+// turns R14 red; the cases below, adopted from its r10_restore_adv.mjs
+// (groups A, L and P), hold the size (R2), a data folder gone after the
+// restore (R6), hidden entries (R7), the lock through the second look (R15),
+// the note for an app already ended (R16) and exit 6 over 3 (R19).
+test('a file of the person\'s grown 1 s after the restore, its modification time put back to the nanosecond, is caught by its size: exit code 6, its path named (changed) (QA-G-46, R2; QA-01\'s A.size-mtime-kept)', async () => {
+  const r = await runCase('run-late-grow-same-time', undefined, { recheck: null });
+  ended(r, 6);
+  const notes = path.join(r.dirs[0], 'notes.txt');
+  assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(notes) + ' \\(changed\\)', 'm'), 'the path is named; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^Exit code: 6$/m);
+  assert.equal(readFileSync(notes, 'utf8'), 'THE PERSON\'S NOTES MORE', 'the writer grew the file');
+  assert.equal(String(fs.statSync(notes, { bigint: true }).mtimeNs), (r.out.match(/^MTIME (\d+)$/m) || [])[1], 'and put its modification time back to the nanosecond, so only its size differs');
+});
+test('a data folder the run put back, removed whole 1 s after the restore, is caught: exit code 6, the folder named (gone) (QA-G-46, R6; QA-01\'s A.remove-top)', async () => {
+  const r = await runCase('run-late-folder-removed', undefined, { recheck: null });
+  ended(r, 6);
+  assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(r.dirs[1]) + ' \\(gone\\)', 'm'), 'the folder is named; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^Exit code: 6$/m);
+  assert.equal(existsSync(r.dirs[1]), false, 'the writer removed it');
+});
+test('a hidden file written into a folder the run put back, 1 s after the restore, is caught: exit code 6, its path named (new) (QA-G-46, R7; QA-01\'s A.hidden)', async () => {
+  const r = await runCase('run-late-hidden-file', undefined, { recheck: null });
+  ended(r, 6);
+  const hidden = path.join(r.dirs[1], '.late-hidden');
+  assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(hidden) + ' \\(new\\)', 'm'), 'the hidden path is named; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^Exit code: 6$/m);
+  assert.ok(existsSync(hidden), 'the writer made it');
+});
+test('a run the person stopped, whose data a late writer changed 1 s after the restore, ends with 6, not 3: the person\'s data first, the path named and the stop reported (QA-G-46, R19; QA-01\'s L7)', async () => {
+  const r = await runCase('run-late-change-stopped', undefined, { recheck: null });
+  ended(r, 6);
+  assert.ok(r.out.split('\n').includes('stop - a test the person interrupts, with a late writer behind (keyboard or mouse used during the run (idle 0.0 s))'), 'the stop is reported; the child\'s output:\n' + r.out);
+  assert.match(r.out, new RegExp('^restore check: not as it was before the run: (.*; )?' + esc(path.join(r.dirs[0], 'notes.txt')) + ' \\(changed\\)', 'm'), 'the path is named');
+  assert.match(r.out, /^0 passed, 0 failed, 1 not run, 1 total\. Errors: 1$/m);
+  assert.match(r.out, /^Exit code: 6$/m);
+});
+// QA-01's L6: a second run in the fake home of a case under way, which seeds
+// nothing and only asks run() to start, with an evidence folder of its own.
+const secondRun = (box) => new Promise((resolve) => {
+  const env = { ...process.env, HOME: path.join(box, 'home'), TMPDIR: path.join(box, 'tmp'), PLAIN_SIGHT_EVIDENCE: path.join(box, 'evidence-second'), [BOX]: box };
+  for (const name of ['PLAIN_SIGHT_E2E_DOWNLOADS', 'PLAIN_SIGHT_APP', 'PLAIN_SIGHT_IDLE_MIN', 'PLAIN_SIGHT_ONLY', 'PLAIN_SIGHT_ALLOW_REAL_ID']) delete env[name];
+  const c = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child', 'second-run'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  c.stdout.on('data', (d) => { out += d; });
+  c.stderr.on('data', (d) => { out += d; });
+  const timer = setTimeout(() => c.kill('SIGKILL'), 60000);
+  c.on('exit', (code) => { clearTimeout(timer); resolve({ code, out }); });
+});
+test('the run holds its lock through the restore check\'s second look: a second run started half a second after the restore is refused with exit code 5, and the first ends clean (QA-G-46, R15; QA-01\'s L6)', async () => {
+  let second = null;
+  let poll = null;
+  const r = await runCase('run-held-through-check', (out, child, box) => {
+    if (poll) return;
+    let seen = false;
+    poll = setInterval(() => {
+      const there = existsSync(BACKUP_ROOT(path.join(box, 'home')));
+      if (there) seen = true;
+      if (!seen || there) return;
+      clearInterval(poll);
+      setTimeout(() => { second = secondRun(box); }, 500);
+    }, 10);
+  }, { recheck: null });
+  clearInterval(poll);
+  assert.ok(second, 'the second run was started after the restore; the child\'s output:\n' + r.out);
+  const s = await second;
+  ended(r, 0);
+  assert.match(r.out, restoredLine(r.dirs.length), 'the first run\'s check is clean; its output:\n' + r.out);
+  assert.equal(s.code, 5, 'the second run ended with 5; its output:\n' + s.out);
+  assert.match(s.out, /^second: not started: another GUI test run holds /m, 'refused for the lock');
+  assert.doesNotMatch(s.out, /SECOND RAN/, 'its test never ran');
+  clean(r);
+  assert.equal(r.lock, false, 'the lock is released at the end');
+});
+test('stopApp notes "stopping pid <n>" for an app that has already ended too, so a driver\'s signal still lands where a test stops its app (QA-G-46, R16; QA-01\'s P.source, as behaviour)', async () => {
+  const r = await runCase('stop-ended-app');
+  ended(r, 0);
+  const [, pid, ms] = r.out.match(/^STOPPED (\d+) after (\d+) ms$/m) || [];
+  assert.ok(pid, 'stopApp returned; the child\'s output:\n' + r.out);
+  assert.ok(Number(ms) < 1000, 'at once: ' + ms + ' ms');
+  const log = runLog('stop-ended-app');
+  assert.ok(log.includes(' stopping pid ' + pid + '\n'), 'run.log names the pid; run.log:\n' + log);
 });
 test('an app the run launched and nothing stopped is named by its pid after the restore: exit code 6 (DM-249)', async () => {
   const r = await runCase('run-restore-live-app', undefined, { recheck: null });
