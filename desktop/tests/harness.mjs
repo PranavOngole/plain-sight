@@ -695,7 +695,7 @@ export function restoreCheckLines({ folders, changed, running, unknown = [], unl
   if (unknown.length) lines.push('restore check: could not tell whether an app this run launched still runs: ' + unknown.join('; '));
   if (lines.length) return lines;
   const said = folders === 1 ? '1 folder as it was' : folders + ' folders as they were';
-  return ['restore check: ' + said + ' (names, sizes and times; checked twice, ' + recheckMs / 1000 + ' s apart)' + (unlisted.length ? '; not listed when moved aside, so not checked: ' + unlisted.join('; ') : '')];
+  return ['restore check: ' + said + ' (names, and sizes and times of files; checked twice, ' + recheckMs / 1000 + ' s apart)' + (unlisted.length ? '; not listed when moved aside, so not checked: ' + unlisted.join('; ') : '')];
 }
 
 // The run's own safety: Ctrl+C and a kill are watched from the start, before

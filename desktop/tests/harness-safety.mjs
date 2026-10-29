@@ -1622,7 +1622,7 @@ test('a person who touches the Mac while e2e.mjs reads the window\'s state at th
 // named in the clean line and not checked),
 // lists them again after the restore, at once and 3 s later, and looks for a
 // launched app still running. These cases hold each part, under the fake home.
-const restoredLine = (n) => new RegExp('^restore check: ' + n + ' folders as they were \\(names, sizes and times; checked twice, 3 s apart\\)$', 'm');
+const restoredLine = (n) => new RegExp('^restore check: ' + n + ' folders as they were \\(names, and sizes and times of files; checked twice, 3 s apart\\)$', 'm');
 test('the Delivery Manager\'s launched check, here under the fake home: stopApp() notes "stopping pid <n>" in run.log first, a SIGINT sent on that line refuses the relaunch, and the run ends with 130, no app left, the backup empty, the lock released, folder.txt as it was and the restore check clean (DM-249)', async () => {
   let sent = 0;
   let poll = null;
@@ -1731,7 +1731,7 @@ test('a data folder that holds a folder no one may list (mode 000) cannot be lis
   try {
     ended(r, 0);
     const line = r.out.split('\n').find((l) => l.startsWith('restore check')) || '';
-    assert.equal(line, 'restore check: ' + (r.dirs.length - 1) + ' folders as they were (names, sizes and times; checked twice, 3 s apart); not listed when moved aside, so not checked: ' + r.dirs[1] + ' (EACCES)', 'the child\'s output:\n' + r.out);
+    assert.equal(line, 'restore check: ' + (r.dirs.length - 1) + ' folders as they were (names, and sizes and times of files; checked twice, 3 s apart); not listed when moved aside, so not checked: ' + r.dirs[1] + ' (EACCES)', 'the child\'s output:\n' + r.out);
   } finally {
     unseal(r);
   }
@@ -2073,7 +2073,7 @@ test('a recorded copy\'s pid counts as the copy only while ps names the copy\'s 
   const log = runLog('ps-states');
   assert.deepEqual(log.split('\n').filter((l) => l.includes(' now runs another program')).map((l) => l.slice(25)), ['pid 7004 now runs another program: not stopped'], 'only the other program is noted; run.log:\n' + log);
 });
-const checkedLine = /^restore check: \d+ folders as they were \(names, sizes and times; checked twice, [\d.]+ s apart\)$/m;
+const checkedLine = /^restore check: \d+ folders as they were \(names, and sizes and times of files; checked twice, [\d.]+ s apart\)$/m;
 test('the restore check does not name a recorded copy whose pid another program holds at the run\'s end as still running: exit code 0, the clean line, and run.log says the pid now runs another program (round 12; QA-01\'s observation 9)', async () => {
   const r = await runCase('run-copy-pid-reused', undefined, { watchdog: 40000 });
   try {
