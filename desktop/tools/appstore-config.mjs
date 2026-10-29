@@ -20,7 +20,9 @@
 //   tauri.conf.json>) and com.apple.developer.team-identifier (<TEAMID>),
 //   which tie the app to the profile.
 // Both hold a path on this Mac and the team's identifiers, so
-// desktop/.gitignore keeps them out of the repository. Everything is checked
+// desktop/.gitignore keeps them out of the repository, and with them the
+// files a failed or killed run can leave beside them, <name>.earlier-<pid>
+// and <name>.tmp-<pid>, which hold the same (DM-258). Everything is checked
 // before anything is written, and the command refuses, with a plain message,
 // exit code 1 and nothing written: a team id that is not ten upper-case
 // letters or digits; an identity that is not "Apple Distribution: <name>
@@ -155,7 +157,10 @@ export function plan(options, { entitlementsFile = path.join(TAURI, 'Entitlement
 // the put-back fails too: the error then says where the earlier
 // configuration waits (it is kept there), and the two files are from two
 // runs until it is moved back; with no earlier configuration, it names the
-// new one, which stays until it is removed by hand (DM-256). The
+// new one, which stays until it is removed by hand (DM-256). A run killed
+// between the two renames leaves the same mix, with the earlier
+// configuration kept and the second temporary file under their pid names
+// (QA-G-47), which desktop/.gitignore keeps out of the repository. The
 // temporary files, and an earlier file kept and no longer needed, are
 // removed at the end. rename, link and unlink are handed in, so a test can
 // make one fail.

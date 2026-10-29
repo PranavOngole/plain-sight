@@ -541,6 +541,65 @@ test('desktop/.gitignore keeps both files out of the repository, and desktop/pac
   assert.equal(JSON.parse(readFileSync(path.join(DESKTOP, 'package.json'), 'utf8')).scripts['appstore:config'], 'node tools/appstore-config.mjs');
 });
 
+// DM-258 and QA-G-47: what a failed or killed run leaves beside the two
+// files, <name>.earlier-<pid> (a put-back that failed too) and
+// <name>.tmp-<pid> (a kill between the renames), holds the same team id and
+// profile path, so desktop/.gitignore keeps those names out as well. The check
+// runs in a git repository of its own holding a copy of desktop/.gitignore,
+// so it runs the same on an export with no .git (QA-01's C12.11d), with git's
+// system file and the person's own config and ignore files kept out of it.
+test('desktop/.gitignore keeps the command\'s leftovers out as well: in a git repository of its own holding a copy of it, git check-ignore ignores both files and their .earlier-<pid> and .tmp-<pid> names, and not the everyday files; the files write() leaves between its renames and after a failed put-back are listed by no git status (DM-258, QA-G-47; QA-01\'s C12.11d)', () => {
+  const repo = mkdtempSync(path.join(os.tmpdir(), 'plain-sight-gitignore-'));
+  try {
+    const env = { ...process.env, HOME: repo, XDG_CONFIG_HOME: path.join(repo, 'no-config'), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_CEILING_DIRECTORIES']) delete env[name];
+    const git = (...a) => spawnSync('git', ['-C', repo, ...a], { encoding: 'utf8', env });
+    const init = git('init', '-q');
+    assert.equal(init.status, 0, 'git init: ' + init.stderr);
+    const tauri = path.join(repo, 'desktop', 'src-tauri');
+    mkdirSync(tauri, { recursive: true });
+    writeFileSync(path.join(repo, 'desktop', '.gitignore'), readFileSync(path.join(DESKTOP, '.gitignore')));
+    const ignored = (name) => {
+      const r = git('check-ignore', '-q', 'desktop/src-tauri/' + name);
+      assert.ok(r.status === 0 || r.status === 1, 'git check-ignore answered for ' + name + ': ' + r.status + ' ' + r.stderr);
+      return r.status === 0;
+    };
+    for (const file of [CONFIG_NAME, ENTITLEMENTS_NAME]) {
+      for (const name of [file, file + '.earlier-' + process.pid, file + '.tmp-' + process.pid, file + '.earlier-12345', file + '.tmp-12345']) {
+        assert.equal(ignored(name), true, 'git ignores src-tauri/' + name);
+      }
+    }
+    for (const name of ['tauri.conf.json', 'Entitlements.plist', 'Info.plist', 'container-migration.plist']) {
+      assert.equal(ignored(name), false, 'git does not ignore the everyday src-tauri/' + name);
+    }
+    // The names the command itself leaves, from its own write() into that
+    // repository: seen from inside the second rename (what a kill there
+    // leaves, QA-01's C12.11), then after a put-back that failed too (the
+    // Delivery Manager's S18).
+    const listed = () => git('status', '--porcelain', '--untracked-files=all').stdout.split('\n').filter(Boolean);
+    const { config } = earlierPair(tauri);
+    const planned = plan(parseArgs(args({ out: tauri, extra: ['--force'] }), { cwd: ROOT }));
+    const failing = renameFailing(2, 3);
+    let calls = 0;
+    let between = null;
+    const rename = (from, to) => {
+      calls += 1;
+      if (calls === 2) between = { files: readdirSync(tauri).sort(), listed: listed() };
+      return failing(from, to);
+    };
+    let err = null;
+    try { write(planned, { rename }); } catch (e) { err = e; }
+    assert.ok(err && err.message.endsWith('; move it back by hand'), 'the put-back failed too: ' + (err && err.message));
+    const kept = path.basename(config) + '.earlier-' + process.pid;
+    assert.deepEqual(between.files, [CONFIG_NAME, kept, ENTITLEMENTS_NAME, ENTITLEMENTS_NAME + '.tmp-' + process.pid].sort(), 'between the renames: the new configuration, the earlier one kept, the earlier entitlements and the new ones under their temporary name');
+    assert.deepEqual(between.listed, ['?? desktop/.gitignore'], 'between the renames git lists none of them');
+    assert.deepEqual(readdirSync(tauri).sort(), [CONFIG_NAME, kept, ENTITLEMENTS_NAME].sort(), 'after the failed put-back the earlier configuration waits under its kept name');
+    assert.deepEqual(listed(), ['?? desktop/.gitignore'], 'after the failed put-back git lists none of them');
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test('no run of the command wrote into the repository: src-tauri/ is as it was before the suite', () => {
   assert.deepEqual(tauriState(), TAURI_BEFORE);
 });
