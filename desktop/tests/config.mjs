@@ -600,6 +600,27 @@ test('the real-key save and folder tests press a panel\'s default button only af
   }
 });
 
+// PO-R13-1 (round 13): in app-run-1 (29 October, the sandboxed test copy)
+// the Save test's check for a second window wider than 400 never saw the save
+// panel, which came up 370 by 210; the wait sat before inPanel, so nothing
+// cancelled the panel, and it blocked every later test. Only a GUI run
+// reaches app.mjs, so the shape is pinned here: the save panel is any second
+// on-screen window at the normal level, the Save test waits for it inside
+// inPanel, and a failed panel step presses Cancel through Accessibility at
+// least once and notes each try, whatever the test's own check says.
+test('a failed panel step in the real-key suite cancels the panel through Accessibility and notes each try, and the Save test waits for its panel, of any size, inside that guard (PO-R13-1)', () => {
+  const text = read(path.join(DESKTOP, 'tests'), 'app.mjs');
+  const start = text.indexOf('async function inPanel(isOpen, steps) {');
+  assert.ok(start >= 0, 'app.mjs has inPanel');
+  const body = text.slice(start, text.indexOf('\n}\n', start));
+  assert.ok(body.includes("    for (let i = 0; i < 4; i++) {\n      const shown = isOpen();\n      const cancel = driveRaw('panel-button', app.pid, 'Cancel');\n      note('a panel step failed; cancel try ' + (i + 1) + "), 'inPanel presses Cancel through Accessibility on every try, the first whatever isOpen() says, and notes it');
+  assert.ok(body.includes('      if (!cancel.ok && !shown) break;\n'), 'and stops only when there is no Cancel to press and the test sees no panel');
+  assert.match(text, /^const savePanelShown = \(\) => drive\('cgwindows', app\.pid\)\.windows\.filter\(\(x\) => x\.onscreen && x\.layer === 0\)\.length >= 2;$/m, 'the save panel is any second on-screen window at the normal level');
+  const at = text.indexOf('await inPanel(savePanelShown, async () => {');
+  assert.ok(at >= 0 && text.slice(at, at + 200).includes("\n    await until(savePanelShown, 'the save panel on screen', 10000);\n"), 'the Save test waits for its panel inside inPanel');
+  assert.equal(/\n  await until\(savePanelShown, 'the save panel on screen'/.test(text), false, 'and not before it');
+});
+
 // e2e-run-4's show step (round 11): in e2e-run-4 (a92087a, 28 October 2026)
 // the hidden-document test's page stayed hidden for the whole 5 s wait after
 // the hook's show, which was AppHandle::show, an unhide alone (tao 0.37.1's

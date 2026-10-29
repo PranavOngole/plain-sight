@@ -208,12 +208,27 @@ async function sightFile(text, password) {
 // 8; Accessibility lists it about a second before it is on screen, and while
 // it is open the app takes no other input, so a test that fails with it open
 // cancels it (diag-open-panel, app-run-2).
+//
+// The steps inside a panel type into its Go-to box with keys the driver posts
+// to the app's own process, while macOS draws open and save panels in a
+// separate process (Apple's NSOpenPanel and NSSavePanel pages: always since
+// macOS 10.15, sandboxed or not). No real-key run has seen a panel take those
+// keys (wave-d app-run-1 to 4 on 21 October, wave-g app-run-1 on 29
+// October), so the steps fail until the driver reaches the panel's own
+// process (PO-R13-1). A failed step presses the panel's Cancel through
+// Accessibility (the driver's panel-button), noting each try in run.log,
+// whether or not the test's own check sees the panel: in app-run-1 the save
+// panel was smaller than that check expected, stayed up and blocked every
+// later test. Esc only when no Cancel button is found.
 const openPanelShown = () => (driveRaw('windows', app.pid).windows || []).some((w) => w.title === 'Open' && w.subrole === 'AXDialog');
 async function inPanel(isOpen, steps) {
   try { await steps(); } catch (err) {
-    // Cancel until it is gone: Esc may close only the Go-to box on top of it.
-    for (let i = 0; i < 4 && isOpen(); i++) {
-      if (!driveRaw('panel-button', app.pid, 'Cancel').ok) await keys.press('escape');
+    for (let i = 0; i < 4; i++) {
+      const shown = isOpen();
+      const cancel = driveRaw('panel-button', app.pid, 'Cancel');
+      note('a panel step failed; cancel try ' + (i + 1) + ': the test sees the panel ' + shown + ', panel-button Cancel -> ' + JSON.stringify(cancel));
+      if (!cancel.ok && !shown) break;
+      if (!cancel.ok) await keys.press('escape');
       await sleep(1000);
     }
     throw err;
@@ -286,7 +301,11 @@ test('Open shows the system open panel; a wrong password changes nothing; the ri
 // panel's default button) only once the panel shows that folder (DM-239 d);
 // the file must land there and decrypt to the text.
 const SAVE_AS = path.join(EVIDENCE, 'folders', 'Saved from the panel');
-const savePanelShown = () => drive('cgwindows', app.pid).windows.filter((x) => x.onscreen && x.layer === 0 && x.width > 400).length >= 2;
+// The save panel is a second window on screen at the normal level, of any
+// size: in app-run-1 (29 October, the sandboxed copy) it came up 370 by 210
+// in its compact form, centred on the document window, and a check for a
+// second window wider than 400 never saw it (PO-R13-1).
+const savePanelShown = () => drive('cgwindows', app.pid).windows.filter((x) => x.onscreen && x.layer === 0).length >= 2;
 test('Save without a folder opens the system save panel; saved into the test\'s own folder through the panel, the .sight file decrypts to the text', async () => {
   mkdirSync(SAVE_AS, { recursive: true });
   await cleanPage();
@@ -296,9 +315,9 @@ test('Save without a folder opens the system save panel; saved into the test\'s 
   await keys.type('panel password 2026');   // the page's password dialog, then its Save button
   await keys.press('return');
   await sleep(3000);   // the key derives from the password (310,000 rounds)
-  await until(savePanelShown, 'the save panel on screen', 10000);
-  note('windows with the save panel open: ' + JSON.stringify(drive('cgwindows', app.pid).windows.filter((x) => x.onscreen)));
   await inPanel(savePanelShown, async () => {
+    await until(savePanelShown, 'the save panel on screen', 10000);
+    note('windows with the save panel open: ' + JSON.stringify(drive('cgwindows', app.pid).windows.filter((x) => x.onscreen)));
     await goTo(SAVE_AS);
     await keys.press('return');   // Save, the panel's default button, now that the panel shows the test's folder
     await until(() => !savePanelShown(), 'the save panel to close', 8000);
