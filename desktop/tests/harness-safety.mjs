@@ -91,7 +91,7 @@ if (process.argv[2] === '--child') {
   // hidden-document test for the front app's pid, and pgrep whether the app
   // is open. It answers from `fake`, the case's state; every other program
   // runs as it is (plutil reads a fake bundle's Info.plist).
-  const fake = { locked: false, idle: 600, windows: [], front: 4243 };
+  const fake = { locked: false, idle: 600, windows: [], front: 4243, ps: null };
   const started = Date.now();
   const exec = childProcess.execFileSync;
   childProcess.execFileSync = (file, args = [], options) => {
@@ -105,6 +105,13 @@ if (process.argv[2] === '--child') {
       return JSON.stringify(answer) + '\n';
     }
     if (file === 'pgrep') throw Object.assign(new Error('pgrep found no process'), { status: 1, stdout: '' });
+    // ps, for a case that gives its answers by pid (fake.ps): the line, or
+    // none for no such process, when ps exits with 1 (round 12).
+    if (file === 'ps' && fake.ps) {
+      const answer = fake.ps[Number(args[args.indexOf('-p') + 1])];
+      if (answer === undefined) throw Object.assign(new Error('ps found no process'), { status: 1, stdout: '' });
+      return answer + '\n';
+    }
     return exec(file, args, options);
   };
   syncBuiltinESMExports();
@@ -547,6 +554,15 @@ if (process.argv[2] === '--child') {
       await stopCurrentFor({ pid: holder.pid });
       await waitsFor(holder.pid);
       await holderAfter(holder);
+    },
+    // What ps can answer for a recorded copy's pid, given here: the copy's
+    // executable; the flag E with only the short name, as ps showed a copy
+    // ending just after a SIGTERM; the state Z; another program; no process.
+    async 'ps-states'() {
+      const exe = path.join(copyBundle, 'Contents', 'MacOS', 'plain-sight');
+      fake.ps = { 7001: 'S    ' + exe, 7002: '?E   (node)', 7003: 'Z    <defunct>', 7004: 'S    /usr/libexec/another-program' };
+      for (const pid of [7001, 7002, 7003, 7004, 7005]) { h.recordLaunch(pid, copyBundle); console.log('ALIVE ' + pid + ' ' + h.alive(pid)); }
+      await h.sleep(300);
     },
     // A copy that still runs the copy's executable, recorded the same way, is
     // stopped: the SIGTERM reaches it by its pid.
@@ -1662,6 +1678,16 @@ test('a copy recorded through LaunchServices that still runs the copy\'s executa
   } finally {
     endHolders(r);
   }
+});
+// ps's answers, from the child's stand-in for ps: an ending copy was taken
+// for another program at first (614610b; the copy-stopped case's control in
+// round 12's break B2).
+test('a recorded copy\'s pid counts as the copy only while ps names the copy\'s executable: a process ending (the flag E, its short name only) or ended (the state Z) counts as ended, not as another program, and only another program is noted (round 12, the reused pid)', async () => {
+  const r = await runCase('ps-states');
+  ended(r, 0);
+  assert.deepEqual(r.out.split('\n').filter((l) => l.startsWith('ALIVE ')), ['ALIVE 7001 true', 'ALIVE 7002 false', 'ALIVE 7003 false', 'ALIVE 7004 false', 'ALIVE 7005 false'], 'the child\'s output:\n' + r.out);
+  const log = runLog('ps-states');
+  assert.deepEqual(log.split('\n').filter((l) => l.includes(' now runs another program')).map((l) => l.slice(25)), ['pid 7004 now runs another program: not stopped'], 'only the other program is noted; run.log:\n' + log);
 });
 const checkedLine = /^restore check: \d+ folders as they were \(names, sizes and times; checked twice, [\d.]+ s apart\)$/m;
 test('the restore check does not name a recorded copy whose pid another program holds at the run\'s end as still running: exit code 0, the clean line, and run.log says the pid now runs another program (round 12; QA-01\'s observation 9)', async () => {

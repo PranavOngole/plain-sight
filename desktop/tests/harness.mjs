@@ -250,8 +250,10 @@ export function recordLaunch(pid, what, child = null) {
 // The program the process with this pid runs, as ps names it (the first word
 // of its argument list: for an app LaunchServices started, the full path of
 // its executable), or null when no process runs with that pid: none has it,
-// or the one that has it has ended and waits to be reaped (state Z, which ps
-// shows as <defunct>).
+// or the one that has it is ending or has ended and waits to be reaped. ps
+// marks an ending process with the flag E ("trying to exit") and shows only
+// its short name in parentheses, "(node)" say (7 of 240 looks just after a
+// SIGTERM, round 12), and an ended one with the state Z, as <defunct>.
 export function programOf(pid) {
   let out;
   try {
@@ -261,7 +263,7 @@ export function programOf(pid) {
     throw err;
   }
   const [, stat, program] = out.replace(/\n+$/, '').match(/^\s*(\S+)\s+(.*)$/s) || [];
-  return stat && !stat.startsWith('Z') ? program : null;
+  return stat && !/[EZ]/.test(stat) ? program : null;
 }
 const anyProcess = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 // Where a launch stands now: 'running', 'ended', or 'other' when its pid
