@@ -50,6 +50,16 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 14
+
+Wave G, round 14, 29 October 2026, Developer N (appstore-candidate).
+
+- The real-key suite goes to a panel's folder by the clipboard (PO-R13-1, the robot's route, the Delivery Manager's preference). macOS draws the panels in their own process and the driver posts keys only to the app's, so a typed path never reached a panel. goTo now puts the path on the clipboard, opens the Go to Folder sheet with Cmd+Shift+G, pastes with Cmd+V (the app's Paste; Cmd+C reached the save panel's field through the app's Copy in app-run-1) and goes with Return. Each step is read back through Accessibility before the next: the sheet's own field is seen, then seen holding the path, then the sheet is gone and the panel's location menu names the folder. Return is sent only while that field holds the path, since the sheet on this macOS has no Go button (FinderKit's GotoWindow.nib). The panels' own buttons (Open, Save, the folder panel's Open) are Accessibility presses, never Return. A failed step presses Esc while the sheet is up and notes what the panels show, leaving out their file lists. The driver's output may now be up to 64 MB, since a panel's tree can list a whole folder.
+- A panel's button is pressed only over the test's own folder (DM-263). The panel's location menu must name the test's own folder, and that folder must hold exactly what the test put there: the open test's file alone, and nothing for Save and the folder panel. The driver reads no selection, so the open test's file sits alone in a folder of its own ("Opened from the panel"), where Open can open nothing else. Otherwise the test fails, naming the folder the panel shows, and the panel is cancelled.
+- The README, `APPSTORE.md`, this changelog and two test texts say what the probe of 26 October saw (I-29): no answer in 31 seconds without the network client entitlement and an answer in 2.5 seconds with it, the one difference between the two probe builds. Before, they said the system web view needs it to draw the page.
+- The clean restore line says "names, and sizes and times of files" (I-30), since a folder has no size or time in the listing.
+- A fake-home case holds that the suites' end (endCopies) never takes a bystander for a copy while ps fails (PO-R13-2). The Product Owner's PO3-COPIES-PS-FAIL, a ps failure taken for a copy, had passed every suite at a85b90f.
+
 ## Round 13
 
 Wave G, round 13, 29 October 2026, Developer N (appstore-candidate).
