@@ -187,7 +187,11 @@ async function focusControl(id) {
 
 // A .sight file made outside the app, by the format the README documents:
 // it is what the web page writes, so opening it in the app proves the two read
-// the same files.
+// the same files. It sits alone in a folder of the test's own under the
+// evidence directory (DM-263, round 14): once the open panel shows that
+// folder, the panel has no other file for Open to open.
+const OPEN_FROM = path.join(EVIDENCE, 'folders', 'Opened from the panel');
+const OPEN_NAME = 'made-outside-the-app.sight';
 async function sightFile(text, password) {
   const salt = webcrypto.getRandomValues(new Uint8Array(16));
   const iv = webcrypto.getRandomValues(new Uint8Array(12));
@@ -195,7 +199,8 @@ async function sightFile(text, password) {
   const key = await webcrypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 310000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
   const data = new Uint8Array(await webcrypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(text)));
   const b64 = (u) => Buffer.from(u).toString('base64');
-  const file = path.join(EVIDENCE, 'made-outside-the-app.sight');
+  mkdirSync(OPEN_FROM, { recursive: true });
+  const file = path.join(OPEN_FROM, OPEN_NAME);
   writeFileSync(file, JSON.stringify({ format: 'plain-sight', version: 1, cipher: 'AES-256-GCM', kdf: 'PBKDF2-SHA-256', iterations: 310000, salt: b64(salt), iv: b64(iv), data: b64(data) }, null, 2));
   return file;
 }
@@ -340,6 +345,28 @@ async function goTo(target, folder = target) {
   }
   note('the panel shows ' + name + ' after the Go to Folder sheet');
 }
+// DM-263 (and DM-239 d): a panel's own button acts on the folder the panel
+// shows, and the open panel's Open on the file selected in it. The button is
+// pressed only when the panel shows the test's own folder, by its location
+// menu, and that folder holds exactly what the test put there: its one file
+// for Open, nothing for Save and for the folder panel, so the button can act
+// on nothing but the test's own. The driver reads no selection (its tree has
+// no AXSelected), so the open test makes the selection not matter: in a
+// folder that holds the test's file alone, Open can open only that file.
+// Otherwise the test fails here, naming the folder the panel shows by its
+// name only, and inPanel cancels the panel.
+function mustShowOwnFolder(folder, holds) {
+  const name = path.basename(folder);
+  const shown = panelFolders();
+  if (!shown.includes(name)) {
+    throw new Error('the panel shows ' + (shown.length ? shown.map((s) => JSON.stringify(s)).join(', ') : 'no folder by name') + ', not the test\'s own folder ' + JSON.stringify(name) + ', so the test cancels the panel instead of pressing its button');
+  }
+  const held = readdirSync(folder).sort();
+  if (JSON.stringify(held) !== JSON.stringify(holds)) {
+    throw new Error('the test\'s own folder ' + JSON.stringify(name) + ' holds ' + JSON.stringify(held) + ', not ' + JSON.stringify(holds) + ', so the test cancels the panel instead of pressing its button');
+  }
+  note('the panel shows the test\'s own folder ' + name + ', which holds ' + JSON.stringify(holds));
+}
 // A panel's own button, pressed through Accessibility (the driver's
 // panel-button), never by Return: the first of the titles the panel has.
 async function pressPanelButton(...titles) {
@@ -356,6 +383,7 @@ async function openWithKeys(file, password) {
   await sleep(800);
   await inPanel(openPanelShown, async () => {
     await goTo(file, path.dirname(file));   // the panel shows the file's folder, with the file selected
+    mustShowOwnFolder(path.dirname(file), [path.basename(file)]);   // DM-263: Open can open nothing but the test's file
     await pressPanelButton('Open');
     await until(() => !openPanelShown(), 'the open panel to close', 8000);
   });
@@ -399,6 +427,7 @@ test('Save without a folder opens the system save panel; saved into the test\'s 
     await until(savePanelShown, 'the save panel on screen', 10000);
     note('windows with the save panel open: ' + JSON.stringify(drive('cgwindows', app.pid).windows.filter((x) => x.onscreen)));
     await goTo(SAVE_AS);
+    mustShowOwnFolder(SAVE_AS, []);   // DM-263's rule: the folder Save writes into is the test's own, still empty
     await pressPanelButton('Save');   // through Accessibility, now that the panel shows the test's folder
     await until(() => !savePanelShown(), 'the save panel to close', 8000);
   });
@@ -476,6 +505,7 @@ test('choosing the test\'s own folder in the picker (typed into its Go-to box), 
   mkdirSync(BUILD_TEST, { recursive: true });
   await inPanel(folderSheetShown, async () => {
     await goTo(BUILD_TEST);
+    mustShowOwnFolder(BUILD_TEST, []);   // DM-263's rule: the folder chosen is the one shown, the test's own and empty, so nothing in it can be chosen instead
     await pressPanelButton('Open', 'Choose');   // the folder panel's default button (rfd sets no prompt, so NSOpenPanel's own "Open"), through Accessibility
     await until(() => !folderSheetShown(), 'the picker to close', 8000);
   });

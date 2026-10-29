@@ -616,6 +616,39 @@ test('the real-key open, save and folder tests press a panel\'s own button, thro
   assert.ok(press.includes("driveRaw('panel-button', app.pid, title)"), 'a panel\'s button is pressed through the driver\'s panel-button, an Accessibility press');
 });
 
+// DM-263 (round 14): the real-key Open test pressed the open panel's Open
+// without checking what the panel had selected, so a remembered selection
+// (a personal .sight file, say) could have been opened and tried with the
+// test's passwords. Every panel's own button is now pressed only after
+// mustShowOwnFolder, which fails unless the panel shows the test's own folder
+// by its location menu and that folder holds exactly what the test put there:
+// the open test's file alone, or nothing for the save and folder panels. The
+// driver reads no selection, so the open test's file sits alone in a folder
+// of its own, where Open can open nothing else. Only a GUI run reaches
+// app.mjs, so the checks are pinned here.
+test('the real-key open, save and folder tests press a panel\'s button only when the panel shows the test\'s own folder, holding the test\'s file alone for Open and nothing for Save and the folder panel (DM-263, round 14)', () => {
+  const text = read(path.join(DESKTOP, 'tests'), 'app.mjs');
+  for (const [panel, check, button] of [
+    ['openPanelShown', 'mustShowOwnFolder(path.dirname(file), [path.basename(file)]);', "await pressPanelButton('Open');"],
+    ['savePanelShown', 'mustShowOwnFolder(SAVE_AS, []);', "await pressPanelButton('Save');"],
+    ['folderSheetShown', 'mustShowOwnFolder(BUILD_TEST, []);', "await pressPanelButton('Open', 'Choose');"]
+  ]) {
+    const at = text.indexOf('await inPanel(' + panel + ', async () => {');
+    assert.ok(at >= 0, 'the ' + panel + ' flow');
+    const body = text.slice(at, text.indexOf('});', at));
+    const go = body.indexOf('await goTo(');
+    assert.ok(go >= 0 && body.indexOf(check) > go, 'the ' + panel + ' flow checks the panel shows the test\'s own folder after goTo');
+    assert.ok(body.indexOf(button) > body.indexOf(check), 'and only then presses the panel\'s button');
+  }
+  const start = text.indexOf('function mustShowOwnFolder(folder, holds) {');
+  assert.ok(start >= 0, 'app.mjs has mustShowOwnFolder');
+  const body = text.slice(start, text.indexOf('\n}\n', start));
+  assert.ok(body.includes('const shown = panelFolders();\n  if (!shown.includes(name)) {\n    throw new Error('), 'it fails unless the panel\'s location menu names the test\'s own folder');
+  assert.ok(body.includes('const held = readdirSync(folder).sort();\n  if (JSON.stringify(held) !== JSON.stringify(holds)) {\n    throw new Error('), 'and unless that folder holds exactly what the test put there');
+  assert.match(text, /^const OPEN_FROM = path\.join\(EVIDENCE, 'folders', 'Opened from the panel'\);$/m, 'the open test\'s file has a folder of its own under the evidence directory');
+  assert.ok(text.includes('  mkdirSync(OPEN_FROM, { recursive: true });\n  const file = path.join(OPEN_FROM, OPEN_NAME);\n'), 'and sightFile writes it there');
+});
+
 // PO-R13-1, the robot's route to a panel (round 14, the Delivery Manager's
 // preference): macOS draws the panels in their own process and the driver
 // posts keys only to the app's, so a typed path never reaches a panel. goTo
