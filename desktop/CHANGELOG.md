@@ -50,6 +50,24 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 24
+
+Wave G, round 24, 30 October 2026, Developer N (appstore-candidate).
+
+- The last round on the signal guard, under the Product Owner's D-59: the guard is a net for a mistaken edit of the test code, not a sandbox, so what is cheap is closed and every other way past it is written down. QA-01 found ten routes past the guard of 6eea2b7 that its comment did not name (QA-G-55). Its r22_wordrule_adv.mjs, run against 8d34b2e, found round 23 already refusing the worker thread in both of its forms, `NODE_OPTIONS=` in a shell's command and `env -i node`; seven of the ten still reached its own outside process. Six of those are now closed:
+  - Names are compared without case, so `/bin/KILL`, `/bin/Kill` and a bare `KILL` (the volume and the shell's lookup ignore case) are refused.
+  - A word whose last path segment, read as a shell glob, can match one of the four names (`/bin/k?ll`, `/bin/[k]ill`, `/bin/k*`) is refused. A glob that cannot, such as the copies-regex case's `[x]` and `Sight*`, still passes.
+  - Every start is also read at `ChildProcess.prototype.spawn`, where spawn, fork, exec and execFile all start, so `ChildProcess.spawn` called directly is read too, and its environment gets the guard's module.
+
+  A new part of the proof case tries QA-01's routes, credited, aimed at the case's uniquely named clone, each refused: the three in another case and `PKILL`, `KillAll` and `OSAScript`, the three globs, `ChildProcess.spawn`, and QA-01's string shell option. The seventh route, a link to kill made with fs and run by its own name, is written down: the word rule reads names, not files.
+- QA-01's five breaks that passed every gate (QA-G-56) are now red in the suite, with QA-01's cases, credited:
+  - P4: the hostile-prints test now holds a stand-in of the case that has ended and is not reaped, which the parent must leave alone.
+  - P9: a folder of the case that is a link out of the run's folder, with a stand-in started through it, which the parent must refuse.
+  - W5: a string shell option, refused.
+  - W9: the counter of signals tried now has positive controls, in the proof case and in copies-ending, so the suite's "signals 0" lines are not vacuous.
+  - W10: a new case sends a signal to a process group of its own and must fail for the refusal, the group untouched.
+- README 223 and the suite's comment name every limit that remains: what a program other than node does, including starting node with an emptied environment; a program under another name; a name built while a command runs (variables, `$CMD`, `eval`, `$(printf ...)`, `base64`, another language); and a command read from standard input or a script file.
+
 ## Round 23
 
 Wave G, round 23, 30 October 2026, Developer N (appstore-candidate).

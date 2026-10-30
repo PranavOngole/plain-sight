@@ -166,6 +166,31 @@ const EVASIONS = (pid, node) => {
   ];
 };
 const evasionText = (t) => (t.how === 'execSync' || t.how === 'exec' ? t.line : t.how === '/bin/sh -c' ? '/bin/sh -c ' + t.line : t.argv.join(' '));
+// QA-G-55 and QA-G-56 (round 24): QA-01's routes from r22_wordrule_adv.mjs
+// (wave-g/qa/scripts/app) that the guard of 6eea2b7 let reach its own
+// outside process, and its string shell option (its W5), each aimed at the
+// proof case's second stand-in alone, -TERM in place of its -USR1: the names
+// in another case (the volume and the shell's lookup ignore case), a glob in
+// the name, and ChildProcess.spawn called directly; with PKILL, KillAll and
+// OSAScript, so that each of the four is tried in another case. how is the
+// way each is started, and routeText the text the guard reads.
+const ROUTES = (pid, name) => {
+  const script = shellWord('do shell script "/bin/ki" & "ll -TERM ' + pid + '"');
+  return [
+    { what: '/bin/KILL, upper case (QA-01)', names: 'kill', how: 'execSync', line: '/bin/KILL -TERM ' + pid },
+    { what: '/bin/Kill, mixed case (QA-01)', names: 'kill', how: 'execSync', line: '/bin/Kill -TERM ' + pid },
+    { what: 'KILL looked up through PATH (QA-01)', names: 'kill', how: 'execSync', line: 'KILL -TERM ' + pid },
+    { what: '/usr/bin/PKILL in /bin/sh -c', names: 'pkill', how: '/bin/sh -c', line: '/usr/bin/PKILL -TERM -x ' + name },
+    { what: '/usr/bin/KillAll in /bin/sh -c', names: 'killall', how: '/bin/sh -c', line: '/usr/bin/KillAll -TERM ' + name },
+    { what: '/usr/bin/OSAScript in /bin/sh -c', names: 'osascript', how: '/bin/sh -c', line: '/usr/bin/OSAScript -e ' + script },
+    { what: '/bin/k?ll, a glob (QA-01)', names: 'kill', how: 'execSync', line: '/bin/k?ll -TERM ' + pid },
+    { what: '/bin/[k]ill, a glob (QA-01)', names: 'kill', how: 'execSync', line: '/bin/[k]ill -TERM ' + pid },
+    { what: '/bin/k*, a glob (QA-01)', names: 'kill and killall', how: 'execSync', line: '/bin/k* -TERM ' + pid },
+    { what: 'ChildProcess.spawn called directly (QA-01)', names: 'kill', how: 'ChildProcess.spawn', argv: ['/bin/kill', 'kill', '-TERM', String(pid)] },
+    { what: 'a string shell option, spawnSync(\'x\', [], { shell: \'/bin/kill\' }) (QA-01\'s W5)', names: 'kill', how: 'shell option', text: 'x /bin/kill' }
+  ];
+};
+const routeText = (t) => (t.how === 'execSync' ? t.line : t.how === '/bin/sh -c' ? '/bin/sh -c ' + t.line : t.how === 'ChildProcess.spawn' ? t.argv.join(' ') : t.text);
 
 // PO-R18-1 (round 19), DM-268 and DISH-G-103 (round 21): a child of this
 // suite never signals a process outside its own case's folder, whatever the
@@ -204,6 +229,14 @@ const evasionText = (t) => (t.how === 'execSync' || t.how === 'exec' ? t.line : 
 //   $'\x6b'ill is kill): each refused as a command, in the same ways.
 // - DM-270: a worker thread, whose process (and its kill) is its own and
 //   not wrapped here: a Worker is refused at its start.
+// - QA-G-55 (round 24): names are compared without case (the volume and the
+//   shell's lookup ignore it, so /bin/KILL runs kill); a word whose last
+//   path segment, read as a shell glob, can match one of the four names
+//   (k?ll, [k]ill, k*) is refused as if it named it; and every start is read
+//   at ChildProcess.prototype.spawn too, the one place spawn, fork, exec and
+//   execFile all go through, so that ChildProcess.spawn called directly is
+//   read as well (spawnSync, execSync and execFileSync are read at their
+//   own functions), and the environment it is given gets the guard's module.
 // - Every node a case starts, by fork, spawn or a shell, at any depth, with
 //   the environment it is given: it loads this same guard first, from the
 //   module the guard writes into the case's folder from its own text at its
@@ -216,13 +249,18 @@ const evasionText = (t) => (t.how === 'execSync' || t.how === 'exec' ? t.line : 
 // make one, is the same guard, its module included.
 // Each refusal is printed with the pid and the program, or the command, and
 // written to the case's refusals file, and runCase fails the case for it.
-// What it does not cover: what a program other than node does once it runs
-// (a shell script file or a compiled program can signal by itself, unseen:
-// only the command that starts it is read, so a program under another name,
-// a link to /bin/kill named otherwise, is not seen, and such a program can
-// start node without NODE_OPTIONS); a name built while a command runs (a
-// variable, eval, $(printf ...), or a command a shell reads on its standard
-// input, which is data here); the moment between the guard's look at a
+// What it does not cover (round 24, the Product Owner's D-59: the guard is a
+// net for a mistaken edit of the test code, not a sandbox): what a program
+// other than node does once it runs (a shell script file or a compiled
+// program can signal by itself, unseen: only the command that starts it is
+// read); a program under another name (a link to /bin/kill made with fs and
+// run by its own name, QA-01's QA-G-55: the word rule reads names, not
+// files); a node such a program starts with an emptied environment; a name
+// built while a command runs (two variables, $CMD from the environment, eval
+// of a variable, $(printf ...), base64, or a name built inside another
+// language such as python's getattr); a command a shell or xargs reads on
+// its standard input, or from a script file, which is data here; the
+// moment between the guard's look at a
 // target with ps and its send, in which a target that runs another program
 // (exec) still gets the signal (QA-01 measured it; the parent's endCasePid
 // has the same moment); and the driver, which never runs in a child (the
@@ -273,7 +311,20 @@ function installSignalGuard(box) {
   // A command's words as a shell reads them: its quotes and backslashes
   // taken out, split at blanks and at ; & | ( ) < > ` $ = { } , and the dot.
   const REFUSED = ['kill', 'pkill', 'killall', 'osascript'];
-  const named = (parts) => parts.flatMap((part) => String(part).replace(/['"\\]/g, '').split(/[\s;&|()<>`$={},.]+/)).map((word) => path.basename(word)).filter((name) => REFUSED.includes(name));
+  // QA-G-55 (round 24): a last path segment that holds a glob character is
+  // read as the shell would match it, against the four names.
+  const globMatches = (glob, name) => {
+    let pattern = '';
+    for (let i = 0; i < glob.length; i += 1) {
+      const end = glob[i] === '[' ? glob.indexOf(']', i + 2) : -1;
+      if (glob[i] === '*') pattern += '.*';
+      else if (glob[i] === '?') pattern += '.';
+      else if (end > 0) { pattern += '[' + glob.slice(i + 1, end).replace(/^!/, '^').replace(/\\/g, '\\\\') + ']'; i = end; }
+      else pattern += glob[i].replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+    }
+    try { return new RegExp('^' + pattern + '$').test(name); } catch { return true; }
+  };
+  const named = (parts) => parts.flatMap((part) => String(part).replace(/['"\\]/g, '').split(/[\s;&|()<>`$={},.]+/)).map((word) => path.basename(word).toLowerCase()).flatMap((name) => (REFUSED.includes(name) ? [name] : /[*?[]/.test(name) ? REFUSED.filter((refused) => globMatches(name, refused)) : []));
   // DM-270 (round 23): a command that names NODE_OPTIONS, runs env with an
   // option, or uses ANSI-C quoting; why, or null.
   const evading = (parts) => {
@@ -281,7 +332,7 @@ function installSignalGuard(box) {
     const words = text.replace(/['"\\]/g, '').split(/[\s;&|()<>`$={},.]+/);
     if (text.includes("$'")) return "uses ANSI-C quoting ($'...'), which a shell decodes into names this guard cannot read";
     if (words.includes('NODE_OPTIONS')) return 'sets or clears NODE_OPTIONS, which would start node without this guard';
-    if (words.some((word, i) => path.basename(word) === 'env' && /^-/.test(words[i + 1] || ''))) return 'runs env with an option, which can empty the environment and NODE_OPTIONS with it';
+    if (words.some((word, i) => path.basename(word).toLowerCase() === 'env' && /^-/.test(words[i + 1] || ''))) return 'runs env with an option, which can empty the environment and NODE_OPTIONS with it';
     return null;
   };
   // Every node the case starts loads this guard first (DM-268): its own
@@ -296,9 +347,7 @@ function installSignalGuard(box) {
   // Every way child_process starts a program, its arguments read: the
   // strings and lists it is given, and the options' shell, execPath and
   // execArgv; the options' environment gets the guard's module.
-  const guarded = (start) => function guarded(...args) {
-    const options = args.find((a) => a && typeof a === 'object' && !Array.isArray(a)) || {};
-    const parts = [...args.filter((a) => typeof a === 'string'), ...args.filter(Array.isArray).flat(), ...[options.shell, options.execPath].filter((x) => typeof x === 'string'), ...(Array.isArray(options.execArgv) ? options.execArgv : [])];
+  const check = (parts) => {
     const names = named(parts);
     if (names.length) {
       const text = parts.join(' ');
@@ -311,10 +360,26 @@ function installSignalGuard(box) {
       refuse('the command ' + JSON.stringify(text) + ' ' + evaded + ': a child of this suite runs no such command');
       throw Object.assign(new Error('refused by the safety suite\'s signal guard: ' + text), { code: 'EPERM' });
     }
+  };
+  const guarded = (start) => function guarded(...args) {
+    const options = args.find((a) => a && typeof a === 'object' && !Array.isArray(a)) || {};
+    const parts = [...args.filter((a) => typeof a === 'string'), ...args.filter(Array.isArray).flat(), ...[options.shell, options.execPath].filter((x) => typeof x === 'string'), ...(Array.isArray(options.execArgv) ? options.execArgv : [])];
+    check(parts);
     process.env.NODE_OPTIONS = withPreload(process.env.NODE_OPTIONS);
     return start.apply(this, args.map((a) => (a === options && options.env ? { ...options, env: { ...options.env, NODE_OPTIONS: withPreload(options.env.NODE_OPTIONS) } } : a)));
   };
   for (const name of ['execFileSync', 'execFile', 'spawnSync', 'spawn', 'execSync', 'exec', 'fork']) childProcess[name] = guarded(childProcess[name]);
+  // QA-G-55 (round 24): the one place spawn, fork, exec and execFile all go
+  // through, and ChildProcess.spawn called directly: its program and
+  // arguments read, and the guard's module added to its environment.
+  const spawnChild = childProcess.ChildProcess.prototype.spawn;
+  childProcess.ChildProcess.prototype.spawn = function spawn(options) {
+    check([options && options.file, ...(options && Array.isArray(options.args) ? options.args : [])].filter((x) => typeof x === 'string'));
+    if (!options || !Array.isArray(options.envPairs)) return spawnChild.call(this, options);
+    const others = options.envPairs.filter((pair) => !String(pair).startsWith('NODE_OPTIONS='));
+    const given = options.envPairs.find((pair) => String(pair).startsWith('NODE_OPTIONS='));
+    return spawnChild.call(this, { ...options, envPairs: [...others, 'NODE_OPTIONS=' + withPreload(given ? String(given).slice('NODE_OPTIONS='.length) : '')] });
+  };
   // DM-270 (round 23): a worker thread's process is its own, and its kill is
   // not wrapped here; a child of this suite starts none, so a Worker is
   // refused at its start.
@@ -1118,6 +1183,13 @@ if (process.argv[2] === '--child') {
       await h.endCopies([copyBundle], (pid) => { asked.push(pid); left = left.filter((row) => row[0] !== pid); fake.psList = listing(left); });
       console.log('ASKED ' + JSON.stringify(asked) + ' SIGNALS ' + (signalGuard.tried() - tried));
       fake.psList = null;
+      // QA-G-56 W9 (round 24, QA-01's sigguard-adv): the counter these SIGNALS
+      // lines read moves for every process.kill tried, so their 0 is not
+      // vacuous: one signal to a holder of the case, inside its folder.
+      const holder = await pidHolder(nodeHere, 'quits');
+      tried = signalGuard.tried();
+      process.kill(holder.pid, 'SIGTERM');
+      console.log('POSITIVE CONTROL TRIED ' + (signalGuard.tried() - tried));
     },
     // DM-269 (round 21): the hostile prints, each aimed at the parent's own
     // stand-ins alone (TARGETS): the Delivery Manager's recorder lines
@@ -1127,19 +1199,50 @@ if (process.argv[2] === '--child') {
     // with the pid of a process outside it, the pid of a process in the run's
     // folder but in no case's folder, a SECOND line, and both pids in the
     // case's stand-in and late-writer pid files. The case signals nothing.
-    'hostile-prints'() {
-      const { outsider, neighbour, far, near } = JSON.parse(process.env[TARGETS]);
+    // QA-G-56 (round 24, QA-01's parent-adv, credited): the pid of the
+    // parent's third stand-in, started through a folder of the case that is
+    // a link out of the run's folder (its P9), and a stand-in of the case's
+    // own that has ended and is not reaped (its P4): a node started by a
+    // shell that then becomes sleep and never waits for it, so ps shows it
+    // in the state Z, as <defunct>; the parent finds nothing to end in it.
+    async 'hostile-prints'() {
+      const { outsider, neighbour, linker, far, near } = JSON.parse(process.env[TARGETS]);
+      const zombieFile = path.join(box, 'zombie-pid');
+      const sleepHere = programHere('sleep', '/bin/sleep');
+      spawn('/bin/sh', ['-c', '"$0" -e "process.exit(0)" & echo $! > "$1"; exec "$2" 10', nodeHere, zombieFile, sleepHere], { stdio: 'ignore' });
+      const zombie = await h.until(() => {
+        const pid = existsSync(zombieFile) ? Number(readFileSync(zombieFile, 'utf8').trim()) : 0;
+        const stat = pid > 0 ? String(childProcess.spawnSync('/bin/ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout || '').trim() : '';
+        return /^Z/.test(stat) ? { pid, stat } : null;
+      }, 'the case\'s stand-in to end, not reaped', 5000);
+      console.log('ZOMBIE ' + zombie.pid + ' ' + zombie.stat);
       for (const line of [
         'HOLDER ' + outsider + ' /',
         'BYSTANDER ' + outsider + ' .',
         'COPY ' + outsider + ' ' + path.join(far, 'holder-1-signals'),
         'OTHER ' + outsider + ' ' + path.join(box, 'holder-2-signals'),
         'HOLDER ' + neighbour + ' ' + path.join(box, 'holder-3-signals'),
+        'HOLDER ' + linker + ' ' + path.join(box, 'holder-4-signals'),
+        'HOLDER ' + zombie.pid + ' ' + path.join(box, 'holder-5-signals'),
         'OUTSIDE ' + outsider + ' ' + path.join(far, 'stand-in'),
         'SECOND ' + neighbour + ' stand-in ' + path.join(near, 'stand-in')
       ]) console.log(line);
       writeFileSync(path.join(box, STANDIN_PIDS), outsider + '\n' + neighbour + '\n');
       writeFileSync(path.join(box, LATE_PIDS), outsider + '\n');
+    },
+    // QA-G-56 W10 (round 24, QA-01's sigguard-adv): a signal to a process
+    // group, aimed at a group of the case's own (a sleep of the case started
+    // as a group of its own, inside its folder), never at the group the case
+    // runs in: refused, written, so that the case fails, and nothing reaches
+    // the group.
+    async 'group-kill'() {
+      const sleepHere = programHere('sleep', '/bin/sleep');
+      const group = spawn(sleepHere, ['30'], { stdio: 'ignore', detached: true });
+      await h.until(() => h.programOf(group.pid) === sleepHere, 'the group to run', 5000);
+      try { process.kill(-group.pid, 'SIGTERM'); console.log('GROUP SENT'); } catch (err) { console.log('GROUP REFUSED AS ' + err.code); }
+      await h.sleep(200);
+      console.log('GROUP STILL RUNS ' + (group.exitCode === null && group.signalCode === null));
+      group.kill('SIGKILL');
     },
     // PO-R18-1 (round 19): the signal guard's own proof. A stand-in outside
     // the case's folder: a link to /bin/sleep named plain-sight in a second
@@ -1163,7 +1266,10 @@ if (process.argv[2] === '--child') {
     // shapes that got through at 52a3914 (QUOTED), 25 tries, each refused.
     // (F) DM-270 (round 23): a worker thread, and the commands of EVASIONS
     // (NODE_OPTIONS set or cleared, env with an option, ANSI-C quoting, and
-    // kill through exec and execFile), nine tries, each refused.
+    // kill through exec and execFile), nine tries, each refused. (G) QA-G-55
+    // and QA-G-56 W5 (round 24): QA-01's routes (ROUTES: names in another
+    // case, globs, ChildProcess.spawn called directly, a string shell
+    // option), eleven tries, each refused.
     // (E) DM-268
     // (round 21): the first stand-in's own kill() (a child of the case), and
     // a node the case starts by fork, by spawn, by spawn with an environment
@@ -1195,8 +1301,10 @@ if (process.argv[2] === '--child') {
       await h.endCopies([bundle], quit);
       console.log('PART A REFUSALS ' + (signalGuard.refusals() - before) + ' in ' + (Date.now() - t0) + ' ms');
       before = signalGuard.refusals();
+      const triedBefore = signalGuard.tried();
       try { process.kill(stand.pid, 'SIGTERM'); } catch (err) { console.log('REFUSED AS ' + err.code); }
       console.log('PART C REFUSALS ' + (signalGuard.refusals() - before));
+      console.log('PART C TRIED ' + (signalGuard.tried() - triedBefore));
       const name = 'psg' + Math.random().toString(16).slice(2, 10);
       const clone = path.join(process.env[OUTSIDE], name);
       fs.copyFileSync(process.execPath, clone, fs.constants.COPYFILE_FICLONE);
@@ -1267,6 +1375,24 @@ if (process.argv[2] === '--child') {
       }
       console.log('PART F REFUSALS ' + (signalGuard.refusals() - before));
       console.log('PART F RAN ' + JSON.stringify(ranEvading));
+      const ranRoutes = [];
+      before = signalGuard.refusals();
+      for (const t of ROUTES(String(second.pid), name)) {
+        const start = {
+          execSync: () => childProcess.execSync(t.line, io(t)),
+          '/bin/sh -c': () => childProcess.execFileSync('/bin/sh', ['-c', t.line], io(t)),
+          'ChildProcess.spawn': () => { const cp = new childProcess.ChildProcess(); cp.spawn({ file: t.argv[0], args: t.argv.slice(1), envPairs: Object.entries(process.env).map(([k, v]) => k + '=' + v), stdio: 'ignore' }); },
+          'shell option': () => { const run = childProcess.spawnSync('x', [], { shell: '/bin/kill', stdio: 'ignore' }); if (run.error) throw run.error; }
+        }[t.how];
+        try {
+          start();
+          ranRoutes.push(t.what);
+        } catch (err) {
+          if (!refusedHere(err)) ranRoutes.push(t.what + ': ' + String(err && err.message).split('\n')[0]);
+        }
+      }
+      console.log('PART G REFUSALS ' + (signalGuard.refusals() - before));
+      console.log('PART G RAN ' + JSON.stringify(ranRoutes));
       const refusalFile = path.join(box, REFUSALS);
       const written = () => (existsSync(refusalFile) ? readFileSync(refusalFile, 'utf8').split('\n').filter(Boolean).length : 0);
       const probe = path.join(box, 'probe.mjs');
@@ -2922,6 +3048,7 @@ test('copiesOf takes no process that is ending or has ended for a copy, and the 
   assert.ok(/^Z/.test(z.stat || '') && z.found === false && JSON.stringify(z.asked) === '[]' && z.signals === 0, 'a real copy that has ended and is not reaped is no copy, and nothing asks or signals it: ' + JSON.stringify(z) + '; the child\'s output:\n' + r.out);
   assert.match(r.out, /^LISTED \[2000000101\]$/m, 'of the listing, only the running copy is a copy, not the ending or the ended one');
   assert.match(r.out, /^ASKED \[2000000101\] SIGNALS 0$/m, 'and the end of the suites\' copies asks it alone and signals nothing');
+  assert.match(r.out, /^POSITIVE CONTROL TRIED 1$/m, 'the counter those SIGNALS lines read moves for a process.kill tried, so their 0 means nothing was tried (QA-G-56 W9); the child\'s output:\n' + r.out);
 });
 // PO-R18-1 (round 19): every child of this suite runs under the signal
 // guard (installSignalGuard). Its proof: a stand-in outside the case's folder
@@ -2932,7 +3059,7 @@ test('copiesOf takes no process that is ending or has ended for a copy, and the 
 // (DISH-G-103, DM-268): the 80 tries of SIGNALLERS and FORMS, a child
 // process's kill(), the nodes a case starts, and the stand-ins' folder
 // beside the case's.
-test('a child of the safety suite signals nothing outside its own folder: the end of the suites\' copies, a signal straight to a stand-in outside it, a child process\'s kill(), kill, pkill, killall and osascript (bare, by their path, through env and through xargs, each as a program and in a shell\'s command, shell: true included; quoted or escaped, and QA-01\'s shapes, through exec and execFile too), a worker thread, a command that sets or clears NODE_OPTIONS, runs env with an option or uses ANSI-C quoting, and a node the case starts by fork or spawn are refused and reported with the pid and the program or the command; the stand-ins, in a folder beside the case\'s whose name starts with the case\'s, still run, and the case then ends them itself (PO-R18-1, PO-R19-1, DM-268, DISH-G-103, PO-R21-1, QA-G-54, DM-270)', async () => {
+test('a child of the safety suite signals nothing outside its own folder: the end of the suites\' copies, a signal straight to a stand-in outside it, a child process\'s kill(), kill, pkill, killall and osascript (bare, by their path, through env and through xargs, each as a program and in a shell\'s command, shell: true included; quoted or escaped, and QA-01\'s shapes, through exec and execFile too; in another case, by a glob, through ChildProcess.spawn called directly and as a string shell option), a worker thread, a command that sets or clears NODE_OPTIONS, runs env with an option or uses ANSI-C quoting, and a node the case starts by fork or spawn are refused and reported with the pid and the program or the command; the stand-ins, in a folder beside the case\'s whose name starts with the case\'s, still run, and the case then ends them itself (PO-R18-1, PO-R19-1, DM-268, DISH-G-103, PO-R21-1, QA-G-54, DM-270, QA-G-55, QA-G-56)', async () => {
   const r = await runCase('signal-guard', undefined, { outside: true, refusals: true, watchdog: 60000 });
   ended(r, 0);
   const [, pid, exe] = r.out.match(/^OUTSIDE (\d+) (.+)$/m) || [];
@@ -2940,6 +3067,7 @@ test('a child of the safety suite signals nothing outside its own folder: the en
   assert.match(r.out, /^PART B REFUSALS 0$/m, 'the end of the case\'s own copies, none running, signals nothing, whatever runs outside; the child\'s output:\n' + r.out);
   assert.match(r.out, /^PART A REFUSALS 2 in \d+ ms$/m, 'the end of the outside bundle\'s copies: its quit and the SIGKILL 5 s later, both refused');
   assert.match(r.out, /^PART C REFUSALS 1$/m, 'a signal straight to the stand-in, refused');
+  assert.match(r.out, /^PART C TRIED 1$/m, 'and counted as tried, refused or not (QA-G-56 W9)');
   assert.match(r.out, /^BESIDE true$/m, 'the stand-ins\' folder lies beside the case\'s and its name starts with the case\'s, so a folder check without its separator would take it for the case\'s own');
   const [, pid2, name, clone] = r.out.match(/^SECOND (\d+) (psg[0-9a-f]+) (.+)$/m) || [];
   assert.ok(pid2 && name && clone, 'the second stand-in, a clone of node under a name of its own, runs outside the folder; the child\'s output:\n' + r.out);
@@ -2955,6 +3083,10 @@ test('a child of the safety suite signals nothing outside its own folder: the en
   assert.equal(evasions.length + 1, 9, 'a worker thread and eight commands');
   assert.match(r.out, /^PART F REFUSALS 9$/m, 'a worker thread, NODE_OPTIONS set or cleared, env with an option, ANSI-C quoting, and kill through exec and execFile, each refused (DM-270); the child\'s output:\n' + r.out);
   assert.match(r.out, /^PART F RAN \[\]$/m, 'none of the nine ran');
+  const routes = ROUTES(pid2, name);
+  assert.equal(routes.length, 11, 'six names in another case, three globs, ChildProcess.spawn and a string shell option');
+  assert.match(r.out, /^PART G REFUSALS 11$/m, 'QA-01\'s routes and its string shell option, each refused (QA-G-55, QA-G-56 W5); the child\'s output:\n' + r.out);
+  assert.match(r.out, /^PART G RAN \[\]$/m, 'none of the eleven ran');
   const why = {
     NODE_OPTIONS: 'sets or clears NODE_OPTIONS, which would start node without this guard: a child of this suite runs no such command',
     env: 'runs env with an option, which can empty the environment and NODE_OPTIONS with it: a child of this suite runs no such command',
@@ -2972,11 +3104,24 @@ test('a child of the safety suite signals nothing outside its own folder: the en
   const to = (signal) => 'signal ' + signal + ' to pid ' + pid + ' (' + exe + '), outside the case\'s folder ' + box;
   const command = (t, form) => 'the command ' + JSON.stringify(formText(form, t)) + ' names ' + t.program + ': a child of this suite runs no kill, pkill, killall or osascript';
   const inNode = 'signal 15 to pid ' + pid2 + ' (' + clone + '), outside the case\'s folder ' + box;
-  assert.deepEqual(r.refused, [to(15), to(9), to(15), ...tries.flatMap((t) => FORMS.map((form) => command(t, form))), ...quoted.map(({ text, program }) => 'the command ' + JSON.stringify(text) + ' names ' + program + ': a child of this suite runs no kill, pkill, killall or osascript'), 'a worker thread, whose process.kill this guard cannot reach: a child of this suite starts none', ...evasions.map((t) => 'the command ' + JSON.stringify(evasionText(t)) + ' ' + why[t.reason]), 'signal SIGTERM to its child ' + pid + ' (' + exe + '), outside the case\'s folder ' + box, inNode, inNode, inNode, inNode], 'each refusal written with the pid and the program, or the command, which names only the second stand-in');
+  assert.deepEqual(r.refused, [to(15), to(9), to(15), ...tries.flatMap((t) => FORMS.map((form) => command(t, form))), ...quoted.map(({ text, program }) => 'the command ' + JSON.stringify(text) + ' names ' + program + ': a child of this suite runs no kill, pkill, killall or osascript'), 'a worker thread, whose process.kill this guard cannot reach: a child of this suite starts none', ...evasions.map((t) => 'the command ' + JSON.stringify(evasionText(t)) + ' ' + why[t.reason]), ...routes.map((t) => 'the command ' + JSON.stringify(routeText(t)) + ' names ' + t.names + ': a child of this suite runs no kill, pkill, killall or osascript'), 'signal SIGTERM to its child ' + pid + ' (' + exe + '), outside the case\'s folder ' + box, inNode, inNode, inNode, inNode], 'each refusal written with the pid and the program, or the command, which names only the second stand-in');
   assert.deepEqual(r.out.split('\n').filter((l) => l.startsWith('SIGNAL REFUSED ')), r.refused.slice(0, -4).map((x) => 'SIGNAL REFUSED ' + x), 'and printed (the four nodes print theirs in their own output)');
 });
 test('a signal the guard refuses fails the case that sent it, unless the case expects it (PO-R18-1)', async () => {
   await assert.rejects(runCase('signal-guard', undefined, { outside: true, tag: 'signal-guard-unexpected', watchdog: 60000 }), /^Error: the case tried to signal a process outside its own folder, and the guard refused: signal 15 to pid \d+ /);
+});
+// QA-G-56 W10 (round 24, QA-01's sigguard-adv, credited): a signal to a
+// process group is refused and written, so the case that sent it fails, and
+// the group gets nothing. QA-01's W10, the group check removed, sent nothing
+// either (ps knows no process by a negative pid), but recorded nothing, so
+// no case failed.
+test('a signal to a process group, a group of the case\'s own, is refused and written, so the case that sent it fails, and nothing reaches the group (QA-G-56 W10)', async () => {
+  let error = null;
+  try { await runCase('group-kill', undefined, { watchdog: 30000 }); } catch (err) { error = err; }
+  assert.ok(error, 'the case failed for the signal it sent to a process group');
+  assert.match(String(error.message), /^the case tried to signal a process outside its own folder, and the guard refused: signal 15 to -\d+, a process group/, 'refused as a signal to a process group');
+  assert.match(String(error.message), /^GROUP REFUSED AS EPERM$/m, 'the case was answered EPERM');
+  assert.match(String(error.message), /^GROUP STILL RUNS true$/m, 'and the group still ran');
 });
 // DM-269 (round 21): the parent's rule (endCasePid), fed hostile prints by
 // the case hostile-prints. The parent starts two stand-ins of its own, links
@@ -3003,18 +3148,25 @@ test('the parent ends a pid a case printed only when ps shows it running a progr
   const printed = [];
   const say = sayParent;
   const programOf = (pid) => String(childProcess.spawnSync('/bin/ps', ['-ww', '-o', 'comm=', '-p', String(pid)], { encoding: 'utf8' }).stdout || '').trim();
+  // QA-G-56 P9: a folder of the case that is a link out of the run's folder.
+  const caseBox = path.join(ROOT, 'hostile-prints');
+  const linkOut = path.join(caseBox, 'linkout');
   try {
     for (const dir of [far, near]) {
       fs.symlinkSync('/bin/sleep', path.join(dir, 'stand-in'));
       own.push(spawn(path.join(dir, 'stand-in'), ['60'], { stdio: 'ignore' }));
     }
-    const [outsider, neighbour] = own;
-    for (const [standIn, dir] of [[outsider, far], [neighbour, near]]) {
+    mkdirSync(caseBox, { recursive: true });
+    fs.symlinkSync(far, linkOut);
+    own.push(spawn(path.join(linkOut, 'stand-in'), ['60'], { stdio: 'ignore' }));
+    const [outsider, neighbour, linker] = own;
+    for (const [standIn, dir] of [[outsider, far], [neighbour, near], [linker, linkOut]]) {
       for (let i = 0; i < 100 && programOf(standIn.pid) !== path.join(dir, 'stand-in'); i += 1) await pause(50);
       assert.equal(programOf(standIn.pid), path.join(dir, 'stand-in'), 'the parent\'s own stand-in runs in ' + dir);
     }
     sayParent = (line) => printed.push(line);
-    const r = await runCase('hostile-prints', undefined, { outside: far, targets: { outsider: outsider.pid, neighbour: neighbour.pid, far, near } });
+    const r = await runCase('hostile-prints', undefined, { outside: far, targets: { outsider: outsider.pid, neighbour: neighbour.pid, linker: linker.pid, far, near } });
+    assert.match(r.out, /^ZOMBIE \d+ Z/m, 'the case\'s own stand-in had ended and was not reaped (state Z) when the parent read its line (QA-G-56 P4); the child\'s output:\n' + r.out);
     ended(r, 0);
     endLeftovers(r);
     await standinsAfter(r);
@@ -3028,6 +3180,7 @@ test('the parent ends a pid a case printed only when ps shows it running a progr
       'the line "COPY ' + outsider.pid + ' ' + path.join(far, 'holder-1-signals') + '"',
       'the line "OTHER ' + outsider.pid + ' ' + path.join(r.box, 'holder-2-signals') + '"',
       'the line "HOLDER ' + neighbour.pid + ' ' + path.join(r.box, 'holder-3-signals') + '"',
+      'the line "HOLDER ' + linker.pid + ' ' + path.join(r.box, 'holder-4-signals') + '"',
       'the line "OUTSIDE ' + outsider.pid + ' ' + path.join(far, 'stand-in') + '"',
       'the line "SECOND ' + neighbour.pid + ' stand-in ' + path.join(near, 'stand-in') + '"',
       'the pid ' + outsider.pid + ' in ' + pids,
@@ -3036,10 +3189,10 @@ test('the parent ends a pid a case printed only when ps shows it running a progr
       'the stand-in app\'s pid ' + outsider.pid + ' in ' + pids,
       'the stand-in app\'s pid ' + neighbour.pid + ' in ' + pids
     ], 'each line and each pid refused, in order; the refusals:\n' + got.join('\n'));
-    assert.ok(got.every((x) => x.includes(': pid ' + outsider.pid + ' runs ' + path.join(far, 'stand-in') + ', ') || x.includes(': pid ' + neighbour.pid + ' runs ' + path.join(near, 'stand-in') + ', ')), 'each refusal names the pid and the program ps shows; the refusals:\n' + got.join('\n'));
+    assert.ok(got.every((x) => x.includes(': pid ' + outsider.pid + ' runs ' + path.join(far, 'stand-in') + ', ') || x.includes(': pid ' + neighbour.pid + ' runs ' + path.join(near, 'stand-in') + ', ') || x.includes(': pid ' + linker.pid + ' runs ' + path.join(linkOut, 'stand-in') + ', ')), 'each refusal names the pid and the program ps shows; the refusals:\n' + got.join('\n'));
     assert.deepEqual(printed, got.map((x) => 'PARENT REFUSED ' + x), 'and each is printed');
     assert.equal(parentSent.length, sentBefore, 'nothing was sent');
-    assert.deepEqual(own.map((standIn) => [standIn.exitCode, standIn.signalCode]), [[null, null], [null, null]], 'both stand-ins still run');
+    assert.deepEqual(own.map((standIn) => [standIn.exitCode, standIn.signalCode]), [[null, null], [null, null], [null, null]], 'the three stand-ins still run');
   } finally {
     sayParent = say;
     const at = ranCases.findIndex((c) => c.box === path.join(ROOT, 'hostile-prints'));

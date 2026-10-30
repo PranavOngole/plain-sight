@@ -1142,7 +1142,7 @@ test('e2e.mjs\'s window evidence lets a person\'s touch stop the run: its read h
 // folder, the four programs, every word of a command read by its last path
 // segment, all seven of child_process's ways to start a program, and the
 // guard's module named in every environment.
-test('every child of the safety suite installs the signal guard first, which writes the guard\'s module that every node a case starts loads, before its stand-ins and before any file under test is imported; nothing else sets process._kill or a child process\'s kill; and the guard sends a signal only inside the case\'s folder (separator included), by process.kill or a child process\'s kill, refuses kill, pkill, killall and osascript as any word of a command, by its last path segment, through all seven of child_process\'s ways, names its module in every environment, and refuses a worker thread and a command that sets or clears NODE_OPTIONS, runs env with an option or uses ANSI-C quoting (PO-R18-1, PO-R19-1, DM-268, DISH-G-103; the preload pin of round 22; DM-270)', () => {
+test('every child of the safety suite installs the signal guard first, which writes the guard\'s module that every node a case starts loads, before its stand-ins and before any file under test is imported; nothing else sets process._kill or a child process\'s kill; and the guard sends a signal only inside the case\'s folder (separator included), by process.kill or a child process\'s kill, refuses kill, pkill, killall and osascript as any word of a command, by its last path segment, through all seven of child_process\'s ways, names its module in every environment, and refuses a worker thread and a command that sets or clears NODE_OPTIONS, runs env with an option or uses ANSI-C quoting, compares names without case and reads a glob, and reads every start at ChildProcess.prototype.spawn too (PO-R18-1, PO-R19-1, DM-268, DISH-G-103; the preload pin of round 22; DM-270; QA-G-55)', () => {
   const text = read(path.join(DESKTOP, 'tests'), 'harness-safety.mjs');
   const entry = "if (process.argv[2] === '--child') {";
   const install = 'const signalGuard = installSignalGuard(box);';
@@ -1159,6 +1159,7 @@ test('every child of the safety suite installs the signal guard first, which wri
   assert.equal(/^import [^;]*'\.\/(harness|app|release|e2e|netwatch|launch-guard|testcopy)\.mjs'/m.test(text), false, 'no file under test is imported at the top of the suite');
   assert.equal(text.split('process._kill = ').length, 2, 'process._kill is set once, by the guard');
   assert.equal(text.split('ChildProcess.prototype.kill = ').length, 2, 'a child process\'s kill is set once, by the guard');
+  assert.equal(text.split('ChildProcess.prototype.spawn = ').length, 2, 'and ChildProcess.prototype.spawn too');
   const start = text.indexOf('function installSignalGuard(box) {');
   const guard = text.slice(start, text.indexOf('\n}\n', start));
   assert.ok(start >= 0, 'the guard is found');
@@ -1169,7 +1170,11 @@ test('every child of the safety suite installs the signal guard first, which wri
     ["  childProcess.ChildProcess.prototype.kill = function kill(signal = 'SIGTERM') {\n", 'and a child process\'s kill'],
     ['    if (place.inside) return killChild.call(this, signal);\n', 'which sends only inside the case\'s folder too'],
     ["  const REFUSED = ['kill', 'pkill', 'killall', 'osascript'];\n", 'the four programs that can signal another process'],
-    ["  const named = (parts) => parts.flatMap((part) => String(part).replace(/['\"\\\\]/g, '').split(/[\\s;&|()<>`$={},.]+/)).map((word) => path.basename(word)).filter((name) => REFUSED.includes(name));\n", 'every word of a command, quotes and backslashes taken out, by its last path segment'],
+    ["  const named = (parts) => parts.flatMap((part) => String(part).replace(/['\"\\\\]/g, '').split(/[\\s;&|()<>`$={},.]+/)).map((word) => path.basename(word).toLowerCase()).flatMap((name) => (REFUSED.includes(name) ? [name] : /[*?[]/.test(name) ? REFUSED.filter((refused) => globMatches(name, refused)) : []));\n", 'every word of a command, quotes and backslashes taken out, by its last path segment, without case, and read as a glob when it holds one (QA-G-55)'],
+    ["      if (glob[i] === '*') pattern += '.*';\n      else if (glob[i] === '?') pattern += '.';\n", 'a glob\'s star and question mark match as a shell matches them'],
+    ["  childProcess.ChildProcess.prototype.spawn = function spawn(options) {\n    check([options && options.file, ...(options && Array.isArray(options.args) ? options.args : [])].filter((x) => typeof x === 'string'));\n", 'every start read at ChildProcess.prototype.spawn too (QA-G-55)'],
+    ["    return spawnChild.call(this, { ...options, envPairs: [...others, 'NODE_OPTIONS=' + withPreload(given ? String(given).slice('NODE_OPTIONS='.length) : '')] });\n", 'and its environment given the guard\'s module'],
+    ['    check(parts);\n    process.env.NODE_OPTIONS = withPreload(process.env.NODE_OPTIONS);\n', 'the seven ways checked by the same check'],
     ['    const names = named(parts);\n    if (names.length) {\n', 'a command that names one is refused'],
     ["  for (const name of ['execFileSync', 'execFile', 'spawnSync', 'spawn', 'execSync', 'exec', 'fork']) childProcess[name] = guarded(childProcess[name]);\n", 'all seven of child_process\'s ways to start a program'],
     ['  process.env.NODE_OPTIONS = withPreload(process.env.NODE_OPTIONS);\n  // Every way', 'the guard\'s module named in the child\'s own environment at the install'],
@@ -1184,7 +1189,7 @@ test('every child of the safety suite installs the signal guard first, which wri
     // guard or spell a name it cannot read, and the worker thread.
     [`    if (text.includes("$'")) return "uses ANSI-C quoting ($'...'), which a shell decodes into names this guard cannot read";\n`, 'a command with ANSI-C quoting is refused'],
     ["    if (words.includes('NODE_OPTIONS')) return 'sets or clears NODE_OPTIONS, which would start node without this guard';\n", 'and one that names NODE_OPTIONS'],
-    ["    if (words.some((word, i) => path.basename(word) === 'env' && /^-/.test(words[i + 1] || ''))) return 'runs env with an option, which can empty the environment and NODE_OPTIONS with it';\n", 'and one that runs env with an option'],
+    ["    if (words.some((word, i) => path.basename(word).toLowerCase() === 'env' && /^-/.test(words[i + 1] || ''))) return 'runs env with an option, which can empty the environment and NODE_OPTIONS with it';\n", 'and one that runs env with an option, its name without case'],
     ['    const evaded = evading(parts);\n    if (evaded) {\n', 'each of them refused at every start'],
     ["  const threads = process.getBuiltinModule('node:worker_threads');\n  threads.Worker = function Worker() {\n    refuse('a worker thread, whose process.kill this guard cannot reach: a child of this suite starts none');\n    throw Object.assign(new Error('refused by the safety suite\\'s signal guard: a worker thread'), { code: 'EPERM' });\n  };\n", 'a worker thread is refused at its start']
   ]) assert.ok(guard.includes(line), what);
