@@ -1127,6 +1127,36 @@ test('e2e.mjs\'s window evidence lets a person\'s touch stop the run: its read h
   assert.ok(body.includes("    } catch (err) {\n      if (err instanceof UserActivity) throw err;\n      parts.push(label + ' could not be read: ' + err.message);\n    }\n"), 'the read helper rethrows a touch before it notes a part as not read');
 });
 
+// PO-R18-1 (round 19): every child of the safety suite runs under its signal
+// guard, which refuses any signal to a process outside the case's own folder
+// (harness-safety.mjs, installSignalGuard). It must stand where no change to
+// the files under test can reach it: first in the child, as a statement of
+// its own that no condition can skip, before the child's stand-ins replace
+// child_process's functions and before any file is imported; the suite
+// imports none of the files under test at its top; and nothing else in it
+// sets process._kill.
+test('every child of the safety suite installs the signal guard first, before its stand-ins and before any file under test is imported, and nothing else sets process._kill (PO-R18-1)', () => {
+  const text = read(path.join(DESKTOP, 'tests'), 'harness-safety.mjs');
+  const entry = "if (process.argv[2] === '--child') {";
+  const install = 'const signalGuard = installSignalGuard(box);';
+  assert.equal(text.split(entry).length, 2, 'the suite has one child entry');
+  const fault = pinFault(text, install, ["if (process.argv[2] === '--child')"]);
+  assert.equal(fault, null, 'the guard is installed as a statement of its own in the child: ' + fault);
+  const child = text.indexOf(entry);
+  const at = text.indexOf(install);
+  assert.ok(at > child, 'inside the child');
+  for (const later of ['childProcess.execFileSync = ', 'childProcess.spawnSync = ', 'await import(']) {
+    const first = text.indexOf(later, child);
+    assert.ok(first > at, 'before the first ' + JSON.stringify(later) + ' in the child');
+  }
+  assert.equal(/^import [^;]*'\.\/(harness|app|release|e2e|netwatch|launch-guard|testcopy)\.mjs'/m.test(text), false, 'no file under test is imported at the top of the suite');
+  assert.equal(text.split('process._kill = ').length, 2, 'process._kill is set once, by the guard');
+  const start = text.indexOf('function installSignalGuard(box) {');
+  const guard = text.slice(start, text.indexOf('\n}\n', start));
+  assert.ok(start >= 0 && guard.includes('  process._kill = (pid, signal) => {'), 'the guard wraps process._kill');
+  assert.ok(guard.includes("  for (const name of ['execFileSync', 'execFile', 'spawnSync', 'spawn']) {") && guard.includes("  for (const name of ['execSync', 'exec']) {"), 'and the child_process functions that could run kill, pkill, killall or osascript');
+});
+
 // QA-G-53 (round 18): the panel helpers of the real-key suite (inPanel, goTo,
 // panelNodes, goToField, panelFolders, panelSummary, mustShowOwnFolder,
 // pressPanelButton) run only with a launched app, so the tests above pin

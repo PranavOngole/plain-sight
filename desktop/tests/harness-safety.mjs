@@ -66,6 +66,96 @@ const TEST_COPY = 'com.pranavongole.plainsight.testcopy-1761000003';
 // (QA-G-51 (b), round 18).
 const STALE_CLIPBOARD = 'A CLIPBOARD FROM AN EARLIER RUN\n';
 const isTestFolder = (dir) => /^com\.pranavongole\.plainsight\.(testcopy|sbprobe)-/.test(path.basename(dir));
+// PO-R18-1 (round 19): the second temporary folder of the signal guard's
+// proof case, outside every case's folder, and the file in a case's folder
+// where the guard writes each signal it refused.
+const OUTSIDE = 'PLAIN_SIGHT_HARNESS_TEST_OUTSIDE';
+const REFUSALS = 'signal-refusals.txt';
+
+// PO-R18-1 (round 19): a child of this suite never signals a process outside
+// its own case's folder, whatever the code it runs asks for. In round 18 a
+// break of copiesOf that took any program named plain-sight made one case's
+// end of the suites' copies signal another run's stand-ins (SIGTERM, then
+// SIGKILL 5 s later), and a real Plain Sight running then would have been
+// signalled as well. So the child installs this guard first, before its
+// stand-ins and before it imports harness.mjs, app.mjs or e2e.mjs, and no
+// change to those files can undo it (config.mjs pins where it stands). The
+// ways a child can signal or quit a process:
+// - process.kill, through Node's process._kill, which process.kill calls for
+//   every signal: wrapped here. Signal 0, which only asks whether a process
+//   exists, and a signal to the child itself pass. Any other signal first
+//   reads the target's program with /bin/ps, its folders resolved: a process
+//   gone, ending (the flag E) or ended (the state Z) gets nothing and answers
+//   ESRCH, as macOS would; a program under the case's folder gets the
+//   signal; anything else, a process group included, gets nothing and
+//   answers EPERM. The refusal is printed with the pid and the program and
+//   written to the case's refusals file, and runCase fails the case for it.
+// - kill, pkill, killall and osascript, run as programs or in a shell's
+//   command through child_process: refused, printed and written the same
+//   way. Nothing the children test runs them.
+// - ChildProcess.kill: it reaches only a process the child itself started,
+//   and Node sends nothing to one it has seen end, so it stays as it is.
+// - The driver's quit-app: in a child the stand-in answers every driver
+//   command (the driver never runs), and its one answer that signals, the
+//   copy case's quit, goes through process.kill.
+// A case that started a process outside its folder ends it through sendOwn,
+// which is never handed to the code under test.
+function installSignalGuard(box) {
+  const own = fs.realpathSync(box);
+  const runPs = childProcess.spawnSync;
+  const send = process._kill;
+  let refused = 0;
+  const refuse = (what) => {
+    refused += 1;
+    console.log('SIGNAL REFUSED ' + what);
+    fs.appendFileSync(path.join(box, REFUSALS), what + '\n');
+  };
+  const programOf = (pid) => {
+    const ps = runPs('/bin/ps', ['-ww', '-o', 'stat=', '-o', 'comm=', '-p', String(pid)], { encoding: 'utf8' });
+    const [, stat, program] = String(ps.stdout || '').replace(/\n+$/, '').match(/^\s*(\S+)\s+(.*)$/s) || [];
+    return stat && !/[EZ]/.test(stat) ? program : null;
+  };
+  const resolved = (p) => { try { return path.join(fs.realpathSync(path.dirname(p)), path.basename(p)); } catch { return p; } };
+  process._kill = (pid, signal) => {
+    if (signal === 0 || pid === process.pid) return send.call(process, pid, signal);
+    if (!(pid > 0)) { refuse('signal ' + signal + ' to ' + pid + ', a process group'); return -1; }
+    const program = programOf(pid);
+    if (program === null) return -3;   // ESRCH: gone, ending or ended
+    if (resolved(program).startsWith(own + path.sep)) return send.call(process, pid, signal);
+    refuse('signal ' + signal + ' to pid ' + pid + ' (' + program + '), outside the case\'s folder ' + box);
+    return -1;   // EPERM
+  };
+  const SIGNALLING = /(^|[\s;&|(`])(kill|pkill|killall|osascript)(\s|$)/;
+  const signalling = (file, args) => {
+    const name = path.basename(String(file));
+    if (/^(kill|pkill|killall|osascript)$/.test(name)) return true;
+    return /^(sh|bash|zsh|dash|ksh)$/.test(name) && args.some((a) => SIGNALLING.test(String(a)));
+  };
+  const refusedCommand = (text) => {
+    refuse('the command ' + JSON.stringify(text) + ': a child of this suite runs no kill, pkill, killall or osascript');
+    return Object.assign(new Error('refused by the safety suite\'s signal guard: ' + text), { code: 'EPERM' });
+  };
+  for (const name of ['execFileSync', 'execFile', 'spawnSync', 'spawn']) {
+    const real = childProcess[name];
+    childProcess[name] = function guarded(file, args, ...rest) {
+      const list = Array.isArray(args) ? args : [];
+      if (signalling(file, list)) throw refusedCommand([file, ...list].join(' '));
+      return real.call(this, file, args, ...rest);
+    };
+  }
+  for (const name of ['execSync', 'exec']) {
+    const real = childProcess[name];
+    childProcess[name] = function guarded(command, ...rest) {
+      if (SIGNALLING.test(String(command))) throw refusedCommand(String(command));
+      return real.call(this, command, ...rest);
+    };
+  }
+  syncBuiltinESMExports();
+  return {
+    refusals: () => refused,
+    sendOwn: (pid, signal) => send.call(process, pid, os.constants.signals[signal])
+  };
+}
 
 // ---------------------------------------------------------------------------
 // The child: one case against the harness, under the fake home.
@@ -79,6 +169,9 @@ if (process.argv[2] === '--child') {
     console.log('refusing: HOME ' + home + ' or TMPDIR ' + os.tmpdir() + ' is not inside the test folder ' + box);
     process.exit(2);
   }
+  // PO-R18-1 (round 19): first, before the stand-ins and before any file
+  // under test is imported (installSignalGuard says why and what it covers).
+  const signalGuard = installSignalGuard(box);
   writeFileSync(path.join(os.tmpdir(), DRIVER), '');
   // A hook around every move and every removal of a data folder, bound
   // before the harness loads its own imports of renameSync and rmSync.
@@ -790,6 +883,44 @@ if (process.argv[2] === '--child') {
       }
       console.log('REGEX ' + JSON.stringify(found));
     },
+    // PO-R18-1 (round 19): the signal guard's own proof. A stand-in outside
+    // the case's folder: a link to /bin/sleep named plain-sight in a second
+    // temporary folder the parent made, never a real bundle, started by the
+    // case. (B) The end of the case's own copies, with none running, signals
+    // nothing, whatever runs outside; a copiesOf widened to any program named
+    // plain-sight would return the stand-in here, and the guard would refuse.
+    // (A) The end of the outside bundle's copies, which finds the stand-in
+    // as a widened copiesOf would: its quit and the SIGKILL 5 s later are
+    // refused. (C) A signal straight to it, the kill program and a shell's
+    // kill: refused. The stand-in must still run after all three; the case
+    // then ends it itself, by its pid, through sendOwn.
+    async 'signal-guard'() {
+      const bundle = path.join(process.env[OUTSIDE], 'Plain Sight.app');
+      const exe = path.join(bundle, 'Contents', 'MacOS', 'plain-sight');
+      mkdirSync(path.dirname(exe), { recursive: true });
+      fs.symlinkSync('/bin/sleep', exe);
+      const stand = spawn(exe, ['60'], { stdio: 'ignore' });
+      await h.until(() => h.programOf(stand.pid) === exe, 'the outside stand-in to run', 5000);
+      console.log('OUTSIDE ' + stand.pid + ' ' + exe);
+      const quit = (pid) => process.kill(pid, 'SIGTERM');
+      let before = signalGuard.refusals();
+      await h.endCopies([copyBundle], quit);
+      console.log('PART B REFUSALS ' + (signalGuard.refusals() - before));
+      before = signalGuard.refusals();
+      const t0 = Date.now();
+      await h.endCopies([bundle], quit);
+      console.log('PART A REFUSALS ' + (signalGuard.refusals() - before) + ' in ' + (Date.now() - t0) + ' ms');
+      before = signalGuard.refusals();
+      for (const send of [() => process.kill(stand.pid, 'SIGTERM'), () => childProcess.execFileSync('kill', ['-TERM', String(stand.pid)]), () => childProcess.execSync('kill -TERM ' + stand.pid)]) {
+        try { send(); } catch (err) { console.log('REFUSED AS ' + err.code); }
+      }
+      console.log('PART C REFUSALS ' + (signalGuard.refusals() - before));
+      await h.sleep(300);
+      console.log('OUTSIDE STILL RUNS ' + (stand.exitCode === null && stand.signalCode === null));
+      try { signalGuard.sendOwn(stand.pid, 'SIGTERM'); } catch { /* it has ended */ }
+      await h.until(() => stand.exitCode !== null || stand.signalCode !== null, 'the outside stand-in to end', 3000).catch(() => {});
+      console.log('OUTSIDE ENDED ' + JSON.stringify([stand.exitCode, stand.signalCode]));
+    },
     // QA-G-52 (round 18), QA-01's copies-bystanders (r15_pid_adv.mjs): the
     // copy, with another Plain Sight (another bundle's plain-sight, as the
     // person's own app is), a helper beside the copy's executable and a
@@ -1335,7 +1466,22 @@ function fakeCopy(box, identifier) {
 // Every case ends within its watchdog (120 s, or what it names): one that
 // hangs is ended with SIGKILL and fails, so a regression fails instead of
 // holding the suite (QA-G-44).
-function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100, watchdog = 120000 } = {}) {
+// PO-R18-1 (round 19): the proof case's stand-in, if its case left it
+// running: ended by its pid once ps shows that pid runs the stand-in's
+// program, and never another.
+function endOutsideStandIn(out) {
+  const m = out.match(/^OUTSIDE (\d+) (.+)$/m);
+  if (!m) return;
+  let program = '';
+  try { program = childProcess.execFileSync('/bin/ps', ['-ww', '-o', 'comm=', '-p', m[1]], { encoding: 'utf8' }).trim(); } catch { return; }
+  if (program === m[2]) { try { process.kill(Number(m[1]), 'SIGKILL'); } catch { /* it has ended */ } }
+}
+
+// A signal the case's guard refused fails the case: the promise is rejected
+// with the refusals, unless the case is the guard's own proof (refusals).
+// outside makes the proof case's second temporary folder, outside ROOT, and
+// removes it after the case (PO-R18-1, round 19).
+function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100, watchdog = 120000, outside = false, refusals = false } = {}) {
   const box = path.join(ROOT, tag);
   const home = path.join(box, 'home');
   const tmp = path.join(box, 'tmp');
@@ -1343,21 +1489,33 @@ function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100,
   for (const d of [home, tmp, evidence]) mkdirSync(d, { recursive: true });
   const env = { ...process.env, HOME: home, TMPDIR: tmp, PLAIN_SIGHT_EVIDENCE: evidence, [BOX]: box, [STANDIN]: STANDIN_EXE, [LATE]: LATE_WRITER, [HOLDER_ENV]: HOLDER };
   // Nothing of the shell that runs npm test reaches the harness's settings.
-  for (const name of ['PLAIN_SIGHT_E2E_DOWNLOADS', 'PLAIN_SIGHT_APP', 'PLAIN_SIGHT_IDLE_MIN', 'PLAIN_SIGHT_ONLY', 'PLAIN_SIGHT_ALLOW_REAL_ID']) delete env[name];
+  for (const name of ['PLAIN_SIGHT_E2E_DOWNLOADS', 'PLAIN_SIGHT_APP', 'PLAIN_SIGHT_IDLE_MIN', 'PLAIN_SIGHT_ONLY', 'PLAIN_SIGHT_ALLOW_REAL_ID', 'PLAIN_SIGHT_SAFETY_ONLY', OUTSIDE]) delete env[name];
   if (app) env.PLAIN_SIGHT_APP = fakeCopy(box, app);
   if (recheck !== null) env[RECHECK] = String(recheck);
+  const outsideDir = outside ? mkdtempSync(path.join(os.tmpdir(), 'plain-sight-outside-')) : null;
+  if (outsideDir) env[OUTSIDE] = outsideDir;
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child', id], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   const timer = setTimeout(() => { out += '\nWATCHDOG: the case ran for ' + watchdog + ' ms and was ended with SIGKILL\n'; child.kill('SIGKILL'); }, watchdog);
   const feed = (chunk) => { out += chunk; onOutput(out, child, box); };
   child.stdout.on('data', feed);
   child.stderr.on('data', feed);
-  return new Promise((resolve) => child.on('exit', (code, signal) => {
+  return new Promise((resolve, reject) => child.on('exit', (code, signal) => {
     clearTimeout(timer);
     const line = out.split('\n').find((l) => l.startsWith('DIRS '));
     const dirs = line ? JSON.parse(line.slice(5)).map((rel) => path.join(home, rel)) : [];
+    const refusalFile = path.join(box, REFUSALS);
+    const refused = existsSync(refusalFile) ? readFileSync(refusalFile, 'utf8').split('\n').filter(Boolean) : [];
+    if (outsideDir) {
+      endOutsideStandIn(out);
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+    if (refused.length && !refusals) {
+      reject(new Error('the case tried to signal a process outside its own folder, and the guard refused: ' + refused.join('; ') + '\nthe child\'s output:\n' + out));
+      return;
+    }
     resolve({
-      code, signal, out, dirs, home,
+      code, signal, out, dirs, home, refused,
       intact: dirs.length > 0 && dirs.every((d) => existsSync(marker(d)) && readFileSync(marker(d), 'utf8') === real(home, d)),
       backups: existsSync(BACKUP_ROOT(home)) ? readdirSync(BACKUP_ROOT(home)) : [],
       tmpFiles: readdirSync(tmp),
@@ -2311,6 +2469,31 @@ test('the suites\' end (endCopies) asks every copy of a bundle to quit: with two
     endHolders(r);
   }
 });
+// PO-R18-1 (round 19): every child of this suite runs under the signal
+// guard (installSignalGuard). Its proof: a stand-in outside the case's folder
+// that the end of the suites' copies would find, as a widened copiesOf
+// would; nothing reaches it, each refusal is printed and written with the
+// pid and the program, and the case reports them; the stand-in is then ended
+// by the case itself. A refusal the case does not expect fails it.
+test('a child of the safety suite signals nothing outside its own folder: the end of the suites\' copies, a signal straight to a stand-in outside it, the kill program and a shell\'s kill are refused and reported with the pid and the program, the stand-in still runs, and the case then ends it itself (PO-R18-1)', async () => {
+  const r = await runCase('signal-guard', undefined, { outside: true, refusals: true, watchdog: 60000 });
+  ended(r, 0);
+  const [, pid, exe] = r.out.match(/^OUTSIDE (\d+) (.+)$/m) || [];
+  assert.ok(pid && exe && exe.endsWith(path.join('Plain Sight.app', 'Contents', 'MacOS', 'plain-sight')) && !exe.startsWith(ROOT + path.sep), 'the stand-in runs outside every case\'s folder; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^PART B REFUSALS 0$/m, 'the end of the case\'s own copies, none running, signals nothing, whatever runs outside; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^PART A REFUSALS 2 in \d+ ms$/m, 'the end of the outside bundle\'s copies: its quit and the SIGKILL 5 s later, both refused');
+  assert.match(r.out, /^PART C REFUSALS 3$/m, 'a signal straight to the stand-in, the kill program and a shell\'s kill, each refused');
+  assert.match(r.out, /^OUTSIDE STILL RUNS true$/m, 'nothing reached the stand-in');
+  assert.match(r.out, /^OUTSIDE ENDED \[null,"SIGTERM"\]$/m, 'the case then ended it itself, by its pid');
+  const box = path.join(ROOT, 'signal-guard');
+  const to = (signal) => 'signal ' + signal + ' to pid ' + pid + ' (' + exe + '), outside the case\'s folder ' + box;
+  const command = 'the command "kill -TERM ' + pid + '": a child of this suite runs no kill, pkill, killall or osascript';
+  assert.deepEqual(r.refused, [to(15), to(9), to(15), command, command], 'each refusal written with the pid and the program, or the command');
+  assert.deepEqual(r.out.split('\n').filter((l) => l.startsWith('SIGNAL REFUSED ')), r.refused.map((x) => 'SIGNAL REFUSED ' + x), 'and printed');
+});
+test('a signal the guard refuses fails the case that sent it, unless the case expects it (PO-R18-1)', async () => {
+  await assert.rejects(runCase('signal-guard', undefined, { outside: true, tag: 'signal-guard-unexpected', watchdog: 60000 }), /^Error: the case tried to signal a process outside its own folder, and the guard refused: signal 15 to pid \d+ /);
+});
 // QA-G-52 (round 18): copiesOf asked pgrep -f with the bundle's executable,
 // which pgrep reads as a regular expression: a running copy whose bundle path
 // held ( [ + or * was not found, and ( alone made pgrep fail; nor was a copy
@@ -2739,10 +2922,18 @@ test('a window of the document\'s size on another layer, off-screen, is not the 
   clean(r);
 });
 
+// The tests whose names match PLAIN_SIGHT_SAFETY_ONLY, a regular expression,
+// and no other, for a break that must run alone (PO-R18-1, round 19); the
+// output says so before the first test and after the summary, so a part is
+// never taken for the whole suite.
+const ONLY = process.env.PLAIN_SIGHT_SAFETY_ONLY ? new RegExp(process.env.PLAIN_SIGHT_SAFETY_ONLY) : null;
+const chosen = ONLY ? tests.filter((t) => ONLY.test(t.name)) : tests;
+const partOnly = ONLY ? 'only the ' + chosen.length + ' of ' + tests.length + ' tests whose names match PLAIN_SIGHT_SAFETY_ONLY=' + process.env.PLAIN_SIGHT_SAFETY_ONLY : '';
+if (ONLY) console.log(partOnly);
 let passed = 0;
 let failed = 0;
 try {
-  for (const t of tests) {
+  for (const t of chosen) {
     try {
       await t.fn();
       passed += 1;
@@ -2768,5 +2959,6 @@ if (existsSync(ROOT)) {
   passed += 1;
   console.log('ok   - the temporary folder with every fake home in it is removed at the end');
 }
-console.log(`\n${passed} passed, ${failed} failed, ${tests.length + 1} total. Errors: ${failed}`);
+console.log(`\n${passed} passed, ${failed} failed, ${chosen.length + 1} total. Errors: ${failed}`);
+if (ONLY) console.log(partOnly);
 process.exit(failed ? 1 : 0);
