@@ -1351,6 +1351,28 @@ test('the "Quit without saving?" sheet is the alert sheet.rs builds, whose keys 
   assert.match(cargo, /^\[\[test\]\]\nname = "quit_sheet"\nharness = false$/m, 'on its own main thread');
 });
 
+// DISH-W-2 (round 21): the quit sheet's answer is read by its button's
+// place. The second button, Quit, quits; every other answer, the first
+// button (Cancel) or any other code, cancels. The mapping is the sheet's
+// completion handler in quit.rs, a closure built on the main thread around
+// a live window, so no cargo test can call it without moving it into a
+// function of its own, a change to the app's code; this pins its text: the
+// one comparison, Quit for the second button and Cancel for every other
+// answer, the answer read nowhere else in the closure, and the test build's
+// end_sheet pressing the second button for Quit and the first for Cancel.
+// sheet.rs adds Cancel first and Quit second, the order tests/quit_sheet.rs
+// reads from the alert it builds.
+test('the quit sheet\'s answer maps the second button to Quit and every other answer to Cancel, reading the answer nowhere else, and the test build\'s end_sheet presses the second button for Quit and the first for Cancel (DISH-W-2)', () => {
+  const quit = read(TAURI, 'src', 'quit.rs');
+  const start = quit.indexOf('let done = RcBlock::new(move |response: NSModalResponse| {');
+  assert.ok(start > 0, 'the sheet\'s completion handler is found');
+  const closure = quit.slice(start, quit.indexOf('\n            });\n', start));
+  assert.ok(closure.endsWith('\n                super::chosen(if response == NSAlertSecondButtonReturn {\n                    Choice::Quit\n                } else {\n                    Choice::Cancel\n                });'), 'the second button quits, and every other answer cancels, as the closure\'s last statement: ' + closure);
+  assert.equal(closure.split('response').length - 1, 2, 'the answer is named once as the closure\'s parameter and read once, in that comparison: ' + closure);
+  assert.equal(closure.split('super::chosen(').length - 1, 1, 'one choice for each answer');
+  assert.equal([...quit.matchAll(/ {12}Choice::Quit => NSAlertSecondButtonReturn,\n {12}Choice::Cancel => NSAlertFirstButtonReturn,\n/g)].length, 1, 'end_sheet presses the second button for Quit and the first for Cancel');
+  assert.ok(read(TAURI, 'src', 'sheet.rs').includes('    let cancel = alert.addButtonWithTitle(&NSString::from_str("Cancel"));\n    let quit = alert.addButtonWithTitle(&NSString::from_str("Quit"));\n'), 'sheet.rs adds Cancel first and Quit second');
+});
 test('the web deployment allowlist is unchanged (DR-10)', () => {
   const lines = read(ROOT, '.vercelignore').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
   assert.deepEqual(lines, ['*', '!index.html', '!covers', '!covers/**', '!vercel.json']);
