@@ -50,6 +50,16 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 17
+
+Wave G, round 17, 29 October 2026, Developer N (appstore-candidate).
+
+- The menu case holds every accelerator in menu.rs against Shift+H (PO-R16-1): every string that reads as an accelerator, every `.accelerator(` or `set_accelerator(` call, and no accelerator built in code. The Product Owner's PO3-BUILDER-SHIFT-H, a Help item made with MenuItemBuilder that takes CmdOrCtrl+Shift+H, had passed config.
+- The real-key and release suites' guards are pinned as statements of their own (DISH-G-101): goTo's paste and its three read-backs, the three own-folder checks, the clipboard's save, put-back and file removal, the two suites' ends of the copies and their instances(). Each must stand once on a line of its own after a line that ends a statement or a block, and the case checks that the pin refuses each with `if (false)`, `false &&` or another condition in front, or an `if (false)` line above. A fake-home case holds that a copy whose bundle folder is gone while it runs is still the copy and is stopped (DISH's DN4).
+- The file that holds the person's clipboard during a real-key run (`clipboard.plist` in the run's evidence folder) is removed once the clipboard is put back, and run.log says so. If the clipboard cannot be put back, the file is kept and the run says where, in run.log and in its output (DISH-G-99). The stand-in driver case sees the file gone after a good restore and kept after a refused one. Files that earlier runs left behind are untouched.
+- main.rs's opening comment says what the probe of 26 October saw about the network client entitlement, where it said the web view needs it (DISH-G-98).
+- The README says the candidate ran sandboxed on 29 October as a test copy of 5c5b749, what has not yet run in a launched app, and the panel tests' Go to Folder route (DISH-G-100).
+
 ## Round 16
 
 Wave G, round 16, 29 October 2026, Developer N (appstore-candidate).
