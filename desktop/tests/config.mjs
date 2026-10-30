@@ -891,7 +891,33 @@ function pinFault(text, statement, conditions = []) {
     const fn = scan.blocks.filter((b) => b.open < k && k < b.close && opensFunction(b)).pop();
     if (fn && chain.includes(fn)) return 'a ' + text.slice(k).match(/^\w+/)[0] + ' at line ' + text.slice(0, k).split('\n').length + ' can leave its function before it';
   }
+  // DISH-G-105 (round 25): a process.exit (or abort) before the statement in
+  // its function ends the run there (DISH's DX-P1).
+  for (const m of scan.bare.matchAll(/\bprocess\s*\.\s*(exit|abort|reallyExit)\s*\(/g)) {
+    if (m.index >= offset) continue;
+    const fn = scan.blocks.filter((b) => b.open < m.index && m.index < b.close && opensFunction(b)).pop();
+    if (fn && chain.includes(fn)) return 'a process.' + m[1] + ' at line ' + text.slice(0, m.index).split('\n').length + ' ends the run before it';
+  }
+  // DISH-G-105: a binding of a name the statement calls, made in a block
+  // around it or in the head of one, puts something else in the place of
+  // what it calls (DISH's DX-P2, a no-op of the same name above the call).
+  for (const name of calleesOf(scan.bare.slice(offset, offset + statement.length))) {
+    const word = name.replace(/\$/g, '\\$');
+    for (const m of scan.bare.matchAll(new RegExp('(?:\\b(?:const|let|var|class)\\s+|\\bfunction\\s*\\*?\\s*)' + word + '(?![\\w$])|\\b(?:const|let|var)\\s*[{[][^=;]*(?<![\\w$.])' + word + '(?![\\w$])', 'g'))) {
+      const home = scan.blocks.filter((b) => b.open < m.index && m.index < b.close).pop();
+      if (home && chain.includes(home)) return 'a binding at line ' + text.slice(0, m.index).split('\n').length + ' redeclares ' + name + ', which it calls, in a block around it';
+    }
+    const binder = chain.find((b) => new RegExp('(?<![\\w$.])' + word + '(?![\\w$])').test(b.bare));
+    if (binder) return 'the block ' + JSON.stringify(binder.head) + ' around it binds ' + name + ', which it calls';
+  }
   return null;
+}
+// The names a statement calls: each call's own name, or the first name of a
+// call through a member chain (keys in keys.press(...)), by the statement's
+// text with its strings blanked.
+function calleesOf(bare) {
+  const names = [...bare.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*\(/g)].map((m) => m[1]);
+  return [...new Set(names.filter((name) => !/^(if|for|while|switch|catch|function|return|typeof|await|new|async|super|import)$/.test(name)))];
 }
 const GUARDED = [
   ['app.mjs', "await keys.press('cmd+v');", "goTo's paste (DISH's DD1)"],
@@ -930,7 +956,7 @@ const WRAPS = [
   [['if (Date.now() >= 0) return;'], [], 'a return at line'],
   [["throw new Error('never');"], [], 'a throw at line']
 ];
-test('the real-key and release suites\' guards stand as statements of their own, in blocks that run them whenever the code around them runs, so no condition can skip one; the pin refuses a condition in front of each, above it, or in any block around it, and an early way out of its function (DISH-G-101; PO-R15-1, DM-265, PO-R17-1)', () => {
+test('the real-key and release suites\' guards stand as statements of their own, in blocks that run them whenever the code around them runs, so no condition can skip one; the pin refuses a condition in front of each, above it, or in any block around it, an early way out of its function, a process.exit before it, and a binding that redeclares a name it calls in a block around it (DISH-G-101; PO-R15-1, DM-265, PO-R17-1; DISH-G-105)', () => {
   const tests = path.join(DESKTOP, 'tests');
   for (const [file, statement, what, conditions = []] of GUARDED) {
     const text = read(tests, file);
@@ -959,6 +985,16 @@ test('the real-key and release suites\' guards stand as statements of their own,
       changed.splice(i + 1, 0, ...close.map((line) => indent + line));
       changed.splice(i, 0, ...open.map((line) => indent + line));
       refuses(changed, why, JSON.stringify([...open, '...', ...close].join(' ')));
+    }
+    // DISH-G-105 (round 25): a process.exit above it, and a no-op bound to
+    // the name it calls just above it.
+    const exitAbove = [...lines];
+    exitAbove.splice(i, 0, indent + 'process.exit(0);');
+    refuses(exitAbove, 'a process.exit at line', 'process.exit(0) above it');
+    for (const name of calleesOf(statement.replace(/(['"]).*?\1/g, '$1$1'))) {
+      const shadowed = [...lines];
+      shadowed.splice(i, 0, indent + 'const ' + name + ' = () => {};');
+      refuses(shadowed, 'redeclares ' + name, 'a no-op bound to ' + name + ' above it');
     }
     // The outermost block around the statement, wrapped whole.
     const scan = blocksOf(text);
@@ -1191,6 +1227,11 @@ test('every child of the safety suite installs the signal guard first, which wri
     ["    if (words.includes('NODE_OPTIONS')) return 'sets or clears NODE_OPTIONS, which would start node without this guard';\n", 'and one that names NODE_OPTIONS'],
     ["    if (words.some((word, i) => path.basename(word).toLowerCase() === 'env' && /^-/.test(words[i + 1] || ''))) return 'runs env with an option, which can empty the environment and NODE_OPTIONS with it';\n", 'and one that runs env with an option, its name without case'],
     ['    const evaded = evading(parts);\n    if (evaded) {\n', 'each of them refused at every start'],
+    // Round 25 (DISH-G-106): the guard's own branches, as one block: signal
+    // 0 and the child itself pass, every other try is counted, a process
+    // group is refused and written, and a target gone, ending or ended gets
+    // nothing and answers ESRCH.
+    ["    if (signal === 0 || pid === process.pid) return send.call(process, pid, signal);\n    tried += 1;\n    if (!(pid > 0)) { refuse('signal ' + signal + ' to ' + pid + ', a process group'); return -1; }\n    const place = placeOf(pid);\n    if (place === null) return -3;   // ESRCH: gone, ending or ended\n", 'the pass-through for signal 0 and itself only, the count, the group refusal and the ESRCH answer (DISH-G-106)'],
     ["  const threads = process.getBuiltinModule('node:worker_threads');\n  threads.Worker = function Worker() {\n    refuse('a worker thread, whose process.kill this guard cannot reach: a child of this suite starts none');\n    throw Object.assign(new Error('refused by the safety suite\\'s signal guard: a worker thread'), { code: 'EPERM' });\n  };\n", 'a worker thread is refused at its start']
   ]) assert.ok(guard.includes(line), what);
   assert.ok(guard.indexOf('if (!fs.existsSync(moduleFile))') < guard.indexOf('childProcess[name] = guarded(childProcess[name]);'), 'the module is written before the guard lets any start through');
@@ -1330,6 +1371,23 @@ test('goTo and mustShowOwnFolder work when the panel is a sheet on the document 
   let refused = null;
   try { panelHelpers(v).mustShowOwnFolder(PANEL_DIR, []); } catch (e) { refused = e; }
   assert.equal(refused, null, 'mustShowOwnFolder reads the location menu of a sheet-hosted panel');
+});
+// DISH-G-105 (round 25): mustShowOwnFolder's own refusals, on the stand-in
+// panel: a panel that shows another folder, and the test's own folder
+// holding a file the test did not put there. An early return in its
+// definition (DISH's DX-M1) passes neither.
+test('mustShowOwnFolder refuses a panel that shows another folder than the test\'s own, and the test\'s own folder when it holds a file the test did not put there (DISH-G-105)', () => {
+  const other = panelWorld({ startMenu: 'Documents' });
+  other.listing = [];
+  let refused = null;
+  try { panelHelpers(other).mustShowOwnFolder(PANEL_DIR, []); } catch (e) { refused = e; }
+  assert.ok(refused && /the panel shows "Documents", not the test's own folder "Opened from the panel"/.test(refused.message), 'a panel that shows Documents is refused: ' + (refused ? refused.message.slice(0, 160) : 'nothing thrown'));
+  const crowded = panelWorld({ asSheet: true, startMenu: 'Opened from the panel' });
+  crowded.listing = ['extra.txt', 'made-outside-the-app.sight'];
+  refused = null;
+  try { panelHelpers(crowded).mustShowOwnFolder(PANEL_DIR, ['made-outside-the-app.sight']); } catch (e) { refused = e; }
+  assert.ok(refused && /holds \["extra.txt","made-outside-the-app.sight"\], not \["made-outside-the-app.sight"\]/.test(refused.message), 'the test\'s own folder holding an extra file is refused: ' + (refused ? refused.message.slice(0, 160) : 'nothing thrown'));
+  assert.equal(J([...other.presses, ...crowded.presses]), '[]', 'and no button is pressed');
 });
 
 // PO-GUI-1 (round 18): e2e.mjs held the app's intro to "no tab" with

@@ -50,6 +50,19 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 25
+
+Wave G, round 25, 30 October 2026, Developer N (appstore-candidate).
+
+- The real-key suite's own-folder check can no longer be switched off with every suite green (DISH-G-105). DISH's three breaks had left config green:
+  - DX-M1 put an early return in mustShowOwnFolder. Two new cases on the stand-in panel now call it: one with a panel that shows another folder than the test's own, one with the test's own folder holding a file the test did not put there. The function must refuse both, and an early return passes neither.
+  - DX-P2 bound a no-op of the same name just above the call. The pin that holds each guarded statement now refuses a binding that redeclares a name the statement calls, in a block around it or in the head of one.
+  - DX-P1 put a `process.exit` above the call. The pin now also refuses a `process.exit`, `abort` or `reallyExit` before the statement in its function.
+
+  The guards test plants both shapes above every guarded statement and requires the refusal.
+- The signal guard's own branches are each held now (DISH-G-106). Run first at d7d7c57, DISH's DX-G2 (a process group let through) and DX-G6 (the tries not counted) were already red, through round 24's group-kill case and its counter controls, while DX-G7 (a target gone, ending or ended sent the signal) passed every suite. The proof case now makes a node of its own that has ended and is not reaped, and a process.kill at it must answer ESRCH, counted and with nothing sent. Config pins the five lines of those branches as one block, so each of the three breaks is red in config as well.
+- README 223 names two more ways a shell builds a name, which the guard does not see (DISH's I-47): an empty command substitution, `ki$()ll`, and brace expansion, `ki{,}ll`. Round 24's glob rule refuses the glob forms of the same list (`/bin/ki*ll`, `/bin/k?ll`), not these two, which are written down under D-59.
+
 ## Round 24
 
 Wave G, round 24, 30 October 2026, Developer N (appstore-candidate).

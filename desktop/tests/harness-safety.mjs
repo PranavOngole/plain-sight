@@ -257,8 +257,9 @@ const routeText = (t) => (t.how === 'execSync' ? t.line : t.how === '/bin/sh -c'
 // run by its own name, QA-01's QA-G-55: the word rule reads names, not
 // files); a node such a program starts with an emptied environment; a name
 // built while a command runs (two variables, $CMD from the environment, eval
-// of a variable, $(printf ...), base64, or a name built inside another
-// language such as python's getattr); a command a shell or xargs reads on
+// of a variable, $(printf ...), an empty command substitution ki$()ll, brace
+// expansion ki{,}ll (DISH's I-47, round 25), base64, or a name built inside
+// another language such as python's getattr); a command a shell or xargs reads on
 // its standard input, or from a script file, which is data here; the
 // moment between the guard's look at a
 // target with ps and its send, in which a target that runs another program
@@ -1269,7 +1270,9 @@ if (process.argv[2] === '--child') {
     // kill through exec and execFile), nine tries, each refused. (G) QA-G-55
     // and QA-G-56 W5 (round 24): QA-01's routes (ROUTES: names in another
     // case, globs, ChildProcess.spawn called directly, a string shell
-    // option), eleven tries, each refused.
+    // option), eleven tries, each refused. (H) DISH-G-106 (round 25): a
+    // process.kill at an ended, unreaped node of the case's own answers ESRCH
+    // and sends nothing.
     // (E) DM-268
     // (round 21): the first stand-in's own kill() (a child of the case), and
     // a node the case starts by fork, by spawn, by spawn with an environment
@@ -1393,6 +1396,24 @@ if (process.argv[2] === '--child') {
       }
       console.log('PART G REFUSALS ' + (signalGuard.refusals() - before));
       console.log('PART G RAN ' + JSON.stringify(ranRoutes));
+      // (H) DISH-G-106 (round 25): a target that has ended and is not reaped,
+      // a node of the case's own started by a shell that then becomes sleep
+      // and never waits for it: process.kill answers ESRCH, as macOS would for
+      // a process gone, counts the try, and sends nothing (DISH's DX-G7 sent
+      // it; a signal to a process in the state Z is taken and does nothing,
+      // so the answer is what tells).
+      const zombieFile = path.join(box, 'part-h-pid');
+      spawn('/bin/sh', ['-c', '"$0" -e "process.exit(0)" & echo $! > "$1"; exec "$2" 10', nodeHere, zombieFile, programHere('sleep', '/bin/sleep')], { stdio: 'ignore' });
+      const ended = await h.until(() => {
+        const zpid = existsSync(zombieFile) ? Number(readFileSync(zombieFile, 'utf8').trim()) : 0;
+        const stat = zpid > 0 ? String(childProcess.spawnSync('/bin/ps', ['-o', 'stat=', '-p', String(zpid)], { encoding: 'utf8' }).stdout || '').trim() : '';
+        return /^Z/.test(stat) ? { zpid, stat } : null;
+      }, 'the case\'s node to end, not reaped', 5000);
+      console.log('PART H ZOMBIE ' + ended.zpid + ' ' + ended.stat);
+      const triedBeforeH = signalGuard.tried();
+      const refusedBeforeH = signalGuard.refusals();
+      try { process.kill(ended.zpid, 'SIGTERM'); console.log('PART H ANSWER sent'); } catch (err) { console.log('PART H ANSWER ' + err.code); }
+      console.log('PART H TRIED ' + (signalGuard.tried() - triedBeforeH) + ' REFUSALS ' + (signalGuard.refusals() - refusedBeforeH));
       const refusalFile = path.join(box, REFUSALS);
       const written = () => (existsSync(refusalFile) ? readFileSync(refusalFile, 'utf8').split('\n').filter(Boolean).length : 0);
       const probe = path.join(box, 'probe.mjs');
@@ -3094,6 +3115,9 @@ test('a child of the safety suite signals nothing outside its own folder: the en
   assert.equal(routes.length, 11, 'six names in another case, three globs, ChildProcess.spawn and a string shell option');
   assert.match(r.out, /^PART G REFUSALS 11$/m, 'QA-01\'s routes and its string shell option, each refused (QA-G-55, QA-G-56 W5); the child\'s output:\n' + r.out);
   assert.match(r.out, /^PART G RAN \[\]$/m, 'none of the eleven ran');
+  assert.match(r.out, /^PART H ZOMBIE \d+ Z/m, 'the case\'s own node had ended and was not reaped (state Z); the child\'s output:\n' + r.out);
+  assert.match(r.out, /^PART H ANSWER ESRCH$/m, 'a process.kill at it answers ESRCH and sends nothing (DISH-G-106, its DX-G7)');
+  assert.match(r.out, /^PART H TRIED 1 REFUSALS 0$/m, 'the try is counted, and it is no refusal');
   const why = {
     NODE_OPTIONS: 'sets or clears NODE_OPTIONS, which would start node without this guard: a child of this suite runs no such command',
     env: 'runs env with an option, which can empty the environment and NODE_OPTIONS with it: a child of this suite runs no such command',
