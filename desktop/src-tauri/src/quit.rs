@@ -472,7 +472,8 @@ pub(crate) mod macos {
     /// Shows the "Quit without saving?" sheet on the document window, its
     /// alert built by sheet.rs: Cancel holds Return, so it is the default
     /// button and Return keeps everything as it was, and Quit holds no key,
-    /// so only a click quits (D-48). The sheet's answer goes to `chosen`.
+    /// so quitting takes a press of the Quit button itself (D-48). The
+    /// sheet's answer goes to `chosen`.
     /// Without a window to hang it on there is nothing to keep, and the quit
     /// goes on.
     pub fn confirm() {

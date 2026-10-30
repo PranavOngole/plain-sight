@@ -6,7 +6,7 @@
 //! the process's activation policy set to prohibited first, so that no Dock
 //! icon appears. It fails unless the buttons are Cancel and then Quit, Cancel
 //! holds Return with no modifier, and Quit holds no key at all, so neither
-//! Return nor Escape can quit.
+//! Return nor Escape chooses it.
 
 #[cfg(target_os = "macos")]
 #[path = "../src/sheet.rs"]
@@ -46,7 +46,7 @@ fn main() {
             holds("Cancel").is_some_and(|(_, key, mask)| key == "\r" && *mask == 0),
         ),
         (
-            "Quit holds no key, so neither Return nor Escape quits; only a click does",
+            "Quit holds no key, so neither Return nor Escape chooses it",
             holds("Quit").is_some_and(|(_, key, _)| key.is_empty()),
         ),
     ];

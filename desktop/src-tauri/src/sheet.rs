@@ -3,7 +3,8 @@
 //! tests/quit_sheet.rs, which reads its buttons without showing it.
 //!
 //! Cancel holds Return, so Return keeps everything as it was, as approved on
-//! 21 October; Quit holds no key at all, so only a click on it quits. NSAlert
+//! 21 October; Quit holds no key at all, so neither Return nor Escape chooses
+//! it, and quitting takes a press of the Quit button itself. NSAlert
 //! gives a button titled "Cancel" the Escape key, and when that button is the
 //! first one added it then gives no button Return (the Delivery Manager's
 //! probe of 29 October on macOS 26.5.2; PO-GUI-2, where the real-key run's
