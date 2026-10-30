@@ -50,6 +50,14 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 22
+
+Wave G, round 22, 30 October 2026, Developer N (appstore-candidate).
+
+- The signal guard's proof case now tries the four names quoted and escaped (PO-R21-1), and the shapes QA-01 found getting through the round 19 guard (QA-G-54). The Product Owner's PO2-WORD-QUOTES-KEPT, the word rule keeping quotes and backslashes, passed the proof case, because none of its 80 tries quoted a name. A new part of the case runs `"kill"`, `'pkill'`, `\killall` and `"/usr/bin/osascript"`, plus QA-01's shapes from its r19_sigguard_adv.mjs: `/bin/kill` alone, after `true;` and in parentheses, `/usr/bin/pkill`, `/usr/bin/killall` and `/usr/bin/osascript` in a shell's command, `"kill"`, `\kill`, and `nohup kill`. Each line runs as a shell's command and as `/bin/sh`'s argument, and `nohup kill` also as the program QA-01 ran: 25 tries, all aimed at the case's uniquely named clone, each refused.
+- The guard stands on its own. It writes the module that every node a case starts loads, from its own text, at its install, and it uses no name of the file but the six a loader gives it (fs, path, os, childProcess, syncBuiltinESMExports and REFUSALS). So a copy cut out of the file, as QA-01's r19_guard.mjs makes one, is the same guard; round 21's guard needed two more names and the child's own write, so QA-01's loader could not build it.
+- Config pins the line that names the guard's module in `NODE_OPTIONS`; round 21's DM268-PRELOAD-OFF passed config and only the proof case caught it. Config also pins the module's own lines: where it lies, that it is the guard's own text, written before any start, and that `NODE_OPTIONS` names it.
+
 ## Round 21
 
 Wave G, round 21, 30 October 2026, Developer N (appstore-candidate).

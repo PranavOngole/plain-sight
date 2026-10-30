@@ -1142,23 +1142,19 @@ test('e2e.mjs\'s window evidence lets a person\'s touch stop the run: its read h
 // folder, the four programs, every word of a command read by its last path
 // segment, all seven of child_process's ways to start a program, and the
 // guard's module named in every environment.
-test('every child of the safety suite installs the signal guard first and then writes the guard\'s module that every node a case starts loads, before its stand-ins and before any file under test is imported; nothing else sets process._kill or a child process\'s kill; and the guard sends a signal only inside the case\'s folder (separator included), by process.kill or a child process\'s kill, and refuses kill, pkill, killall and osascript as any word of a command, by its last path segment, through all seven of child_process\'s ways (PO-R18-1, PO-R19-1, DM-268, DISH-G-103)', () => {
+test('every child of the safety suite installs the signal guard first, which writes the guard\'s module that every node a case starts loads, before its stand-ins and before any file under test is imported; nothing else sets process._kill or a child process\'s kill; and the guard sends a signal only inside the case\'s folder (separator included), by process.kill or a child process\'s kill, refuses kill, pkill, killall and osascript as any word of a command, by its last path segment, through all seven of child_process\'s ways, and names its module in every environment (PO-R18-1, PO-R19-1, DM-268, DISH-G-103; the preload pin of round 22)', () => {
   const text = read(path.join(DESKTOP, 'tests'), 'harness-safety.mjs');
   const entry = "if (process.argv[2] === '--child') {";
   const install = 'const signalGuard = installSignalGuard(box);';
-  const write = 'writeFileSync(path.join(box, PRELOAD), signalGuardModule(box));';
   assert.equal(text.split(entry).length, 2, 'the suite has one child entry');
-  for (const statement of [install, write]) {
-    const fault = pinFault(text, statement, ["if (process.argv[2] === '--child')"]);
-    assert.equal(fault, null, statement + ' stands as a statement of its own in the child: ' + fault);
-  }
+  const fault = pinFault(text, install, ["if (process.argv[2] === '--child')"]);
+  assert.equal(fault, null, install + ' stands as a statement of its own in the child: ' + fault);
   const child = text.indexOf(entry);
   const at = text.indexOf(install);
   assert.ok(at > child, 'inside the child');
-  assert.match(text.slice(at + install.length, text.indexOf(write)), /^\n(\s*\/\/.*\n)*\s*$/, 'the guard\'s module is written by the statement right after the install');
   for (const later of ['childProcess.execFileSync = ', 'childProcess.spawnSync = ', 'await import(']) {
     const first = text.indexOf(later, child);
-    assert.ok(first > text.indexOf(write), 'before the first ' + JSON.stringify(later) + ' in the child');
+    assert.ok(first > at, 'before the first ' + JSON.stringify(later) + ' in the child');
   }
   assert.equal(/^import [^;]*'\.\/(harness|app|release|e2e|netwatch|launch-guard|testcopy)\.mjs'/m.test(text), false, 'no file under test is imported at the top of the suite');
   assert.equal(text.split('process._kill = ').length, 2, 'process._kill is set once, by the guard');
@@ -1177,11 +1173,16 @@ test('every child of the safety suite installs the signal guard first and then w
     ['    const names = named(parts);\n    if (names.length) {\n', 'a command that names one is refused'],
     ["  for (const name of ['execFileSync', 'execFile', 'spawnSync', 'spawn', 'execSync', 'exec', 'fork']) childProcess[name] = guarded(childProcess[name]);\n", 'all seven of child_process\'s ways to start a program'],
     ['  process.env.NODE_OPTIONS = withPreload(process.env.NODE_OPTIONS);\n  // Every way', 'the guard\'s module named in the child\'s own environment at the install'],
-    ['    process.env.NODE_OPTIONS = withPreload(process.env.NODE_OPTIONS);\n    return start.apply(this, args.map((a) => (a === options && options.env ? { ...options, env: { ...options.env, NODE_OPTIONS: withPreload(options.env.NODE_OPTIONS) } } : a)));\n', 'and again at every start, and in any environment a start is given']
+    ['    process.env.NODE_OPTIONS = withPreload(process.env.NODE_OPTIONS);\n    return start.apply(this, args.map((a) => (a === options && options.env ? { ...options, env: { ...options.env, NODE_OPTIONS: withPreload(options.env.NODE_OPTIONS) } } : a)));\n', 'and again at every start, and in any environment a start is given'],
+    // Round 22: the preload pin (DM268-PRELOAD-OFF passed config in round 21),
+    // and the guard's module, which the guard writes itself from its own text.
+    ["  const withPreload = (options) => (String(options || '').split(/\\s+/).includes(preload) ? options : [options, preload].filter(Boolean).join(' '));\n", 'NODE_OPTIONS always gains the guard\'s module, once'],
+    ["  const moduleFile = path.join(box, 'signal-guard.mjs');\n", 'the guard\'s module lies in the case\'s folder'],
+    ["  if (!fs.existsSync(moduleFile)) fs.writeFileSync(moduleFile, [\"import childProcess from 'node:child_process';\", \"import fs from 'node:fs';\", \"import os from 'node:os';\", \"import path from 'node:path';\", \"import { syncBuiltinESMExports } from 'node:module';\", 'const REFUSALS = ' + JSON.stringify(REFUSALS) + ';', installSignalGuard.toString(), 'installSignalGuard(' + JSON.stringify(box) + ');', ''].join('\\n'));\n", 'and is this guard\'s own text, run on the case\'s folder, written at the install when it is not there'],
+    ["  const preload = '--import=' + process.getBuiltinModule('node:url').pathToFileURL(moduleFile).href;\n", 'and is what NODE_OPTIONS names']
   ]) assert.ok(guard.includes(line), what);
-  const moduleAt = text.indexOf('const signalGuardModule = (box) => [');
-  const module = text.slice(moduleAt, text.indexOf('].join', moduleAt));
-  assert.ok(moduleAt > start && module.includes('  installSignalGuard.toString(),\n') && module.includes("  'installSignalGuard(' + JSON.stringify(box) + ');',\n"), 'the module every node a case starts loads is the guard\'s own text, run on the case\'s folder');
+  assert.ok(guard.indexOf('if (!fs.existsSync(moduleFile))') < guard.indexOf('childProcess[name] = guarded(childProcess[name]);'), 'the module is written before the guard lets any start through');
+  assert.equal(/\b(PRELOAD|pathToFileURL\()/.test(guard.replace("process.getBuiltinModule('node:url').pathToFileURL(", '')), false, 'the guard uses no name of this file but those its loader gives it (fs, path, os, childProcess, syncBuiltinESMExports and REFUSALS), so a copy cut out of the file is the same guard');
 });
 
 // DM-269 (round 21): the safety suite's parent ends what a case started only
