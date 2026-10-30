@@ -722,6 +722,63 @@ test('the real-key suite saves the person\'s clipboard before its first test and
   assert.ok(harness.includes('  } finally {\n    await cleanup();\n  }\n'), 'and every other end of the run, a stop and a refused launch among them, goes through that cleanup');
 });
 
+// DISH-G-101 (round 17): the real-key and release suites' guards were
+// pinned by their text (includes, and indexOf for their order), which a
+// condition put in front of a statement keeps: DISH put if (false) in front of
+// goTo's paste, the three own-folder checks and the clipboard's put-back, and
+// config stayed green. Each guarded statement is now held as a statement of
+// its own: it occurs once in its file, nothing but indentation stands before
+// it on its line, and the line before it (blank and comment lines aside) ends
+// a statement or opens or closes a block. So `if (false) statement`, `false &&
+// statement` and an `if (false)` line above it are each refused, and the case
+// checks that of the pin itself.
+function statementPinned(text, statement) {
+  const lines = text.split('\n');
+  const at = lines.flatMap((line, i) => (line.includes(statement) ? [i] : []));
+  if (at.length !== 1 || !lines[at[0]].trimStart().startsWith(statement)) return false;
+  for (let i = at[0] - 1; i >= 0; i--) {
+    const before = lines[i].replace(/\/\/.*$/, '').trim();
+    if (before) return /[;{}]$/.test(before);
+  }
+  return true;
+}
+const GUARDED = [
+  ['app.mjs', "await keys.press('cmd+v');", "goTo's paste (DISH's DD1)"],
+  ['app.mjs', 'await until(() => goToField() !== null, ', "goTo's read-back of the Go to Folder sheet"],
+  ['app.mjs', 'await until(() => (goToField() || {}).value === target, ', "goTo's read-back of the path in the sheet's field"],
+  ['app.mjs', 'await until(() => goToField() === null && panelFolders().includes(name), ', "goTo's read-back of the folder the panel shows"],
+  ['app.mjs', 'mustShowOwnFolder(path.dirname(file), [path.basename(file)]);', "the Open flow's own-folder check (DISH's DD5, DM-263)"],
+  ['app.mjs', 'mustShowOwnFolder(SAVE_AS, []);', "the Save flow's own-folder check (DISH's DD2)"],
+  ['app.mjs', 'mustShowOwnFolder(BUILD_TEST, []);', "the folder flow's own-folder check (DISH's DD6)"],
+  ['app.mjs', "note('clipboard saved: ' + JSON.stringify(driveRaw('clip-save', CLIPBOARD)));", "before()'s clipboard save (PO-R15-1)"],
+  ['app.mjs', "await endCopies(opened, (pid) => driveRaw('quit-app', pid));", "after()'s end of the copies (DISH's DD4)"],
+  ['app.mjs', "const back = driveRaw('clip-restore', CLIPBOARD);", "after()'s clipboard put-back (DISH's DD3, DM-265)"],
+  ['app.mjs', 'rmSync(CLIPBOARD, { force: true });', "the clipboard file's removal once the clipboard is back (DISH-G-99)"],
+  ['app.mjs', 'return [...new Set(opened.flatMap((bundle) => copiesOf(bundle)))];', 'instances(): the copies of every bundle the run opened'],
+  ['release.mjs', 'return copiesOf(APP);', "instances(): the copies of the release app (DISH's DN5)"],
+  ['release.mjs', "await endCopies([APP], (pid) => drive('quit-app', pid));", "after()'s end of the copies"]
+];
+test('the real-key and release suites\' guards stand as statements of their own, so no condition can skip one, and the pin refuses each with a condition in front of it or an if (false) line above it (DISH-G-101; PO-R15-1, DM-265)', () => {
+  const tests = path.join(DESKTOP, 'tests');
+  for (const [file, statement, what] of GUARDED) {
+    const text = read(tests, file);
+    assert.ok(statementPinned(text, statement), file + ', ' + what + ': ' + JSON.stringify(statement) + ' stands on a line of its own, once, after a line that ends a statement or a block');
+    const lines = text.split('\n');
+    const i = lines.findIndex((line) => line.includes(statement));
+    for (const lead of ['if (false) ', 'false && ', 'false || ', 'false ? 0 : ']) {
+      const changed = [...lines];
+      changed[i] = changed[i].replace(statement, lead + statement);
+      assert.equal(statementPinned(changed.join('\n'), statement), false, 'the pin refuses ' + JSON.stringify(lead + statement));
+    }
+    const above = [...lines];
+    above.splice(i, 0, lines[i].match(/^\s*/)[0] + 'if (false)');
+    assert.equal(statementPinned(above.join('\n'), statement), false, 'and an if (false) line above ' + JSON.stringify(statement));
+    const twice = [...lines];
+    twice.splice(i, 0, lines[i]);
+    assert.equal(statementPinned(twice.join('\n'), statement), false, 'and ' + JSON.stringify(statement) + ' twice over');
+  }
+});
+
 // PO-R13-1, the robot's route to a panel (round 14, the Delivery Manager's
 // preference): macOS draws the panels in their own process and the driver
 // posts keys only to the app's, so a typed path never reaches a panel. goTo

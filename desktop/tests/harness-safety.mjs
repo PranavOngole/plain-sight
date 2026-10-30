@@ -740,6 +740,27 @@ if (process.argv[2] === '--child') {
       await stopCurrentFor({ pid: copy.pid });
       await holderAfter(copy);
     },
+    // DISH's DN4 (round 17): a recorded copy whose bundle folder is gone by
+    // the time the run stops it (the copy moved or removed while it runs).
+    // realpathSync of a folder that is gone fails, and realPathOf then gives
+    // the path as given, which ps still shows as the copy's program. The
+    // bundle is made at the box's real path (a temporary folder can sit
+    // behind a link, /var to /private/var), so the path the launch recorded
+    // and the one ps shows agree with no link to resolve.
+    async 'copy-folder-gone'() {
+      const real = path.join(fs.realpathSync(box), 'gone-place');
+      const bundle = path.join(real, 'Plain Sight test copy.app');
+      const exe = path.join(bundle, 'Contents', 'MacOS', 'plain-sight');
+      mkdirSync(path.dirname(exe), { recursive: true });
+      fs.symlinkSync(process.execPath, exe);
+      const copy = await pidHolder(exe, 'quits', 'COPY');
+      h.recordLaunch(copy.pid, bundle);
+      fs.rmSync(real, { recursive: true, force: true });
+      console.log('FOLDER GONE ' + !existsSync(real));
+      console.log('ALIVE ' + h.alive(copy.pid));
+      await stopCurrentFor({ pid: copy.pid });
+      await holderAfter(copy);
+    },
     // PO-R12-1 (round 13): the same, with the pid held by another Plain Sight,
     // a program at another bundle's .../Contents/MacOS/plain-sight.
     async 'pid-reused-other-copy'() {
@@ -2193,6 +2214,28 @@ test('a copy recorded through a linked folder, whose process runs from the real 
     assert.match(r.out, /^SIGNALS SIGTERM$/m, 'the copy got one SIGTERM');
     assert.match(r.out, /^STILL RUNS false$/m, 'and ended');
     assert.ok(!runLog('copy-through-link').includes(otherProgramNote(copy.pid)), 'it was never taken for another program');
+  } finally {
+    endHolders(r);
+  }
+});
+// DISH's DN4 (round 17): realPathOf's fallback for a folder that is gone was
+// held by no test: DN4, the fallback giving an empty path, passed every
+// suite. Without it a copy whose bundle was moved or removed while it runs
+// would be taken for another program and left running.
+test('a recorded copy whose bundle folder is gone by the time the run stops it is still the copy: alive, stopped by its SIGTERM, and never noted as another program (DISH DN4, round 17)', async () => {
+  const r = await runCase('copy-folder-gone', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 0);
+    const [copy] = holdersOf(r);
+    assert.ok(copy && copy.kind === 'COPY', 'the copy started; the child\'s output:\n' + r.out);
+    assert.match(r.out, /^FOLDER GONE true$/m, 'the bundle folder is gone before the run asks about the copy');
+    assert.match(r.out, /^ALIVE true$/m, 'alive() still takes it for the copy; the child\'s output:\n' + r.out);
+    const [how, ms] = stopCurrentLine(r);
+    assert.equal(how, 'returned', 'stopCurrentApp returned');
+    assert.ok(Number(ms) < 3000, 'within 3 s: ' + ms + ' ms');
+    assert.match(r.out, /^SIGNALS SIGTERM$/m, 'the copy got one SIGTERM');
+    assert.match(r.out, /^STILL RUNS false$/m, 'and ended');
+    assert.ok(!runLog('copy-folder-gone').includes(otherProgramNote(copy.pid)), 'it was never taken for another program');
   } finally {
     endHolders(r);
   }
