@@ -105,6 +105,7 @@ function installSignalGuard(box) {
   const runPs = childProcess.spawnSync;
   const send = process._kill;
   let refused = 0;
+  let tried = 0;
   const refuse = (what) => {
     refused += 1;
     console.log('SIGNAL REFUSED ' + what);
@@ -118,6 +119,7 @@ function installSignalGuard(box) {
   const resolved = (p) => { try { return path.join(fs.realpathSync(path.dirname(p)), path.basename(p)); } catch { return p; } };
   process._kill = (pid, signal) => {
     if (signal === 0 || pid === process.pid) return send.call(process, pid, signal);
+    tried += 1;
     if (!(pid > 0)) { refuse('signal ' + signal + ' to ' + pid + ', a process group'); return -1; }
     const program = programOf(pid);
     if (program === null) return -3;   // ESRCH: gone, ending or ended
@@ -153,6 +155,7 @@ function installSignalGuard(box) {
   syncBuiltinESMExports();
   return {
     refusals: () => refused,
+    tried: () => tried,
     sendOwn: (pid, signal) => send.call(process, pid, os.constants.signals[signal])
   };
 }
@@ -187,7 +190,7 @@ if (process.argv[2] === '--child') {
   // hidden-document test for the front app's pid, and pgrep whether the app
   // is open. It answers from `fake`, the case's state; every other program
   // runs as it is (plutil reads a fake bundle's Info.plist).
-  const fake = { locked: false, idle: 600, windows: [], front: 4243, ps: null, logDriver: false, codesign: null, restoreRefused: false, saveRefused: false, quitByTerm: false, realDriver: false };
+  const fake = { locked: false, idle: 600, windows: [], front: 4243, ps: null, logDriver: false, codesign: null, restoreRefused: false, saveRefused: false, quitByTerm: false, realDriver: false, psList: null };
   const started = Date.now();
   const exec = childProcess.execFileSync;
   childProcess.execFileSync = (file, args = [], options) => {
@@ -226,6 +229,9 @@ if (process.argv[2] === '--child') {
     // other question, whether the app is open say, has no process here.
     if (file === 'pgrep' && args[0] === '-f' && String(args[1] || '').startsWith(box + path.sep)) return exec(file, args, options);
     if (file === 'pgrep') throw Object.assign(new Error('pgrep found no process'), { status: 1, stdout: '' });
+    // ps's list of every process, as copiesOf reads it, for the case that
+    // gives that list (fake.psList, PO-R18-2, round 19).
+    if (file === 'ps' && fake.psList && args.includes('-axww')) return fake.psList;
     // ps, for a case that gives its answers by pid (fake.ps): the line, or
     // none for no such process, when ps exits with 1 (round 12).
     if (file === 'ps' && fake.ps) {
@@ -882,6 +888,44 @@ if (process.argv[2] === '--child') {
         copy.p.kill('SIGKILL');
       }
       console.log('REGEX ' + JSON.stringify(found));
+    },
+    // PO-R18-2 (round 19): copiesOf's rule that a process ending (the flag E)
+    // or ended (the state Z) is no copy, which no case held: the Product
+    // Owner's PO3-COPIES-ENDING, the E and Z test dropped, passed every
+    // suite. macOS's ps shows such a process without its program, an ended
+    // one as "<defunct>" and an ending one by its short name in parentheses,
+    // so the exact comparison alone already leaves it out. First a real copy
+    // that has ended and is not reaped (a link to node at the copy's
+    // executable, started by a shell that then becomes sleep, which never
+    // reaps it). Then a stand-in listing that gives the copy's program on a
+    // running line, an ending line and an ended line, under pids no process
+    // can hold: only the running one is a copy, and the end of the suites'
+    // copies asks it alone (its quit takes it off the list) and signals
+    // nothing.
+    async 'copies-ending'() {
+      const exe = copyExecutable();
+      const shell = spawn('/bin/sh', ['-c', '"$0" -e "process.exit(0)" & exec /bin/sleep 5', exe], { stdio: 'ignore' });
+      const zombieOf = () => {
+        const rows = childProcess.execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,stat=,comm='], { encoding: 'utf8' }).split('\n').map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/)).filter(Boolean);
+        const row = rows.find((m) => Number(m[2]) === shell.pid && /^Z/.test(m[3]));
+        return row ? { pid: Number(row[1]), stat: row[3], program: row[4] } : null;
+      };
+      const zombie = await h.until(zombieOf, 'the copy to end, not reaped', 5000);
+      let tried = signalGuard.tried();
+      const askedReal = [];
+      await h.endCopies([copyBundle], (pid) => askedReal.push(pid));
+      console.log('ZOMBIE ' + JSON.stringify({ ...zombie, found: h.copiesOf(copyBundle).includes(zombie.pid), asked: askedReal, signals: signalGuard.tried() - tried }));
+      shell.kill('SIGKILL');
+      const rows = [[2000000101, 'S', exe], [2000000102, 'SE', exe], [2000000103, 'Z', exe], [2000000104, 'S', '/usr/libexec/another-program']];
+      const listing = (left) => left.map(([pid, stat, program]) => String(pid).padStart(11) + ' ' + stat.padEnd(4) + ' ' + program).join('\n') + '\n';
+      let left = rows;
+      fake.psList = listing(left);
+      console.log('LISTED ' + JSON.stringify(h.copiesOf(copyBundle)));
+      const asked = [];
+      tried = signalGuard.tried();
+      await h.endCopies([copyBundle], (pid) => { asked.push(pid); left = left.filter((row) => row[0] !== pid); fake.psList = listing(left); });
+      console.log('ASKED ' + JSON.stringify(asked) + ' SIGNALS ' + (signalGuard.tried() - tried));
+      fake.psList = null;
     },
     // PO-R18-1 (round 19): the signal guard's own proof. A stand-in outside
     // the case's folder: a link to /bin/sleep named plain-sight in a second
@@ -2468,6 +2512,17 @@ test('the suites\' end (endCopies) asks every copy of a bundle to quit: with two
   } finally {
     endHolders(r);
   }
+});
+// PO-R18-2 (round 19): copiesOf takes no process that is ending (the flag
+// E) or has ended (the state Z) for a copy; the Product Owner's
+// PO3-COPIES-ENDING, that test dropped, passed every suite at 1173115.
+test('copiesOf takes no process that is ending or has ended for a copy, and the end of the suites\' copies neither asks nor signals one: a real copy ended and not reaped, and a listing that gives the copy\'s program with the flag E and the state Z (PO-R18-2)', async () => {
+  const r = await runCase('copies-ending', undefined, { watchdog: 40000 });
+  ended(r, 0);
+  const z = JSON.parse((r.out.match(/^ZOMBIE (.*)$/m) || [])[1] || '{}');
+  assert.ok(/^Z/.test(z.stat || '') && z.found === false && JSON.stringify(z.asked) === '[]' && z.signals === 0, 'a real copy that has ended and is not reaped is no copy, and nothing asks or signals it: ' + JSON.stringify(z) + '; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^LISTED \[2000000101\]$/m, 'of the listing, only the running copy is a copy, not the ending or the ended one');
+  assert.match(r.out, /^ASKED \[2000000101\] SIGNALS 0$/m, 'and the end of the suites\' copies asks it alone and signals nothing');
 });
 // PO-R18-1 (round 19): every child of this suite runs under the signal
 // guard (installSignalGuard). Its proof: a stand-in outside the case's folder
