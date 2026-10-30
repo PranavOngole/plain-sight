@@ -50,6 +50,19 @@ e2e = [
   "objc2-web-kit/objc2-app-kit",
 ]
 
+# The "Quit without saving?" sheet's buttons, read without showing the sheet
+# (tests/quit_sheet.rs, D-48). AppKit makes windows on the main thread only,
+# so that test has its own main instead of the test harness's threads.
+[[test]]
+name = "quit_sheet"
+harness = false
+
+# That test's own needs, in test builds only: the activation policy that keeps
+# it out of the Dock (NSRunningApplication) and the buttons' modifier masks
+# (NSEvent). The same crate as above, so nothing new is downloaded.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSEvent", "NSResponder", "NSRunningApplication", "NSView"] }
+
 # Smallest binary rather than fastest build (DR-06).
 [profile.release]
 codegen-units = 1

@@ -368,7 +368,6 @@ pub(crate) mod macos {
         NSModalResponse, NSWindow,
     };
     use objc2_core_foundation::{kCFRunLoopCommonModes, CFRunLoop};
-    use objc2_foundation::NSString;
     use tauri::Manager;
 
     use super::{state, Answer, Choice, Ending, APP};
@@ -470,10 +469,12 @@ pub(crate) mod macos {
         });
     }
 
-    /// Shows the "Quit without saving?" sheet on the document window: Cancel
-    /// is the default button (the first one added, which answers Return) and
-    /// Quit the other. The sheet's answer goes to `chosen`. Without a window
-    /// to hang it on there is nothing to keep, and the quit goes on.
+    /// Shows the "Quit without saving?" sheet on the document window, its
+    /// alert built by sheet.rs: Cancel holds Return, so it is the default
+    /// button and Return keeps everything as it was, and Quit holds no key,
+    /// so only a click quits (D-48). The sheet's answer goes to `chosen`.
+    /// Without a window to hang it on there is nothing to keep, and the quit
+    /// goes on.
     pub fn confirm() {
         on_main_run_loop(|| {
             let Some(mtm) = MainThreadMarker::new() else {
@@ -489,13 +490,7 @@ pub(crate) mod macos {
             };
             // SAFETY: Tauri's pointer to the window's NSWindow, on the main thread.
             let ns_window: &NSWindow = unsafe { &*ns_window.cast() };
-            let alert = NSAlert::new(mtm);
-            alert.setMessageText(&NSString::from_str("Quit without saving?"));
-            alert.setInformativeText(&NSString::from_str(
-                "Your text has not been saved. If you quit now, it will be lost.",
-            ));
-            let _cancel = alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-            let _quit = alert.addButtonWithTitle(&NSString::from_str("Quit"));
+            let alert = crate::sheet::quit_alert(mtm);
             let done = RcBlock::new(move |response: NSModalResponse| {
                 SHEET.with(|sheet| sheet.borrow_mut().take());
                 super::chosen(if response == NSAlertSecondButtonReturn {

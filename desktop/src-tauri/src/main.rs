@@ -30,6 +30,10 @@ mod docx;
 mod folder;
 mod menu;
 mod quit;
+// The "Quit without saving?" sheet's alert, for quit.rs and for the test
+// that reads its buttons (tests/quit_sheet.rs).
+#[cfg(target_os = "macos")]
+mod sheet;
 
 // Test builds only; see the module.
 #[cfg(feature = "e2e")]
