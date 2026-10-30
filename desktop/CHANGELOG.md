@@ -50,6 +50,18 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 23
+
+Wave G, round 23, 30 October 2026, Developer N (appstore-candidate).
+
+- The signal guard closes the three ways around it that the Delivery Manager found at 6eea2b7 (DM-270). Each sent a real signal to a sleep of its own, and the code under test uses none of them:
+  - A worker thread has a process of its own, whose kill the guard did not wrap. A Worker started in a child is now refused at its start.
+  - A shell's command that empties NODE_OPTIONS started node with no guard. A command that names NODE_OPTIONS (setting or clearing it, in a shell or through env) is now refused, and so is one that runs env with an option, such as `env -i` or `env -u`, which empties the environment or part of it.
+  - ANSI-C quoting (`$'\x6b'ill`, which a shell decodes into kill) passed the word rule. A command with `$'` is now refused.
+- A new part of the proof case tries a worker thread and these commands, each aimed at the case's uniquely named clone, and each refused: NODE_OPTIONS emptied in a shell's command, unset by `/bin/sh`, or taken out by `env -u`; `env -i`; ANSI-C quoting in a shell's command and in `/bin/sh -c`. The nodes they start run the stand-in's kill under a computed name, so only the new rules can refuse them. The part also runs kill through `exec` and `execFile`, so each of Node's seven ways to start a program is now tried by a case, and Part E starts a node from a shell's command too.
+- README 223 now says no more than the cases show. A signal goes only where `ps` placed the target just before the send: a process that starts another program in that moment still gets it, as QA-01 measured, and the parent's end of a case has the same moment. Only a node started through Node is said to load the guard. What the guard does not see is named: what a program other than node does, a program under another name such as a link to `/bin/kill`, a node such a program starts with an emptied environment, and a name built while a command runs.
+- README 207 said the vault test of app-run-2 did not run (DM-271). It failed at its first step, which timed out waiting for the app to quit because the quit sheet was still up, so the vault across Cmd+Q is still untested in a launched run.
+
 ## Round 22
 
 Wave G, round 22, 30 October 2026, Developer N (appstore-candidate).
