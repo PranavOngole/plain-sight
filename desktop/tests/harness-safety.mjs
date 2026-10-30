@@ -142,16 +142,17 @@ const PRELOAD = 'signal-guard.mjs';
 //   first word of every command, a path such as /usr/bin/pkill, and the
 //   word after env, xargs, nohup, command, exec, sudo, time or any other
 //   program that runs the next one. Nothing the children test runs them.
-// - Every node a case starts, by fork, spawn or a shell, at any depth: it
-//   loads this same guard first, from the module the child writes into the
-//   case's folder (signalGuardModule), through NODE_OPTIONS, which the
-//   guard sets in the child's own environment and adds to any environment a
-//   start is given.
+// - Every node a case starts, by fork, spawn or a shell, at any depth, with
+//   the environment it is given: it loads this same guard first, from the
+//   module the child writes into the case's folder (signalGuardModule),
+//   through NODE_OPTIONS, which the guard sets in the child's own
+//   environment and adds to any environment a start is given.
 // Each refusal is printed with the pid and the program, or the command, and
 // written to the case's refusals file, and runCase fails the case for it.
 // What it does not cover: what a program other than node does once it runs
 // (a shell script file or a compiled program can signal by itself, unseen:
-// only the command that starts it is read); a name built while a command
+// only the command that starts it is read; and env -i starts a program,
+// node too, without NODE_OPTIONS); a name built while a command
 // runs (a variable, eval, or a command a shell reads on its standard input,
 // which is data here); and the driver, which never runs in a child (the
 // stand-in answers every driver command, and its one answer that signals,
@@ -263,12 +264,16 @@ if (process.argv[2] === '--child') {
   // DM-268 (round 21): then the guard's module, which every node the case
   // starts loads first, before any process is started.
   writeFileSync(path.join(box, PRELOAD), signalGuardModule(box));
-  // DM-269 (round 21): every process a case starts runs a program inside the
-  // case's folder, so that the parent, which ends a process a case printed
-  // only when ps shows it running a program there, can end what a case left
-  // running: node through a link in the box (the pid holders, the late
-  // writer, and the stand-in app through STANDIN_NODE), and sleep the same
-  // way.
+  // DM-269 (round 21): every process a case starts and may signal or leave
+  // running runs a program inside the case's folder: the pid holders, the
+  // late writer and the stand-in app run node through a link in the box (the
+  // stand-in app through STANDIN_NODE), and the shell that becomes sleep runs
+  // sleep through a link there. So the parent, which ends a pid a case
+  // printed or recorded only when ps shows it running a program there, can
+  // end what a case left running, and the guard lets a case signal its own.
+  // The programs a case only runs to their end (ps, pgrep, plutil,
+  // /usr/bin/true) need neither. The proof case's two stand-ins, its
+  // targets, run in its second folder, beside the case's.
   const programHere = (name, target) => {
     const file = path.join(box, 'programs', name);
     if (!existsSync(file)) { mkdirSync(path.dirname(file), { recursive: true }); fs.symlinkSync(target, file); }
