@@ -935,9 +935,16 @@ if (process.argv[2] === '--child') {
     // plain-sight would return the stand-in here, and the guard would refuse.
     // (A) The end of the outside bundle's copies, which finds the stand-in
     // as a widened copiesOf would: its quit and the SIGKILL 5 s later are
-    // refused. (C) A signal straight to it, the kill program and a shell's
-    // kill: refused. The stand-in must still run after all three; the case
-    // then ends it itself, by its pid, through sendOwn.
+    // refused. (C) A signal straight to it: refused. (D) PO-R19-1 (round 20):
+    // kill, pkill, killall and osascript, each run as a program (execFileSync
+    // and spawnSync) and in a shell's command (execSync), all aimed at a
+    // second stand-in outside the folder and at nothing else: a clone of node
+    // under a name of its own, which is its process name (a link takes its
+    // target's name, and a copy of /bin/sleep is killed by macOS), so that
+    // pkill -x and killall name it alone, while kill and osascript's shell
+    // take its pid. Each try is refused. Both stand-ins must still run after
+    // all four parts; the case then ends them itself, by their pids, through
+    // sendOwn.
     async 'signal-guard'() {
       const bundle = path.join(process.env[OUTSIDE], 'Plain Sight.app');
       const exe = path.join(bundle, 'Contents', 'MacOS', 'plain-sight');
@@ -955,15 +962,41 @@ if (process.argv[2] === '--child') {
       await h.endCopies([bundle], quit);
       console.log('PART A REFUSALS ' + (signalGuard.refusals() - before) + ' in ' + (Date.now() - t0) + ' ms');
       before = signalGuard.refusals();
-      for (const send of [() => process.kill(stand.pid, 'SIGTERM'), () => childProcess.execFileSync('kill', ['-TERM', String(stand.pid)]), () => childProcess.execSync('kill -TERM ' + stand.pid)]) {
-        try { send(); } catch (err) { console.log('REFUSED AS ' + err.code); }
-      }
+      try { process.kill(stand.pid, 'SIGTERM'); } catch (err) { console.log('REFUSED AS ' + err.code); }
       console.log('PART C REFUSALS ' + (signalGuard.refusals() - before));
+      const name = 'psg' + Math.random().toString(16).slice(2, 10);
+      const clone = path.join(process.env[OUTSIDE], name);
+      fs.copyFileSync(process.execPath, clone, fs.constants.COPYFILE_FICLONE);
+      const second = spawn(clone, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+      await h.until(() => h.programOf(second.pid) === clone, 'the second stand-in to run', 10000);
+      console.log('SECOND ' + second.pid + ' ' + name + ' ' + clone);
+      const osa = 'do shell script "kill -TERM ' + second.pid + '"';
+      const commands = [
+        ['kill', ['-TERM', String(second.pid)], 'kill -TERM ' + second.pid],
+        ['pkill', ['-TERM', '-x', name], 'pkill -TERM -x ' + name],
+        ['killall', ['-TERM', name], 'killall -TERM ' + name],
+        ['osascript', ['-e', osa], "osascript -e '" + osa + "'"]
+      ];
+      before = signalGuard.refusals();
+      for (const [program, args, line] of commands) {
+        const tries = [
+          () => childProcess.execFileSync(program, args, { stdio: 'ignore' }),
+          () => { const run = childProcess.spawnSync(program, args, { stdio: 'ignore' }); if (run.error) throw run.error; },
+          () => childProcess.execSync(line, { stdio: 'ignore' })
+        ];
+        for (const attempt of tries) {
+          try { attempt(); } catch (err) { console.log('REFUSED AS ' + err.code); }
+        }
+      }
+      console.log('PART D REFUSALS ' + (signalGuard.refusals() - before));
       await h.sleep(300);
       console.log('OUTSIDE STILL RUNS ' + (stand.exitCode === null && stand.signalCode === null));
-      try { signalGuard.sendOwn(stand.pid, 'SIGTERM'); } catch { /* it has ended */ }
-      await h.until(() => stand.exitCode !== null || stand.signalCode !== null, 'the outside stand-in to end', 3000).catch(() => {});
-      console.log('OUTSIDE ENDED ' + JSON.stringify([stand.exitCode, stand.signalCode]));
+      console.log('SECOND STILL RUNS ' + (second.exitCode === null && second.signalCode === null));
+      for (const [label, standIn] of [['OUTSIDE', stand], ['SECOND', second]]) {
+        try { signalGuard.sendOwn(standIn.pid, 'SIGTERM'); } catch { /* it has ended */ }
+        await h.until(() => standIn.exitCode !== null || standIn.signalCode !== null, 'the stand-in to end', 3000).catch(() => {});
+        console.log(label + ' ENDED ' + JSON.stringify([standIn.exitCode, standIn.signalCode]));
+      }
     },
     // QA-G-52 (round 18), QA-01's copies-bystanders (r15_pid_adv.mjs): the
     // copy, with another Plain Sight (another bundle's plain-sight, as the
@@ -2530,20 +2563,28 @@ test('copiesOf takes no process that is ending or has ended for a copy, and the 
 // would; nothing reaches it, each refusal is printed and written with the
 // pid and the program, and the case reports them; the stand-in is then ended
 // by the case itself. A refusal the case does not expect fails it.
-test('a child of the safety suite signals nothing outside its own folder: the end of the suites\' copies, a signal straight to a stand-in outside it, the kill program and a shell\'s kill are refused and reported with the pid and the program, the stand-in still runs, and the case then ends it itself (PO-R18-1)', async () => {
+test('a child of the safety suite signals nothing outside its own folder: the end of the suites\' copies, a signal straight to a stand-in outside it, and kill, pkill, killall and osascript, each as a program and in a shell\'s command, are refused and reported with the pid and the program or the command, the stand-ins still run, and the case then ends them itself (PO-R18-1, PO-R19-1)', async () => {
   const r = await runCase('signal-guard', undefined, { outside: true, refusals: true, watchdog: 60000 });
   ended(r, 0);
   const [, pid, exe] = r.out.match(/^OUTSIDE (\d+) (.+)$/m) || [];
   assert.ok(pid && exe && exe.endsWith(path.join('Plain Sight.app', 'Contents', 'MacOS', 'plain-sight')) && !exe.startsWith(ROOT + path.sep), 'the stand-in runs outside every case\'s folder; the child\'s output:\n' + r.out);
   assert.match(r.out, /^PART B REFUSALS 0$/m, 'the end of the case\'s own copies, none running, signals nothing, whatever runs outside; the child\'s output:\n' + r.out);
   assert.match(r.out, /^PART A REFUSALS 2 in \d+ ms$/m, 'the end of the outside bundle\'s copies: its quit and the SIGKILL 5 s later, both refused');
-  assert.match(r.out, /^PART C REFUSALS 3$/m, 'a signal straight to the stand-in, the kill program and a shell\'s kill, each refused');
+  assert.match(r.out, /^PART C REFUSALS 1$/m, 'a signal straight to the stand-in, refused');
+  const [, pid2, name] = r.out.match(/^SECOND (\d+) (psg[0-9a-f]+) /m) || [];
+  assert.ok(pid2 && name, 'the second stand-in, a clone of node under a name of its own, runs outside the folder; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^PART D REFUSALS 12$/m, 'kill, pkill, killall and osascript, each through execFileSync, spawnSync and execSync, each refused; the child\'s output:\n' + r.out);
   assert.match(r.out, /^OUTSIDE STILL RUNS true$/m, 'nothing reached the stand-in');
+  assert.match(r.out, /^SECOND STILL RUNS true$/m, 'nor the second stand-in');
   assert.match(r.out, /^OUTSIDE ENDED \[null,"SIGTERM"\]$/m, 'the case then ended it itself, by its pid');
+  assert.match(r.out, /^SECOND ENDED \[null,"SIGTERM"\]$/m, 'and the second one');
   const box = path.join(ROOT, 'signal-guard');
   const to = (signal) => 'signal ' + signal + ' to pid ' + pid + ' (' + exe + '), outside the case\'s folder ' + box;
-  const command = 'the command "kill -TERM ' + pid + '": a child of this suite runs no kill, pkill, killall or osascript';
-  assert.deepEqual(r.refused, [to(15), to(9), to(15), command, command], 'each refusal written with the pid and the program, or the command');
+  const command = (text) => 'the command ' + JSON.stringify(text) + ': a child of this suite runs no kill, pkill, killall or osascript';
+  const osa = 'do shell script "kill -TERM ' + pid2 + '"';
+  const tried = [];
+  for (const [asProgram, inShell] of [['kill -TERM ' + pid2, 'kill -TERM ' + pid2], ['pkill -TERM -x ' + name, 'pkill -TERM -x ' + name], ['killall -TERM ' + name, 'killall -TERM ' + name], ['osascript -e ' + osa, "osascript -e '" + osa + "'"]]) tried.push(asProgram, asProgram, inShell);
+  assert.deepEqual(r.refused, [to(15), to(9), to(15), ...tried.map(command)], 'each refusal written with the pid and the program, or the command, which names only the second stand-in');
   assert.deepEqual(r.out.split('\n').filter((l) => l.startsWith('SIGNAL REFUSED ')), r.refused.map((x) => 'SIGNAL REFUSED ' + x), 'and printed');
 });
 test('a signal the guard refuses fails the case that sent it, unless the case expects it (PO-R18-1)', async () => {

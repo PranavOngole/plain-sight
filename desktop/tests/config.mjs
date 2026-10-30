@@ -1135,7 +1135,7 @@ test('e2e.mjs\'s window evidence lets a person\'s touch stop the run: its read h
 // child_process's functions and before any file is imported; the suite
 // imports none of the files under test at its top; and nothing else in it
 // sets process._kill.
-test('every child of the safety suite installs the signal guard first, before its stand-ins and before any file under test is imported, and nothing else sets process._kill (PO-R18-1)', () => {
+test('every child of the safety suite installs the signal guard first, before its stand-ins and before any file under test is imported, nothing else sets process._kill, and the guard refuses kill, pkill, killall and osascript (PO-R18-1, PO-R19-1)', () => {
   const text = read(path.join(DESKTOP, 'tests'), 'harness-safety.mjs');
   const entry = "if (process.argv[2] === '--child') {";
   const install = 'const signalGuard = installSignalGuard(box);';
@@ -1155,6 +1155,10 @@ test('every child of the safety suite installs the signal guard first, before it
   const guard = text.slice(start, text.indexOf('\n}\n', start));
   assert.ok(start >= 0 && guard.includes('  process._kill = (pid, signal) => {'), 'the guard wraps process._kill');
   assert.ok(guard.includes("  for (const name of ['execFileSync', 'execFile', 'spawnSync', 'spawn']) {") && guard.includes("  for (const name of ['execSync', 'exec']) {"), 'and the child_process functions that could run kill, pkill, killall or osascript');
+  // PO-R19-1 (round 20): the list itself, in both places: as a program and
+  // in a shell's command. The proof case tries each of the four.
+  assert.ok(guard.includes("    if (/^(kill|pkill|killall|osascript)$/.test(name)) return true;\n"), 'the guard refuses kill, pkill, killall and osascript run as programs');
+  assert.ok(guard.includes("  const SIGNALLING = /(^|[\\s;&|(`])(kill|pkill|killall|osascript)(\\s|$)/;\n"), 'and in a shell\'s command');
 });
 
 // QA-G-53 (round 18): the panel helpers of the real-key suite (inPanel, goTo,

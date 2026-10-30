@@ -50,6 +50,12 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 20
+
+Wave G, round 20, 30 October 2026, Developer N (appstore-candidate).
+
+- The safety suite's signal guard has its list of refused programs held (PO-R19-1). The Product Owner's PO1-GUARD-PKILL-ALLOWED, pkill taken off the list, passed every suite, because the proof case tried only kill and config pinned the guard's install, not its list. The proof case now tries kill, pkill, killall and osascript, each through execFileSync, spawnSync and execSync, all aimed at a second stand-in outside the case's folder and at nothing else: a clone of node under a name of its own, which is its process name, so pkill -x and killall can name it alone (a link to /bin/sleep takes the name sleep, and a copy of /bin/sleep is killed by macOS), while kill and osascript's shell take its pid. Each of the twelve tries is refused, and config pins the list in both places.
+
 ## Round 19
 
 Wave G, round 19, 30 October 2026, Developer N (appstore-candidate).
