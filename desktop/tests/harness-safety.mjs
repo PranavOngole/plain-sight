@@ -1404,8 +1404,15 @@ if (process.argv[2] === '--child') {
         ['fork', () => childProcess.fork(probe, [String(second.pid)], { silent: true, execPath: nodeHere })],
         ['spawn', () => spawn(nodeHere, [probe, String(second.pid)], { stdio: ['ignore', 'pipe', 'ignore'] })],
         ['spawn with an environment of its own', () => spawn(nodeHere, [probe, String(second.pid)], { stdio: ['ignore', 'pipe', 'ignore'], env: { PATH: process.env.PATH } })],
-        ['a shell\'s command', () => spawn(shellWord(nodeHere) + ' ' + shellWord(probe) + ' ' + second.pid, { shell: true, stdio: ['ignore', 'pipe', 'ignore'] })]
-      ]) console.log('PART E NODE ' + how + ': ' + await lastLine(start()));
+        ['a shell\'s command', () => spawn(shellWord(nodeHere) + ' ' + shellWord(probe) + ' ' + second.pid, { shell: true, stdio: ['ignore', 'pipe', 'ignore'] })],
+        // Round 24: the two places that give a start's own environment the
+        // guard's module, each tried alone. spawnSync goes through only the
+        // seven functions' wrappers, and ChildProcess.spawn called directly,
+        // with environment pairs of its own, only through
+        // ChildProcess.prototype.spawn.
+        ['spawnSync with an environment of its own', () => ({ sync: childProcess.spawnSync(nodeHere, [probe, String(second.pid)], { stdio: ['ignore', 'pipe', 'ignore'], env: { PATH: process.env.PATH }, encoding: 'utf8' }) })],
+        ['ChildProcess.spawn with environment pairs of its own', () => { const cp = new childProcess.ChildProcess(); cp.spawn({ file: nodeHere, args: [nodeHere, probe, String(second.pid)], envPairs: ['PATH=' + process.env.PATH], stdio: ['ignore', 'pipe', 'ignore'] }); return cp; }]
+      ]) { const started = start(); console.log('PART E NODE ' + how + ': ' + (started.sync ? String(started.sync.stdout || '').trim().split('\n').pop() : await lastLine(started))); }
       console.log('PART E REFUSALS ' + (written() - before));
       await h.sleep(300);
       console.log('OUTSIDE STILL RUNS ' + (stand.exitCode === null && stand.signalCode === null));
@@ -3094,8 +3101,8 @@ test('a child of the safety suite signals nothing outside its own folder: the en
     kill: 'names kill: a child of this suite runs no kill, pkill, killall or osascript'
   };
   assert.match(r.out, /^PART E KILL false$/m, 'the outside stand-in\'s own kill(), refused');
-  for (const how of ['fork', 'spawn', 'spawn with an environment of its own', 'a shell\'s command']) assert.ok(r.out.split('\n').includes('PART E NODE ' + how + ': PROBE REFUSED AS EPERM'), 'a node the case starts by ' + how + ' loads the guard first, and its process.kill is refused; the child\'s output:\n' + r.out);
-  assert.match(r.out, /^PART E REFUSALS 5$/m, 'five refusals written: the kill() and one in each node');
+  for (const how of ['fork', 'spawn', 'spawn with an environment of its own', 'a shell\'s command', 'spawnSync with an environment of its own', 'ChildProcess.spawn with environment pairs of its own']) assert.ok(r.out.split('\n').includes('PART E NODE ' + how + ': PROBE REFUSED AS EPERM'), 'a node the case starts by ' + how + ' loads the guard first, and its process.kill is refused; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^PART E REFUSALS 7$/m, 'seven refusals written: the kill() and one in each of the six nodes');
   assert.match(r.out, /^OUTSIDE STILL RUNS true$/m, 'nothing reached the stand-in');
   assert.match(r.out, /^SECOND STILL RUNS true$/m, 'nor the second stand-in');
   assert.match(r.out, /^OUTSIDE ENDED \[null,"SIGTERM"\]$/m, 'the case then ended it itself, by its pid');
@@ -3104,8 +3111,8 @@ test('a child of the safety suite signals nothing outside its own folder: the en
   const to = (signal) => 'signal ' + signal + ' to pid ' + pid + ' (' + exe + '), outside the case\'s folder ' + box;
   const command = (t, form) => 'the command ' + JSON.stringify(formText(form, t)) + ' names ' + t.program + ': a child of this suite runs no kill, pkill, killall or osascript';
   const inNode = 'signal 15 to pid ' + pid2 + ' (' + clone + '), outside the case\'s folder ' + box;
-  assert.deepEqual(r.refused, [to(15), to(9), to(15), ...tries.flatMap((t) => FORMS.map((form) => command(t, form))), ...quoted.map(({ text, program }) => 'the command ' + JSON.stringify(text) + ' names ' + program + ': a child of this suite runs no kill, pkill, killall or osascript'), 'a worker thread, whose process.kill this guard cannot reach: a child of this suite starts none', ...evasions.map((t) => 'the command ' + JSON.stringify(evasionText(t)) + ' ' + why[t.reason]), ...routes.map((t) => 'the command ' + JSON.stringify(routeText(t)) + ' names ' + t.names + ': a child of this suite runs no kill, pkill, killall or osascript'), 'signal SIGTERM to its child ' + pid + ' (' + exe + '), outside the case\'s folder ' + box, inNode, inNode, inNode, inNode], 'each refusal written with the pid and the program, or the command, which names only the second stand-in');
-  assert.deepEqual(r.out.split('\n').filter((l) => l.startsWith('SIGNAL REFUSED ')), r.refused.slice(0, -4).map((x) => 'SIGNAL REFUSED ' + x), 'and printed (the four nodes print theirs in their own output)');
+  assert.deepEqual(r.refused, [to(15), to(9), to(15), ...tries.flatMap((t) => FORMS.map((form) => command(t, form))), ...quoted.map(({ text, program }) => 'the command ' + JSON.stringify(text) + ' names ' + program + ': a child of this suite runs no kill, pkill, killall or osascript'), 'a worker thread, whose process.kill this guard cannot reach: a child of this suite starts none', ...evasions.map((t) => 'the command ' + JSON.stringify(evasionText(t)) + ' ' + why[t.reason]), ...routes.map((t) => 'the command ' + JSON.stringify(routeText(t)) + ' names ' + t.names + ': a child of this suite runs no kill, pkill, killall or osascript'), 'signal SIGTERM to its child ' + pid + ' (' + exe + '), outside the case\'s folder ' + box, inNode, inNode, inNode, inNode, inNode, inNode], 'each refusal written with the pid and the program, or the command, which names only the second stand-in');
+  assert.deepEqual(r.out.split('\n').filter((l) => l.startsWith('SIGNAL REFUSED ')), r.refused.slice(0, -6).map((x) => 'SIGNAL REFUSED ' + x), 'and printed (the six nodes print theirs in their own output)');
 });
 test('a signal the guard refuses fails the case that sent it, unless the case expects it (PO-R18-1)', async () => {
   await assert.rejects(runCase('signal-guard', undefined, { outside: true, tag: 'signal-guard-unexpected', watchdog: 60000 }), /^Error: the case tried to signal a process outside its own folder, and the guard refused: signal 15 to pid \d+ /);
