@@ -421,6 +421,11 @@ test('the folder button opens the real system folder panel, as a window at the n
 // the status still expected the old words in e2e-run-3 (26 October), the
 // first failing on them and the second timing out waiting for them.
 const NO_FOLDER_STATUS = 'Save opens a save panel for an encrypted .sight file.';
+// A browser's tab, which the intro may never name in the app: the word tab or
+// tabs, in any case, once each key chord that ends in Tab (Option+Shift+Tab,
+// Shift+Tab) is taken out, since those name the Tab key (PO-GUI-1, round 18;
+// e2e.mjs and native.mjs hold the same rule, and config.mjs compares them).
+const namesATab = (text) => /\btabs?\b/i.test(text.replace(/\b(?:(?:Cmd|Command|Ctrl|Control|Option|Alt|Shift)\s*\+\s*)+Tab\b/gi, ''));
 
 test('in the app the intro speaks of an app, not a browser, and offers the system folder picker', async () => {
   mkdirSync(FOLDER, { recursive: true });
@@ -430,7 +435,7 @@ test('in the app the intro speaks of an app, not a browser, and offers the syste
   await page.openIntro();
   const intro = await js(`document.getElementById('intro').textContent`);
   assert.equal(/browser/i.test(intro), false, 'no browser in the intro');
-  assert.equal(/\btab\b/i.test(intro), false, 'no tab in the intro');
+  assert.equal(namesATab(intro), false, 'no tab in the intro, a key chord that ends in Tab aside');
   assert.match(intro, /Nothing you type leaves this app/);
   assert.match(intro, /Save my text on this computer, encrypted/);
   assert.equal(await page.shown('btn-folder'), true, 'the folder button shows');

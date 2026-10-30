@@ -165,6 +165,18 @@ test('without the adapter the page keeps its browser wording and registers nothi
   } finally { p.close(); }
 });
 
+// A browser's tab, which the intro may never name in the app: the word tab or
+// tabs, in any case, once each key chord that ends in Tab (Option+Shift+Tab,
+// Shift+Tab) is taken out, since those name the Tab key (PO-GUI-1, round 18;
+// e2e.mjs and native.mjs hold the same rule, and config.mjs compares them).
+const namesATab = (text) => /\btabs?\b/i.test(text.replace(/\b(?:(?:Cmd|Command|Ctrl|Control|Option|Alt|Shift)\s*\+\s*)+Tab\b/gi, ''));
+test('the intro\'s tab rule refuses a browser\'s tab in any case and allows a key chord that ends in Tab (PO-GUI-1)', () => {
+  for (const words of ['Option+Shift+Tab to the button', 'Shift+Tab alone when Keyboard navigation is on', 'Option + Shift + Tab', 'a stable table', 'Cmd + Shift + H'])
+    assert.equal(namesATab(words), false, JSON.stringify(words) + ' names no tab');
+  for (const words of ['in a new tab', 'Close the Tab', 'TABS', 'every tab of the browser', 'Shift+Tab, then close the tab', 'tab'])
+    assert.equal(namesATab(words), true, JSON.stringify(words) + ' names a tab');
+});
+
 test('with the adapter the folder box offers the system picker, no browser help, and the app wording', async () => {
   const native = fakeNative();
   const p = await loadPage({ native });
@@ -180,7 +192,7 @@ test('with the adapter the folder box offers the system picker, no browser help,
     assert.match(p.$('#intro').textContent, /clears itself after 10 minutes with its window minimized or hidden/);
     assert.match(p.$('#intro').textContent, /Stored only on this computer\./);
     assert.equal(p.$('#intro').textContent.includes('browser'), false, 'no sentence of the intro mentions a browser');
-    assert.equal(p.$('#intro').textContent.includes('tab'), false, 'no sentence of the intro mentions a tab');
+    assert.equal(namesATab(p.$('#intro').textContent), false, 'no sentence of the intro mentions a tab, a key chord that ends in Tab aside');
     // In the app Save opens a save panel with no folder chosen, or writes straight into the chosen folder: nothing is downloaded (QA-G-23).
     assert.equal(/download/i.test(p.$('#intro').textContent), false, 'no sentence of the intro, its labels included, mentions a download');
     assert.match(p.$('#intro').textContent, /Save opens a save panel and writes your text where you put it, as a \.sight file encrypted with AES-256-GCM/);

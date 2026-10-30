@@ -50,6 +50,17 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 18
+
+Wave G, round 18, 29 October 2026, Developer N (appstore-candidate).
+
+- The "Quit without saving?" sheet's Return chooses Cancel, as D-48 says (PO-GUI-2; the Delivery Manager's follow-up of 29 October). On macOS 26.5.2 NSAlert gave the first button, titled Cancel, the Escape key and no button Return, so in app-run-2 the robot's Return did nothing to the sheet. The alert is now built in `sheet.rs`: Cancel holds Return, which makes it the window's default button, and Quit holds no key, so only a click quits. No button holds Escape: a button holds one key, and made the default while it held Escape, Cancel took Return in its place. A cargo test with its own main thread, `tests/quit_sheet.rs`, reads the keys of the alert `sheet.rs` builds, never shown and with no event posted; config holds quit.rs to that alert. The real-key quit-sheet test is unchanged.
+- The pin on the real-key and release suites' guards reads every block around each guarded statement, out to the top of its file (PO-R17-1). The Product Owner's PO1-IF-BLOCK-ABOVE, `if (Date.now() < 0) {` above the Save flow's own-folder check, had passed config. Each block around a guard must be a try, a finally, a function declared at the top, a test's body, a panel step, run()'s before() or after(), or a condition the guard names (the clipboard's put-back and its file's removal), and no return, throw, break or continue may come before the guard in its functions. The case checks that the pin refuses sixteen forms around each guard and the outermost block wrapped whole.
+- The real-key suite puts the clipboard back only when its own save answered ok (QA-G-51 (b)). A failed save is said in run.log and the output, and the clipboard and any older `clipboard.plist` in a reused evidence folder are left alone. A stand-in driver case holds that, and another holds QA-01's C0 order with a copy running: the save, the copy's quit, the put-back, then the front app.
+- `copiesOf` reads ps's list of every process and compares each program with the bundle's executable exactly (QA-G-52). `pgrep -f` read the path as a regular expression, so a copy whose bundle path held ( [ + or * was not found, and a copy started through a linked folder was not found by the real folder's spelling. QA-01's five names, the linked spelling and its bystanders are cases now.
+- QA-01's breaks that passed every suite each have a case that fails on them (QA-G-53): the lock released only by the cleanup's finally (Q4), endCopies asking every copy (Q18), driveRaw's 64 MB buffer (Q23), and the panel helpers cut out of app.mjs and run under QA-01's stand-in panel (A10, A11, A13, A14).
+- e2e.mjs and native.mjs hold the app's intro to one tab rule (PO-GUI-1): no word tab or tabs once each key chord that ends in Tab is taken out, so the Super Stealth note's "Option+Shift+Tab" passes and a browser's tab does not.
+
 ## Round 17
 
 Wave G, round 17, 29 October 2026, Developer N (appstore-candidate).
@@ -201,7 +212,7 @@ Wave G, round 12, 28 October 2026, the harness half (appstore-candidate).
 
 - The golden sample lives once, at the repository root (`tests/fixtures`, ledger D-43): the Rust writer reproduces `sample.docx` byte for byte, carriage returns, a U+000B and a U+FFFE included; `desktop/tests/fixtures` is gone.
 - In the app, Cmd+C with no peek is taken by the page unless a text field holds a selection, so the key leaves the clipboard as it was; the Edit menu's Copy chosen with the mouse is not intercepted (Mac_PS_006).
-- Closing the window, quitting, a quit from the Dock and a logout first ask "Quit without saving?" in a sheet when the page holds text and no vault keeps it: Cancel, the default button, keeps everything as it was and answers a terminate request with cancel; Quit goes on as before; with a vault open or nothing on the page there is no question (Mac_PS_005, APP_STORE_ISSUE_7, ledger D-48). The app asks the page through one more adapter call, `onUnsavedText`.
+- Closing the window, quitting, a quit from the Dock and a logout first ask "Quit without saving?" in a sheet when the page holds text and no vault keeps it: Cancel, the default button, keeps everything as it was and answers a terminate request with cancel (Return chooses it from round 18 on; before, on macOS 26, NSAlert gave Cancel the Escape key and no button Return, PO-GUI-2); Quit goes on as before; with a vault open or nothing on the page there is no question (Mac_PS_005, APP_STORE_ISSUE_7, ledger D-48). The app asks the page through one more adapter call, `onUnsavedText`.
 - Save without a folder shows the system save panel, starting in Downloads with the page's proposed name, and writes the file where the panel put it (replacing a file only after the panel asked); Cancel says nothing; the Downloads entitlement is gone, so the app has exactly three (APP_STORE_ISSUE_10, ledger D-49). The test build takes `PLAIN_SIGHT_E2E_SAVE_AS` in place of the panel.
 
 The end-to-end and real-key tests for these changes are written and not yet run.

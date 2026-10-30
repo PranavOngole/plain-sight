@@ -62,6 +62,9 @@ const real = (home, dir) => 'REAL ' + path.relative(home, dir);
 // A test copy's identifier, as testcopy.mjs makes one, and its data folders,
 // which the run makes, never the person.
 const TEST_COPY = 'com.pranavongole.plainsight.testcopy-1761000003';
+// The clipboard file an earlier run left in an evidence folder used twice
+// (QA-G-51 (b), round 18).
+const STALE_CLIPBOARD = 'A CLIPBOARD FROM AN EARLIER RUN\n';
 const isTestFolder = (dir) => /^com\.pranavongole\.plainsight\.(testcopy|sbprobe)-/.test(path.basename(dir));
 
 // ---------------------------------------------------------------------------
@@ -91,11 +94,15 @@ if (process.argv[2] === '--child') {
   // hidden-document test for the front app's pid, and pgrep whether the app
   // is open. It answers from `fake`, the case's state; every other program
   // runs as it is (plutil reads a fake bundle's Info.plist).
-  const fake = { locked: false, idle: 600, windows: [], front: 4243, ps: null, logDriver: false, codesign: null, restoreRefused: false };
+  const fake = { locked: false, idle: 600, windows: [], front: 4243, ps: null, logDriver: false, codesign: null, restoreRefused: false, saveRefused: false, quitByTerm: false, realDriver: false };
   const started = Date.now();
   const exec = childProcess.execFileSync;
   childProcess.execFileSync = (file, args = [], options) => {
     if (path.basename(String(file)) === DRIVER) {
+      // QA-G-53 (round 18): the case that gives the driver a big answer has
+      // the driver's file be a script of its own, run as the harness runs
+      // the driver, through the real execFileSync with the harness's options.
+      if (fake.realDriver) return exec(file, args, options);
       const command = String(args[0]);
       // PO-R15-1 (round 16): the case that runs app.mjs logs every command,
       // and answers the clipboard's save and restore and the front app's.
@@ -103,7 +110,12 @@ if (process.argv[2] === '--child') {
       // As the driver does, clip-save writes the clipboard into the file it is
       // given (here a stand-in text), and clip-restore answers ok, or refuses
       // in the case that has it refused (DISH-G-99, round 17).
+      // A save the stand-in refuses writes nothing (QA-G-51 (b), round 18),
+      // and the case with a copy running has its quit-app end the copy with
+      // SIGTERM, as the driver's quit makes a copy quit.
+      if (fake.logDriver && command === 'clip-save' && fake.saveRefused) return JSON.stringify({ ok: false, error: 'the stand-in could not save the clipboard' }) + '\n';
       if (fake.logDriver && command === 'clip-save') { writeFileSync(String(args[1]), 'STAND-IN CLIPBOARD\n'); return JSON.stringify({ ok: true, standIn: true }) + '\n'; }
+      if (fake.quitByTerm && command === 'quit-app') { process.kill(Number(args[1]), 'SIGTERM'); return JSON.stringify({ ok: true, standIn: true }) + '\n'; }
       if (fake.logDriver && command === 'clip-restore') return JSON.stringify(fake.restoreRefused ? { ok: false, error: 'the stand-in does not put the clipboard back' } : { ok: true, standIn: true }) + '\n';
       if (fake.logDriver && command === 'front') return JSON.stringify({ ok: true, standIn: true }) + '\n';
       const answer = command === 'trusted' ? { ok: true, accessibility: true }
@@ -115,9 +127,10 @@ if (process.argv[2] === '--child') {
     }
     // That case opens nothing: open, which would launch a bundle, is refused.
     if (fake.logDriver && file === 'open') throw new Error('the case that runs app.mjs opens nothing');
-    // pgrep -f for a path inside this case's own folder (round 13's copiesOf)
-    // is the real pgrep, which finds only the case's own processes; any other
-    // question, whether the app is open say, has no process here.
+    // pgrep -f for a path inside this case's own folder is the real pgrep,
+    // which finds only the case's own processes (round 13's copiesOf asked it;
+    // since round 18 copiesOf reads ps's list of every process instead); any
+    // other question, whether the app is open say, has no process here.
     if (file === 'pgrep' && args[0] === '-f' && String(args[1] || '').startsWith(box + path.sep)) return exec(file, args, options);
     if (file === 'pgrep') throw Object.assign(new Error('pgrep found no process'), { status: 1, stdout: '' });
     // ps, for a case that gives its answers by pid (fake.ps): the line, or
@@ -650,6 +663,14 @@ if (process.argv[2] === '--child') {
       h.setRestoreCheckForTests(async () => { throw new Error('a stand-in restore check that fails'); });
       await runSuite([{ name: 'a test that passes', fn: async () => {} }]);
     },
+    // QA-G-53 (round 18), QA-01's run-check-throws-null (r15_pid_adv.mjs): a
+    // restore check that throws null, so that reporting its failure throws
+    // too (failureOf reads null's stderr), and only the cleanup's finally can
+    // release the lock. No real code throws null.
+    async 'run-check-throws-null'() {
+      h.setRestoreCheckForTests(() => { throw null; });
+      await runSuite([{ name: 'a test that passes', fn: async () => {} }]);
+    },
     // Round 13 item 4 (the Product Owner's decision on DISH I-21): the end of
     // the suites that open bundles (endCopies), with a copy the run never
     // recorded (a program at the bundle's executable, which ignores SIGTERM)
@@ -725,6 +746,105 @@ if (process.argv[2] === '--child') {
       process.env.PLAIN_SIGHT_ONLY = '^no test has this name$';
       mkdirSync(path.join(home, 'Downloads'), { recursive: true });
       await import(pathToFileURL(path.join(HERE, 'app.mjs')).href);
+    },
+    // QA-G-51 (b) (round 18), QA-01's C4: the save refused by the stand-in
+    // driver, and an older clipboard file in the evidence folder, as when a
+    // folder is used twice.
+    async 'app-suite-clipboard-save-failed'() {
+      fake.logDriver = true;
+      fake.codesign = TEST_COPY;
+      fake.saveRefused = true;
+      writeFileSync(path.join(process.env.PLAIN_SIGHT_EVIDENCE, 'clipboard.plist'), STALE_CLIPBOARD);
+      process.env.PLAIN_SIGHT_ONLY = '^no test has this name$';
+      mkdirSync(path.join(home, 'Downloads'), { recursive: true });
+      await import(pathToFileURL(path.join(HERE, 'app.mjs')).href);
+    },
+    // QA-G-51 (a) (round 18), QA-01's C0: the same run with a copy running
+    // from the bundle under test (a program at its executable, which quits on
+    // SIGTERM), which after() must end before the clipboard goes back.
+    async 'app-suite-clipboard-copy'() {
+      fake.logDriver = true;
+      fake.codesign = TEST_COPY;
+      fake.quitByTerm = true;
+      const exe = path.join(process.env.PLAIN_SIGHT_APP, 'Contents', 'MacOS', 'plain-sight');
+      mkdirSync(path.dirname(exe), { recursive: true });
+      fs.symlinkSync(process.execPath, exe);
+      await pidHolder(exe, 'quits', 'COPY');
+      process.env.PLAIN_SIGHT_ONLY = '^no test has this name$';
+      mkdirSync(path.join(home, 'Downloads'), { recursive: true });
+      await import(pathToFileURL(path.join(HERE, 'app.mjs')).href);
+    },
+    // QA-G-52 (round 18), QA-01's copies-regex (r15_pid_adv.mjs): a copy
+    // running as the executable of a bundle whose path holds characters a
+    // regular expression reads, ( [ + and *.
+    async 'copies-regex'() {
+      const found = {};
+      for (const name of ['Plain Sight (1).app', 'Plain Sight [x].app', 'Plain+Sight.app', 'Plain Sight (unbalanced.app', 'Plain Sight*.app']) {
+        const bundle = path.join(box, 'rx', name);
+        const exe = path.join(bundle, 'Contents', 'MacOS', 'plain-sight');
+        mkdirSync(path.dirname(exe), { recursive: true });
+        fs.symlinkSync(process.execPath, exe);
+        const copy = await pidHolder(exe, 'quits', 'COPY');
+        try { found[name] = h.copiesOf(bundle).includes(copy.pid); } catch (err) { found[name] = 'threw ' + String(err.message).split('\n')[0]; }
+        copy.p.kill('SIGKILL');
+      }
+      console.log('REGEX ' + JSON.stringify(found));
+    },
+    // QA-G-52 (round 18), QA-01's copies-bystanders (r15_pid_adv.mjs): the
+    // copy, with another Plain Sight (another bundle's plain-sight, as the
+    // person's own app is), a helper beside the copy's executable and a
+    // bystander whose arguments hold that executable's path, all running.
+    async 'copies-others'() {
+      const copy = await pidHolder(copyExecutable(), 'quits', 'COPY');
+      const other = await pidHolder(otherCopyExecutable(), 'quits', 'OTHER');
+      const helperExe = copyExecutable() + '-helper';
+      if (!existsSync(helperExe)) fs.symlinkSync(process.execPath, helperExe);
+      const helper = await pidHolder(helperExe, 'quits', 'OTHER');
+      const bystander = await pidHolder(process.execPath, 'quits', 'BYSTANDER', [copyExecutable()]);
+      console.log('OTHERS ' + JSON.stringify({ found: h.copiesOf(copyBundle), copy: copy.pid, other: other.pid, helper: helper.pid, bystander: bystander.pid }));
+      for (const x of [copy, other, helper, bystander]) x.p.kill('SIGKILL');
+    },
+    // QA-G-52 (round 18), QA-01's copies-linked: a copy started through a
+    // linked folder and one started through the real folder, the bundle named
+    // by either spelling.
+    async 'copies-linked'() {
+      const realDir = path.join(box, 'real-folder');
+      const linkDir = path.join(box, 'linked-folder');
+      mkdirSync(realDir, { recursive: true });
+      fs.symlinkSync(realDir, linkDir);
+      const exeOf = (bundle) => path.join(bundle, 'Contents', 'MacOS', 'plain-sight');
+      const realBundle = path.join(realDir, 'Plain Sight test copy.app');
+      const linkBundle = path.join(linkDir, 'Plain Sight test copy.app');
+      mkdirSync(path.dirname(exeOf(realBundle)), { recursive: true });
+      fs.symlinkSync(process.execPath, exeOf(realBundle));
+      const viaLink = await pidHolder(exeOf(linkBundle), 'quits', 'COPY');
+      const viaReal = await pidHolder(exeOf(realBundle), 'quits', 'COPY');
+      console.log('LINKED ' + JSON.stringify({ link: viaLink.pid, real: viaReal.pid, byLink: h.copiesOf(linkBundle), byReal: h.copiesOf(realBundle) }));
+      for (const copy of [viaLink, viaReal]) copy.p.kill('SIGKILL');
+    },
+    // QA-G-53 (round 18), QA-01's endcopies-quit-throws (r15_pid_adv.mjs):
+    // two copies of one bundle, the quit request failing for the first; the
+    // first ignores SIGTERM, the second quits on it.
+    async 'end-copies-two'() {
+      const one = await pidHolder(copyExecutable(), 'stays', 'COPY');
+      const two = await pidHolder(copyExecutable(), 'quits', 'COPY');
+      const asked = [];
+      await h.endCopies([copyBundle], (pid) => { asked.push(pid); if (pid === one.pid) throw new Error('driver: no such app'); process.kill(pid, 'SIGTERM'); });
+      await h.sleep(300);
+      const log = readFileSync(path.join(process.env.PLAIN_SIGHT_EVIDENCE, 'run.log'), 'utf8');
+      console.log('TWO ' + JSON.stringify({ asked, one: one.pid, two: two.pid, oneEnded: [one.p.exitCode, one.p.signalCode], twoEnded: [two.p.exitCode, two.p.signalCode], twoSignals: existsSync(two.file) ? readFileSync(two.file, 'utf8').trim() : '', noted: /quit-app \d+: driver: no such app/.test(log) }));
+    },
+    // QA-G-53 (round 18), QA-01's driveraw-big: a driver answer of 3,000,000
+    // bytes, as a tree read of a panel that lists many files can be, three
+    // times Node's 1 MB default output buffer.
+    async 'driveraw-big'() {
+      const driver = path.join(os.tmpdir(), DRIVER);
+      writeFileSync(driver, '#!/bin/sh\nprintf \'{"ok":true,"big":"\'\nhead -c 3000000 /dev/zero | tr \'\\0\' x\nprintf \'"}\\n\'\n');
+      chmodSync(driver, 0o755);
+      fake.realDriver = true;
+      let read;
+      try { const x = h.driveRaw('tree', 1, 5); read = { ok: x.ok, length: (x.big || '').length }; } catch (err) { read = { ok: false, length: 0, error: String(err.message).slice(0, 120) }; }
+      console.log('BIG ' + JSON.stringify(read));
     },
     // Round 13 item 2: a copy recorded through a linked folder (as /tmp and
     // /var lead to /private), whose process runs from the real folder.
@@ -2100,6 +2220,17 @@ test('the run\'s lock is released in a finally: after a restore check that fails
   const r = await runCase('run-check-fails', undefined, { watchdog: 40000 });
   assert.equal(r.lock, false, 'the lock is released; the child\'s output:\n' + r.out);
 });
+// QA-G-53 (round 18), QA-01's break Q4: with the lock's release moved from the
+// cleanup's finally to its normal path, the case above still released it,
+// since the failure it makes is caught. Here reporting the failure throws as
+// well, so only the finally can release the lock.
+test('the run\'s lock is released by the cleanup\'s finally even when reporting a failed restore check throws (a check that throws null), and the data is back (QA-G-53, QA-01\'s Q4)', async () => {
+  const r = await runCase('run-check-throws-null', undefined, { watchdog: 40000 });
+  assert.equal(r.signal, null, 'the child ended by itself, not by a signal; its output:\n' + r.out);
+  assert.equal(r.lock, false, 'the lock is released; the child\'s output:\n' + r.out);
+  assert.ok(r.intact, 'every data folder holds what was there before the run');
+  assert.deepEqual(r.backups, [], 'no backup folder is left');
+});
 // Round 13 item 4 (the Product Owner's decision of 28 October on DISH I-21):
 // the release and real-key suites' after() ended every pgrep -f match of a
 // bundle's executable, recorded or not, so a bystander whose arguments merely
@@ -2161,6 +2292,73 @@ test('the suites\' end (endCopies) gives a copy time to quit: an unrecorded copy
     endHolders(r);
   }
 });
+// QA-G-53 (round 18), QA-01's break Q18: endCopies asked the first copy
+// only and passed every suite, since each case above has one copy. Two copies
+// of one bundle, the quit failing for the first (QA-01's
+// endcopies-quit-throws).
+test('the suites\' end (endCopies) asks every copy of a bundle to quit: with two, a quit that fails for one is noted, the other is still asked and quits, and the first is ended by the SIGKILL 5 s later (QA-G-53, QA-01\'s Q18)', async () => {
+  const r = await runCase('end-copies-two', undefined, { watchdog: 40000 });
+  try {
+    ended(r, 0);
+    const got = JSON.parse((r.out.match(/^TWO (.*)$/m) || [])[1] || '{}');
+    const byPid = (a, b) => a - b;
+    assert.deepEqual([...(got.asked || [])].sort(byPid), [got.one, got.two].sort(byPid), 'both copies are asked to quit; the child\'s output:\n' + r.out);
+    assert.equal(got.noted, true, 'the quit that failed is noted in run.log');
+    assert.deepEqual(got.twoEnded, [0, null], 'the second ends by its own quit');
+    assert.equal(got.twoSignals, 'SIGTERM', 'after the one quit request');
+    assert.deepEqual(got.oneEnded, [null, 'SIGKILL'], 'the first is ended by the SIGKILL');
+  } finally {
+    endHolders(r);
+  }
+});
+// QA-G-52 (round 18): copiesOf asked pgrep -f with the bundle's executable,
+// which pgrep reads as a regular expression: a running copy whose bundle path
+// held ( [ + or * was not found, and ( alone made pgrep fail; nor was a copy
+// started through a linked folder found by the real folder's spelling. It now
+// reads ps's list of every process and compares each program exactly.
+test('copiesOf finds a running copy whatever its bundle path holds: QA-01\'s five names with ( [ + and * (QA-G-52)', async () => {
+  const r = await runCase('copies-regex', undefined, { watchdog: 60000 });
+  try {
+    ended(r, 0);
+    const got = JSON.parse((r.out.match(/^REGEX (.*)$/m) || [])[1] || '{}');
+    assert.deepEqual(got, { 'Plain Sight (1).app': true, 'Plain Sight [x].app': true, 'Plain+Sight.app': true, 'Plain Sight (unbalanced.app': true, 'Plain Sight*.app': true }, 'each copy is found; the child\'s output:\n' + r.out);
+  } finally {
+    endHolders(r);
+  }
+});
+test('copiesOf takes the bundle\'s own executable alone: another Plain Sight, a helper beside the executable and a bystander whose arguments hold its path are no copies (QA-G-52, QA-01\'s copies-bystanders)', async () => {
+  const r = await runCase('copies-others', undefined, { watchdog: 60000 });
+  try {
+    ended(r, 0);
+    const got = JSON.parse((r.out.match(/^OTHERS (.*)$/m) || [])[1] || '{}');
+    assert.ok(got.copy > 0, 'the copy started; the child\'s output:\n' + r.out);
+    assert.deepEqual(got.found, [got.copy], 'the copy alone is found; the child\'s output:\n' + r.out);
+  } finally {
+    endHolders(r);
+  }
+});
+test('copiesOf finds a copy started through a linked folder, and one started through the real folder, whichever spelling names the bundle (QA-G-52, QA-01\'s copies-linked)', async () => {
+  const r = await runCase('copies-linked', undefined, { watchdog: 60000 });
+  try {
+    ended(r, 0);
+    const got = JSON.parse((r.out.match(/^LINKED (.*)$/m) || [])[1] || '{}');
+    const byPid = (a, b) => a - b;
+    const both = [got.link, got.real].sort(byPid);
+    assert.deepEqual([...(got.byLink || [])].sort(byPid), both, 'named through the link, both copies are found; the child\'s output:\n' + r.out);
+    assert.deepEqual([...(got.byReal || [])].sort(byPid), both, 'named through the real folder, both are found');
+  } finally {
+    endHolders(r);
+  }
+});
+// QA-G-53 (round 18), QA-01's break Q23: driveRaw's 64 MB output buffer
+// taken back to Node's 1 MB default passed every suite, since the stand-in
+// driver here answers in-process. QA-01's driveraw-big: the driver a script
+// that prints 3,000,000 bytes, run through the real execFileSync.
+test('driveRaw takes a driver answer of 3,000,000 bytes, as a tree read of a panel that lists many files can be, more than Node\'s 1 MB default output buffer (QA-G-53, QA-01\'s Q23)', async () => {
+  const r = await runCase('driveraw-big', undefined, { watchdog: 40000 });
+  ended(r, 0);
+  assert.match(r.out, /^BIG \{"ok":true,"length":3000000\}$/m, 'the answer is read whole; the child\'s output:\n' + r.out.slice(0, 2000));
+});
 // PO-R15-1 (round 16): the round 15 pin on the real-key suite's clipboard
 // save read the call's text, which a condition in front of it keeps; the
 // Product Owner's PO3-SAVE-SKIPPED, if (false) in front, passed every suite.
@@ -2196,6 +2394,46 @@ test('when the clipboard cannot be put back, the file that holds the person\'s c
   assert.equal(readFileSync(file, 'utf8'), 'STAND-IN CLIPBOARD\n', 'the file is kept as it was');
   assert.equal(r.lock, false, 'the lock is released');
   clean(r);
+});
+// QA-G-51 (b) (round 18): when the clipboard's save does not answer ok, an
+// older clipboard file in an evidence folder used twice must never be put
+// back over the person's clipboard (QA-01's C4: it was). The run says the
+// save failed, in run.log and its output, and leaves the clipboard and that
+// file alone.
+test('when the clipboard cannot be saved, the run says so in run.log and its output and puts nothing back: no clip-restore, and an older clipboard file in the evidence folder is left as it was (QA-G-51 (b), QA-01\'s C4)', async () => {
+  const r = await runCase('app-suite-clipboard-save-failed', undefined, { app: TEST_COPY, watchdog: 60000 });
+  ended(r, 0);
+  const file = path.join(ROOT, 'app-suite-clipboard-save-failed', 'evidence', 'clipboard.plist');
+  const calls = r.out.split('\n').filter((l) => l.startsWith('DRIVER ')).map((l) => l.slice('DRIVER '.length));
+  assert.deepEqual(calls.filter((c) => /^(frontmost|front |clip-)/.test(c)), ['frontmost', 'clip-save ' + file, 'front 4243'], 'the save is asked for, and nothing is put back; the child\'s output:\n' + r.out);
+  const line = 'the clipboard could not be saved, so this run will not put it back: {"ok":false,"error":"the stand-in could not save the clipboard"}';
+  assert.ok(r.out.split('\n').includes(line), 'the output says so; the child\'s output:\n' + r.out);
+  const log = runLog('app-suite-clipboard-save-failed');
+  assert.ok(log.split('\n').some((l) => l.endsWith(' ' + line)), 'and run.log too');
+  assert.equal(/clipboard put back|clipboard file removed/.test(log), false, 'nothing says it was put back or removed');
+  assert.equal(readFileSync(file, 'utf8'), STALE_CLIPBOARD, 'the older file is left as it was');
+  assert.equal(r.lock, false, 'the lock is released');
+  clean(r);
+});
+// QA-G-51 (a) (round 18), QA-01's C0: the order with a copy up, which
+// QA-01 ran with app.mjs in a fake home of its own: the copy is quit before
+// the clipboard goes back, the front app comes back last, and the file goes.
+test('with a copy running at the end, the real-key suite quits it before it puts the clipboard back, then brings the front app back, and the clipboard file is removed (QA-G-51 (a), QA-01\'s C0)', async () => {
+  const r = await runCase('app-suite-clipboard-copy', undefined, { app: TEST_COPY, watchdog: 60000 });
+  try {
+    ended(r, 0);
+    const copy = holdersOf(r).find((x) => x.kind === 'COPY');
+    assert.ok(copy, 'the copy started; the child\'s output:\n' + r.out);
+    const file = path.join(ROOT, 'app-suite-clipboard-copy', 'evidence', 'clipboard.plist');
+    const calls = r.out.split('\n').filter((l) => l.startsWith('DRIVER ')).map((l) => l.slice('DRIVER '.length));
+    assert.deepEqual(calls.filter((c) => /^(frontmost|front |clip-|quit-app )/.test(c)), ['frontmost', 'clip-save ' + file, 'quit-app ' + copy.pid, 'clip-restore ' + file, 'front 4243'], 'the save, the copy\'s quit, the put-back after it, then the front app; the child\'s output:\n' + r.out);
+    assert.equal(readFileSync(copy.file, 'utf8').trim(), 'SIGTERM', 'the copy ended by its quit');
+    assert.equal(existsSync(file), false, 'the clipboard file is removed once the clipboard is back');
+    assert.equal(r.lock, false, 'the lock is released');
+    clean(r);
+  } finally {
+    endHolders(r);
+  }
 });
 // Round 13 item 2 (Developer N's round 12 observation): pgrep -f, which
 // finds the copies, matches a path anywhere in the arguments, while the rule

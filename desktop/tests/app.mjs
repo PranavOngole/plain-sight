@@ -672,15 +672,28 @@ test('the vault in the release app keeps the text typed just before Cmd+Q, in it
 // The person's clipboard, kept in the evidence folder for the run: the
 // tests write markers and paths to the clipboard (pbcopy), so before() saves
 // it before the first test, and after() puts it back (PO-R14-1, round 15)
-// and removes the file once it is back (DISH-G-99, round 17).
+// and removes the file once it is back (DISH-G-99, round 17). It is put back
+// only when this run's save answered ok (QA-G-51 (b), round 18): an evidence
+// folder used twice can hold an older run's file, and a save that failed
+// leaves that file there, so putting it back would give the person an older
+// clipboard. A failed save is said at once, in run.log and the output, and
+// the clipboard and any such file are then left alone.
 const CLIPBOARD = path.join(EVIDENCE, 'clipboard.plist');
+let clipboardSaved = false;
 
 await run(tests, {
   name: 'app',
   needUnlocked: true,
   before: () => {
     frontBefore = driveRaw('frontmost').pid;
-    note('clipboard saved: ' + JSON.stringify(driveRaw('clip-save', CLIPBOARD)));
+    const saved = driveRaw('clip-save', CLIPBOARD);
+    note('clipboard saved: ' + JSON.stringify(saved));
+    clipboardSaved = saved.ok === true;
+    if (!clipboardSaved) {
+      const unsaved = 'the clipboard could not be saved, so this run will not put it back: ' + JSON.stringify(saved);
+      note(unsaved);
+      console.log(unsaved);
+    }
   },
   after: async () => {
     // Every copy running from a bundle this run opened ends with the run,
@@ -705,16 +718,19 @@ await run(tests, {
     } finally {
       // The file holds the person's whole clipboard: it goes once the
       // clipboard is back; when the driver could not put it back, it is the
-      // person's only copy, so it is kept and the run says where.
-      const back = driveRaw('clip-restore', CLIPBOARD);
-      note('clipboard put back: ' + JSON.stringify(back));
-      if (back.ok) {
-        rmSync(CLIPBOARD, { force: true });
-        note('clipboard file removed');
-      } else {
-        const kept = 'the clipboard could not be put back: the person\'s clipboard is kept in ' + CLIPBOARD;
-        note(kept);
-        console.log(kept);
+      // person's only copy, so it is kept and the run says where. Nothing is
+      // put back unless this run's own save answered ok (QA-G-51 (b)).
+      if (clipboardSaved) {
+        const back = driveRaw('clip-restore', CLIPBOARD);
+        note('clipboard put back: ' + JSON.stringify(back));
+        if (back.ok) {
+          rmSync(CLIPBOARD, { force: true });
+          note('clipboard file removed');
+        } else {
+          const kept = 'the clipboard could not be put back: the person\'s clipboard is kept in ' + CLIPBOARD;
+          note(kept);
+          console.log(kept);
+        }
       }
       if (frontBefore > 0) driveRaw('front', frontBefore);
     }

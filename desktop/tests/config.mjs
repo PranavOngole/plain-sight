@@ -726,21 +726,172 @@ test('the real-key suite saves the person\'s clipboard before its first test and
 // pinned by their text (includes, and indexOf for their order), which a
 // condition put in front of a statement keeps: DISH put if (false) in front of
 // goTo's paste, the three own-folder checks and the clipboard's put-back, and
-// config stayed green. Each guarded statement is now held as a statement of
-// its own: it occurs once in its file, nothing but indentation stands before
-// it on its line, and the line before it (blank and comment lines aside) ends
-// a statement or opens or closes a block. So `if (false) statement`, `false &&
-// statement` and an `if (false)` line above it are each refused, and the case
-// checks that of the pin itself.
-function statementPinned(text, statement) {
+// config stayed green. Each guarded statement is held as a statement of its
+// own: it occurs once in its file, in code (not in a string, a template or a
+// comment), nothing but indentation stands before it on its line, and the
+// line before it (blank and comment lines aside) ends a statement or opens or
+// closes a block, so `if (false) statement`, `false && statement` and an
+// `if (false)` line above it are refused.
+// PO-R17-1 (round 18): that last rule took any line ending in { before the
+// statement, so a block whose condition never holds kept the pin: the
+// Product Owner's PO1-IF-BLOCK-ABOVE, `if (Date.now() < 0) {` above the Save
+// flow's own-folder check and `}` after it, passed config 41/0. The pin now
+// reads every block around the statement, out to the top of its file, and
+// each must run the statement whenever the code around it runs: a try or a
+// finally, a function declared at the top of the file, a test's body, a panel
+// step that inPanel runs, run()'s before() or after() and the object that
+// holds them, or a condition the statement names in GUARDED (the clipboard's
+// put-back and its file's removal sit under theirs). A block opened by if,
+// else, while, for, do, switch, case or catch, by a ternary, a short circuit
+// or optional chaining, a function defined in place, a callback of any other
+// call, or a bare or labelled block: each is refused, at any depth. And no
+// return, throw, break or continue may stand before the statement in a
+// function around it.
+
+// The blocks of a JavaScript source, for pinFault: each { paired with its },
+// with its head, the code that opens it: from the boundary before it (a ; or
+// , of the block around it, outside parentheses and brackets, or that
+// block's own {, or a } that closed a block in it) to the {, its white space
+// made single spaces. A small scanner, not a parser: it skips comments,
+// strings, template literals (whose ${ } parts are code) and regular
+// expression literals, and gives null for a source whose brackets, strings or
+// comments do not pair. head keeps the strings' text, bare blanks it; the
+// source with comments, strings, templates and regular expressions blanked is
+// bare too, and exits holds the offset of every return, throw, break and
+// continue.
+function blocksOf(text) {
+  const code = text.split('');
+  const bare = text.split('');
+  const blank = (from, to, both) => {
+    for (let k = from; k < to; k++) {
+      if (text[k] === '\n') continue;
+      bare[k] = ' ';
+      if (both) code[k] = ' ';
+    }
+  };
+  const blocks = [];
+  const exits = [];
+  const stack = [];
+  let topBoundary = 0;
+  let last = '';
+  let word = '';
+  const owner = () => { for (let k = stack.length - 1; k >= 0; k--) if (stack[k].ch === '{') return stack[k].block; return null; };
+  const level = () => !stack.length || stack[stack.length - 1].ch === '{';
+  const boundary = (at) => { const b = owner(); if (b) b.boundary = at; else topBoundary = at; };
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    const d = text[i + 1];
+    if (c === '/' && d === '/') { let k = text.indexOf('\n', i); if (k < 0) k = text.length; blank(i, k, true); i = k; continue; }
+    if (c === '/' && d === '*') { const k = text.indexOf('*/', i + 2); if (k < 0) return null; blank(i, k + 2, true); i = k + 2; continue; }
+    if (/\s/.test(c)) { i += 1; continue; }
+    if (c === '\'' || c === '"') {
+      let k = i + 1;
+      while (k < text.length && text[k] !== c && text[k] !== '\n') k += text[k] === '\\' ? 2 : 1;
+      if (text[k] !== c) return null;
+      blank(i + 1, k, false);
+      i = k + 1; last = c; word = '';
+      continue;
+    }
+    if (c === '`' || (c === '}' && stack.length && stack[stack.length - 1].ch === '${')) {
+      if (c === '}') stack.pop();
+      let k = i + 1;
+      while (k < text.length && text[k] !== '`' && !(text[k] === '$' && text[k + 1] === '{')) k += text[k] === '\\' ? 2 : 1;
+      if (k >= text.length) return null;
+      blank(i + 1, k, false);
+      if (text[k] === '`') { i = k + 1; last = '`'; word = ''; continue; }
+      stack.push({ ch: '${' });
+      i = k + 2; last = '{'; word = '';
+      continue;
+    }
+    if (c === '/' && (!last || /[(,=:[!&|?{};+\-*%<>~^]/.test(last) || /^(return|typeof|case|do|else|in|of|new|delete|void|throw|instanceof|await|yield)$/.test(word))) {
+      let k = i + 1;
+      let inClass = false;
+      while (k < text.length && text[k] !== '\n' && (inClass || text[k] !== '/')) {
+        if (text[k] === '\\') k += 1;
+        else if (text[k] === '[') inClass = true;
+        else if (text[k] === ']') inClass = false;
+        k += 1;
+      }
+      if (text[k] !== '/') return null;
+      blank(i + 1, k, false);
+      k += 1;
+      while (k < text.length && /[a-z]/i.test(text[k])) k += 1;
+      i = k; last = ')'; word = '';
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      let k = i + 1;
+      while (k < text.length && /[\w$]/.test(text[k])) k += 1;
+      word = text.slice(i, k);
+      if (/^(return|throw|break|continue)$/.test(word) && text[i - 1] !== '.') exits.push(i);
+      last = 'a'; i = k;
+      continue;
+    }
+    if (/[0-9]/.test(c)) { let k = i + 1; while (k < text.length && /[\w.]/.test(text[k])) k += 1; last = '0'; word = ''; i = k; continue; }
+    if (c === '{') {
+      const parent = owner();
+      const block = { open: i, close: -1, from: parent ? parent.boundary : topBoundary, parent, boundary: i + 1 };
+      blocks.push(block);
+      stack.push({ ch: '{', block });
+    } else if (c === '}') {
+      const top = stack.pop();
+      if (!top || top.ch !== '{') return null;
+      top.block.close = i;
+      if (level()) boundary(i + 1);
+    } else if (c === '(' || c === '[') {
+      stack.push({ ch: c });
+    } else if (c === ')' || c === ']') {
+      const top = stack.pop();
+      if (!top || top.ch !== (c === ')' ? '(' : '[')) return null;
+    } else if ((c === ';' || c === ',') && level()) {
+      boundary(i + 1);
+    }
+    last = c; word = '';
+    i += 1;
+  }
+  if (stack.length) return null;
+  const squash = (chars, from, to) => chars.slice(from, to).join('').replace(/\s+/g, ' ').trim();
+  for (const b of blocks) { b.head = squash(code, b.from, b.open); b.bare = squash(bare, b.from, b.open); }
+  return { blocks, exits, bare: bare.join('') };
+}
+// Whether a block runs a guarded statement whenever the code around the block
+// runs, by its head with the strings blanked; conditions are the heads the
+// statement may sit under, as written.
+function blockRuns(block, conditions) {
+  const head = block.bare;
+  if (head === 'try' || head === 'finally' || conditions.includes(block.head)) return true;
+  if (!block.parent) return /^(async )?function [\w$]+\(.*\)$/.test(head) || /^test\((['"]) ?\1, async \(\) =>$/.test(head) || head === 'await run(tests,';
+  if (/^await inPanel\([\w$]+, async \(\) =>$/.test(head)) return true;
+  return /^(before|after): (async )?\(\) =>$/.test(head) && block.parent.bare === 'await run(tests,' && !block.parent.parent;
+}
+const opensFunction = (block) => /=>$/.test(block.bare) || /(^|[\s(])function\b/.test(block.bare);
+// null when the statement is pinned, or why it is not.
+function pinFault(text, statement, conditions = []) {
   const lines = text.split('\n');
   const at = lines.flatMap((line, i) => (line.includes(statement) ? [i] : []));
-  if (at.length !== 1 || !lines[at[0]].trimStart().startsWith(statement)) return false;
+  if (at.length !== 1) return 'it occurs ' + at.length + ' times';
+  if (!lines[at[0]].trimStart().startsWith(statement)) return 'something stands before it on its line';
   for (let i = at[0] - 1; i >= 0; i--) {
     const before = lines[i].replace(/\/\/.*$/, '').trim();
-    if (before) return /[;{}]$/.test(before);
+    if (!before) continue;
+    if (!/[;{}]$/.test(before)) return 'the line before it does not end a statement or a block: ' + before;
+    break;
   }
-  return true;
+  const scan = blocksOf(text);
+  if (!scan) return 'its file\'s brackets, strings or comments do not pair';
+  const offset = lines.slice(0, at[0]).reduce((n, line) => n + line.length + 1, 0) + lines[at[0]].indexOf(statement);
+  if (scan.bare[offset] !== statement[0]) return 'it stands in a string, a template or a comment';
+  const chain = [];
+  for (let b = scan.blocks.filter((x) => x.open < offset && offset < x.close).pop(); b; b = b.parent) chain.push(b);
+  const refused = chain.filter((b) => !blockRuns(b, conditions));
+  if (refused.length) return 'it stands in a block that may not run it: ' + refused.map((b) => JSON.stringify(b.head)).join(', inside ');
+  for (const k of scan.exits) {
+    if (k >= offset) continue;
+    const fn = scan.blocks.filter((b) => b.open < k && k < b.close && opensFunction(b)).pop();
+    if (fn && chain.includes(fn)) return 'a ' + text.slice(k).match(/^\w+/)[0] + ' at line ' + text.slice(0, k).split('\n').length + ' can leave its function before it';
+  }
+  return null;
 }
 const GUARDED = [
   ['app.mjs', "await keys.press('cmd+v');", "goTo's paste (DISH's DD1)"],
@@ -748,34 +899,78 @@ const GUARDED = [
   ['app.mjs', 'await until(() => (goToField() || {}).value === target, ', "goTo's read-back of the path in the sheet's field"],
   ['app.mjs', 'await until(() => goToField() === null && panelFolders().includes(name), ', "goTo's read-back of the folder the panel shows"],
   ['app.mjs', 'mustShowOwnFolder(path.dirname(file), [path.basename(file)]);', "the Open flow's own-folder check (DISH's DD5, DM-263)"],
-  ['app.mjs', 'mustShowOwnFolder(SAVE_AS, []);', "the Save flow's own-folder check (DISH's DD2)"],
+  ['app.mjs', 'mustShowOwnFolder(SAVE_AS, []);', "the Save flow's own-folder check (DISH's DD2; PO-R17-1)"],
   ['app.mjs', 'mustShowOwnFolder(BUILD_TEST, []);', "the folder flow's own-folder check (DISH's DD6)"],
-  ['app.mjs', "note('clipboard saved: ' + JSON.stringify(driveRaw('clip-save', CLIPBOARD)));", "before()'s clipboard save (PO-R15-1)"],
+  ['app.mjs', "const saved = driveRaw('clip-save', CLIPBOARD);", "before()'s clipboard save (PO-R15-1)"],
+  ['app.mjs', 'clipboardSaved = saved.ok === true;', "before()'s note of whether that save answered ok, without which nothing is put back (QA-G-51 (b))"],
   ['app.mjs', "await endCopies(opened, (pid) => driveRaw('quit-app', pid));", "after()'s end of the copies (DISH's DD4)"],
-  ['app.mjs', "const back = driveRaw('clip-restore', CLIPBOARD);", "after()'s clipboard put-back (DISH's DD3, DM-265)"],
-  ['app.mjs', 'rmSync(CLIPBOARD, { force: true });', "the clipboard file's removal once the clipboard is back (DISH-G-99)"],
+  ['app.mjs', "const back = driveRaw('clip-restore', CLIPBOARD);", "after()'s clipboard put-back (DISH's DD3, DM-265), under this run's own save (QA-G-51 (b))", ['if (clipboardSaved)']],
+  ['app.mjs', 'rmSync(CLIPBOARD, { force: true });', "the clipboard file's removal once the clipboard is back (DISH-G-99)", ['if (clipboardSaved)', 'if (back.ok)']],
   ['app.mjs', 'return [...new Set(opened.flatMap((bundle) => copiesOf(bundle)))];', 'instances(): the copies of every bundle the run opened'],
   ['release.mjs', 'return copiesOf(APP);', "instances(): the copies of the release app (DISH's DN5)"],
   ['release.mjs', "await endCopies([APP], (pid) => drive('quit-app', pid));", "after()'s end of the copies"]
 ];
-test('the real-key and release suites\' guards stand as statements of their own, so no condition can skip one, and the pin refuses each with a condition in front of it or an if (false) line above it (DISH-G-101; PO-R15-1, DM-265)', () => {
+// The forms the pin refuses around each guarded statement: lines put above it
+// and after it, and the words its refusal must name.
+const WRAPS = [
+  [['if (false) {'], ['}'], '"if (false)"'],
+  [['if (true) {', '} else {'], ['}'], '"else"'],
+  [['while (false) {'], ['}'], '"while (false)"'],
+  [['for (const never of []) {'], ['}'], '"for (const never of [])"'],
+  [['do {'], ['} while (false);'], '"do"'],
+  [['switch (0) {', 'case 1: {'], ['}', '}'], '"case 1:"'],
+  [['try {} catch {'], ['}'], '"catch"'],
+  [['false ? (() => {'], ['})() : 0;'], '"false ? (() =>"'],
+  [['false && (() => {'], ['})();'], '"false && (() =>"'],
+  [['(() => {'], ['});'], '"(() =>"'],
+  [['const never = () => {'], ['};'], '"const never = () =>"'],
+  [['function never() {'], ['}'], '"function never()"'],
+  [['[].forEach(() => {'], ['});'], '"[].forEach(() =>"'],
+  [['skip: {'], ['}'], '"skip:"'],
+  [['if (Date.now() >= 0) return;'], [], 'a return at line'],
+  [["throw new Error('never');"], [], 'a throw at line']
+];
+test('the real-key and release suites\' guards stand as statements of their own, in blocks that run them whenever the code around them runs, so no condition can skip one; the pin refuses a condition in front of each, above it, or in any block around it, and an early way out of its function (DISH-G-101; PO-R15-1, DM-265, PO-R17-1)', () => {
   const tests = path.join(DESKTOP, 'tests');
-  for (const [file, statement, what] of GUARDED) {
+  for (const [file, statement, what, conditions = []] of GUARDED) {
     const text = read(tests, file);
-    assert.ok(statementPinned(text, statement), file + ', ' + what + ': ' + JSON.stringify(statement) + ' stands on a line of its own, once, after a line that ends a statement or a block');
+    const fault = pinFault(text, statement, conditions);
+    assert.equal(fault, null, file + ', ' + what + ': ' + JSON.stringify(statement) + ' is not pinned: ' + fault);
     const lines = text.split('\n');
     const i = lines.findIndex((line) => line.includes(statement));
+    const indent = lines[i].match(/^\s*/)[0];
+    const refuses = (changed, why, form) => {
+      const got = pinFault(changed.join('\n'), statement, conditions);
+      assert.ok(got !== null && got.includes(why), file + ': the pin refuses ' + form + ' for ' + JSON.stringify(statement) + ', naming ' + why + '; it said: ' + got);
+    };
     for (const lead of ['if (false) ', 'false && ', 'false || ', 'false ? 0 : ']) {
       const changed = [...lines];
       changed[i] = changed[i].replace(statement, lead + statement);
-      assert.equal(statementPinned(changed.join('\n'), statement), false, 'the pin refuses ' + JSON.stringify(lead + statement));
+      refuses(changed, 'something stands before it', JSON.stringify(lead + statement));
     }
     const above = [...lines];
-    above.splice(i, 0, lines[i].match(/^\s*/)[0] + 'if (false)');
-    assert.equal(statementPinned(above.join('\n'), statement), false, 'and an if (false) line above ' + JSON.stringify(statement));
+    above.splice(i, 0, indent + 'if (false)');
+    refuses(above, 'the line before it', 'an if (false) line above it');
     const twice = [...lines];
     twice.splice(i, 0, lines[i]);
-    assert.equal(statementPinned(twice.join('\n'), statement), false, 'and ' + JSON.stringify(statement) + ' twice over');
+    refuses(twice, 'it occurs 2 times', 'the statement twice over');
+    for (const [open, close, why] of WRAPS) {
+      const changed = [...lines];
+      changed.splice(i + 1, 0, ...close.map((line) => indent + line));
+      changed.splice(i, 0, ...open.map((line) => indent + line));
+      refuses(changed, why, JSON.stringify([...open, '...', ...close].join(' ')));
+    }
+    // The outermost block around the statement, wrapped whole.
+    const scan = blocksOf(text);
+    const offset = lines.slice(0, i).reduce((n, line) => n + line.length + 1, 0) + lines[i].indexOf(statement);
+    let outer = scan.blocks.filter((b) => b.open < offset && offset < b.close).pop();
+    while (outer.parent) outer = outer.parent;
+    const first = text.slice(0, outer.from + scan.bare.slice(outer.from).search(/\S/)).split('\n').length - 1;
+    const last = text.slice(0, outer.close).split('\n').length - 1;
+    const wrapped = [...lines];
+    wrapped.splice(last + 1, 0, '}');
+    wrapped.splice(first, 0, 'if (false) {');
+    refuses(wrapped, '"if (false)"', 'if (false) { } around ' + JSON.stringify(lines[first].trim().slice(0, 60)));
   }
 });
 
@@ -930,6 +1125,139 @@ test('e2e.mjs\'s window evidence lets a person\'s touch stop the run: its read h
   assert.ok(start >= 0, 'e2e.mjs has windowEvidence()');
   const body = e2e.slice(start, e2e.indexOf('\n}\n', start));
   assert.ok(body.includes("    } catch (err) {\n      if (err instanceof UserActivity) throw err;\n      parts.push(label + ' could not be read: ' + err.message);\n    }\n"), 'the read helper rethrows a touch before it notes a part as not read');
+});
+
+// QA-G-53 (round 18): the panel helpers of the real-key suite (inPanel, goTo,
+// panelNodes, goToField, panelFolders, panelSummary, mustShowOwnFolder,
+// pressPanelButton) run only with a launched app, so the tests above pin
+// their text; QA-01's breaks A10, A11, A13 and A14 changed what they do and
+// kept that text, and passed every suite. These cases are QA-01's
+// (r15_panel_adv.mjs in wave-g/qa/scripts/app, round 15: its stand-in panel
+// and its four cases, taken over as they are but for this file's names): the
+// helpers' real code is cut out of app.mjs and run with stand-ins for the
+// driver, the keys, pbcopy and until. The panel is a small state machine,
+// and its own log of keys and button presses is the oracle. Nothing is
+// launched and no file is read or written.
+const PANEL_CODE = (() => {
+  const src = read(path.join(DESKTOP, 'tests'), 'app.mjs');
+  const a = src.indexOf('const openPanelShown = ');
+  const b = src.indexOf('// Open: the page\'s Open button, the system open panel');
+  return a >= 0 && b > a ? src.slice(a, b) : null;
+})();
+const PANEL_NAMES = ['openPanelShown', 'inPanel', 'goTo', 'panelNodes', 'goToField', 'panelFolders', 'panelSummary', 'mustShowOwnFolder', 'pressPanelButton'];
+const PANEL_FILE = '/nowhere/folders/Opened from the panel/made-outside-the-app.sight';
+const PANEL_DIR = path.dirname(PANEL_FILE);
+const J = (x) => JSON.stringify(x);
+function panelWorld(sc) {
+  const w = { keys: [], notes: [], presses: [], clip: '', sheet: false, field: '', menu: sc.startMenu ?? 'Documents', panelOpen: true, pbcopy: 0, returnReachedPanel: 0, returnOnSheetWithPath: 0 };
+  const files = sc.files || ['made-outside-the-app.sight', 'other.txt'];
+  const fileList = { role: 'AXOutline', children: files.map((f) => ({ role: 'AXRow', children: [{ role: 'AXCell', title: f, value: f }, ...(sc.listButtons ? [{ role: 'AXButton', title: f }, { role: 'AXTextField', description: 'Name', value: f }] : [])] })) };
+  const tree = () => {
+    if (!w.panelOpen) return { windows: [{ role: 'AXWindow', title: 'Plain Sight', subrole: 'AXStandardWindow', children: [{ role: 'AXGroup', title: 'page', children: [{ role: 'AXTextField', description: 'Enter a Path', value: 'PAGE FIELD' }] }] }] };
+    const kids = [{ role: 'AXPopUpButton', value: w.menu }, fileList, { role: 'AXButton', title: 'Cancel' }, ...(sc.buttons || ['Open']).map((t) => ({ role: 'AXButton', title: t })), { role: 'AXTextField', description: 'Name', title: 'Save As', value: 'proposed-name' }];
+    const sheet = w.sheet ? [{ role: 'AXSheet', title: 'Go to Folder', children: [{ role: 'AXTextField', description: 'Enter a Path', value: w.field }, { role: 'AXList', children: [{ role: 'AXRow', title: 'completion' }] }] }] : [];
+    if (sc.asSheet) return { windows: [{ role: 'AXWindow', title: 'Plain Sight', subrole: 'AXStandardWindow', children: [{ role: 'AXSheet', title: 'Save', children: [...kids, ...sheet] }] }] };
+    return { windows: [{ role: 'AXWindow', title: 'Open', subrole: 'AXDialog', children: [...kids, ...sheet] }] };
+  };
+  w.driveRaw = (cmd, pid, ...args) => {
+    if (cmd === 'tree') return tree();
+    if (cmd === 'windows') return { windows: w.panelOpen ? [{ title: 'Open', subrole: 'AXDialog' }] : [] };
+    if (cmd === 'panel-button') {
+      const title = args[0]; w.presses.push(title + (w.sheet ? '(sheet up)' : ''));
+      if (!w.panelOpen) return { ok: false, error: 'no button ' + title };
+      if (title === 'Cancel') { if (w.sheet && !sc.cancelThroughSheet) return { ok: false }; w.panelOpen = false; return { ok: true }; }
+      if (!(sc.buttons || ['Open']).includes(title)) return { ok: false };
+      return { ok: true };
+    }
+    return { ok: true };
+  };
+  w.keysObj = { press: async (k) => {
+    w.keys.push(k + (w.sheet ? ':sheet[' + w.field + ']' : ':panel'));
+    if (k === 'cmd+shift+g') { if (sc.sheetAppears !== false) { w.sheet = true; w.field = sc.fieldStart ?? ''; } }
+    else if (k === 'cmd+v') { if (w.sheet && sc.pasteWorks !== false) w.field = sc.paste ? sc.paste(w.clip) : w.clip; }
+    else if (k === 'return') {
+      if (w.sheet) { if (w.field === w.clip) w.returnOnSheetWithPath++; w.sheet = false; w.menu = sc.menuAfter ? sc.menuAfter(path.basename(w.target || '')) : path.basename(w.target || ''); }
+      else w.returnReachedPanel++;   // the panel's default button
+    } else if (k === 'escape') { if (w.sheet) w.sheet = false; else w.panelOpen = false; }
+  } };
+  w.execFileSync = (cmd, args, opts) => { if (cmd === 'pbcopy') { w.clip = String(opts.input); w.pbcopy++; return Buffer.from(''); } throw new Error('stub execFileSync: ' + cmd); };
+  w.until = async (fn, what, ms = 5000) => { const cap = Math.min(ms, 400); const t0 = Date.now(); let last; while (Date.now() - t0 < cap) { try { const v = await fn(); if (v) return v; } catch (e) { last = e; } await new Promise((r) => setTimeout(r, 15)); } throw new Error('timed out after ' + ms + ' ms waiting for ' + what + (last ? ': ' + last.message : '')); };
+  w.note = (line) => w.notes.push(line);
+  w.sleep = () => new Promise((r) => setTimeout(r, 5));
+  return w;
+}
+function panelHelpers(w) {
+  assert.ok(PANEL_CODE, 'the panel helpers are cut out of app.mjs (from const openPanelShown to the Open flow\'s comment)');
+  const ctx = { app: { pid: 4242 }, keys: w.keysObj, driveRaw: w.driveRaw, drive: (...x) => { const r = w.driveRaw(...x); if (!r.ok && r.ok !== undefined) throw new Error('driver: ' + J(r)); return r; }, note: w.note, until: w.until, sleep: w.sleep, execFileSync: w.execFileSync, path, readdirSync: () => w.listing ?? [], EVIDENCE: '/nowhere' };
+  const f = new Function(...Object.keys(ctx), PANEL_CODE + '\nreturn { ' + PANEL_NAMES.join(', ') + ' };');
+  return f(...Object.values(ctx));
+}
+test('pressPanelButton presses the first title the panel has and stops, with no second press (QA-G-53, QA-01\'s A10)', async () => {
+  const w = panelWorld({ buttons: ['Open'] });
+  const h = panelHelpers(w);
+  await h.pressPanelButton('Open', 'Choose');
+  assert.equal(J(w.presses), J(['Open']), 'pressPanelButton presses the first title the panel has and stops (no second press)');
+});
+test('inPanel closes the panel even when a Go to Folder sheet was left up: Esc closes the sheet, then Cancel, and the step\'s own error is thrown (QA-G-53, QA-01\'s A11)', async () => {
+  const w = panelWorld({});
+  w.sheet = true;   // a sheet left up holds off Cancel
+  const h = panelHelpers(w);
+  let err = null;
+  try { await h.inPanel(h.openPanelShown, async () => { throw new Error('step'); }); } catch (e) { err = e; }
+  assert.ok(!w.panelOpen && err && err.message === 'step', 'inPanel closes the panel even when a Go to Folder sheet was left up (Esc closes the sheet, then Cancel): ' + J({ keys: w.keys, presses: w.presses }));
+});
+test('panelSummary leaves out the file names even when the list\'s rows hold titled buttons and text fields (QA-G-53, QA-01\'s A13)', () => {
+  const w = panelWorld({ files: ['SECRET-person-file-1.docx', 'passwords.txt'], listButtons: true });
+  w.sheet = true;
+  w.field = '/Users/p/x';
+  const h = panelHelpers(w);
+  const sum = J(h.panelSummary());
+  assert.equal(/SECRET|passwords/.test(sum), false, 'panelSummary leaves out the file names even when the list\'s rows hold titled buttons and text fields: ' + sum.slice(0, 200));
+});
+test('goTo and mustShowOwnFolder work when the panel is a sheet on the document window, as the save and folder panels are (QA-G-53, QA-01\'s A14)', async () => {
+  const w = panelWorld({ asSheet: true });
+  w.target = PANEL_DIR;
+  const h = panelHelpers(w);
+  let err = null;
+  try { await h.goTo(PANEL_DIR, PANEL_DIR); } catch (e) { err = e; }
+  assert.ok(!err && w.returnOnSheetWithPath === 1 && w.returnReachedPanel === 0, 'goTo works when the panel is a sheet on the document window (the save and folder panels): the sheet\'s field is found, Return only while it holds the path: ' + (err ? err.message.slice(0, 120) : J(w.keys)));
+  const v = panelWorld({ asSheet: true, startMenu: 'Opened from the panel' });
+  v.listing = [];
+  let refused = null;
+  try { panelHelpers(v).mustShowOwnFolder(PANEL_DIR, []); } catch (e) { refused = e; }
+  assert.equal(refused, null, 'mustShowOwnFolder reads the location menu of a sheet-hosted panel');
+});
+
+// PO-GUI-1 (round 18): e2e.mjs held the app's intro to "no tab" with
+// /\btab\b/i, meant for a browser's tabs, and failed on round 16's app words
+// for Super Stealth, "Option+Shift+Tab to the button" (e2e-run-9, 41 of 42).
+// e2e.mjs and native.mjs now hold it to one rule, written the same in both:
+// the word tab or tabs in any case, once each key chord that ends in Tab is
+// taken out. Only a launched test build runs e2e.mjs, so the two are compared
+// here.
+test('e2e.mjs and native.mjs hold the app\'s intro to the same tab rule, which allows a key chord that ends in Tab (PO-GUI-1)', () => {
+  const tests = path.join(DESKTOP, 'tests');
+  const rule = (file) => read(tests, file).split('\n').filter((line) => line.startsWith('const namesATab = '));
+  assert.equal(rule('native.mjs').length, 1, 'native.mjs has the rule once');
+  assert.deepEqual(rule('e2e.mjs'), rule('native.mjs'), 'e2e.mjs has the same rule');
+  assert.ok(read(tests, 'e2e.mjs').includes("  assert.equal(namesATab(intro), false, 'no tab in the intro, a key chord that ends in Tab aside');\n"), 'and asserts it of the intro');
+  assert.equal(/\\btab\\b/.test(read(tests, 'e2e.mjs')), false, 'the old pattern is gone');
+});
+
+// PO-GUI-2 (round 18, the Delivery Manager's follow-up of 29 October, 23:22):
+// on macOS 26.5.2 NSAlert gave the sheet's Cancel, added first, the Escape key
+// and no button Return, so Return did nothing to the sheet, against D-48.
+// sheet.rs now builds the alert with Cancel holding Return and Quit no key,
+// and tests/quit_sheet.rs reads those keys from the alert it builds; quit.rs
+// must show that alert and build none of its own.
+test('the "Quit without saving?" sheet is the alert sheet.rs builds, whose keys cargo reads on the main thread: quit.rs builds no alert of its own (PO-GUI-2, D-48)', () => {
+  const quit = read(TAURI, 'src', 'quit.rs');
+  assert.equal([...quit.matchAll(/crate::sheet::quit_alert\(mtm\)/g)].length, 1, 'quit.rs shows the alert sheet.rs builds');
+  assert.equal(/NSAlert::new|addButtonWithTitle|setKeyEquivalent/.test(quit), false, 'and builds none of its own');
+  const sheet = read(TAURI, 'src', 'sheet.rs');
+  assert.ok(sheet.includes('    cancel.setKeyEquivalent(&NSString::from_str("\\r"));\n    quit.setKeyEquivalent(&NSString::from_str(""));\n'), 'sheet.rs gives Cancel Return and Quit no key');
+  assert.match(read(TAURI, 'tests', 'quit_sheet.rs'), /^#\[path = "\.\.\/src\/sheet\.rs"\]\nmod sheet;$/m, 'the cargo test reads the alert sheet.rs builds');
+  assert.match(cargo, /^\[\[test\]\]\nname = "quit_sheet"\nharness = false$/m, 'on its own main thread');
 });
 
 test('the web deployment allowlist is unchanged (DR-10)', () => {

@@ -240,11 +240,11 @@ export async function firstWindow(pid, want, what, ms) {
 //   the end;
 // - a copy opened through LaunchServices is no child of the run, so its pid
 //   counts as that copy only while the process with that pid runs the copy's
-//   executable, <bundle>/Contents/MacOS/plain-sight, the path the suites'
-//   pgrep -f finds their copies by. It is read with ps (programOf), which is
-//   part of macOS: no new dependency and nothing to build (the driver would
-//   need a new command and a rebuild), and it reads the same argument list
-//   pgrep -f matches. The program ps names and the copy's executable are
+//   executable, <bundle>/Contents/MacOS/plain-sight, the program by which
+//   copiesOf finds the suites' copies. It is read with ps (programOf), which
+//   is part of macOS: no new dependency and nothing to build (the driver
+//   would need a new command and a rebuild). The program ps names and the
+//   copy's executable are
 //   compared exactly, each with its folders resolved (realPathOf), so a copy
 //   recorded through a linked folder (/tmp and /var lead to /private on
 //   macOS) still counts as itself, and another Plain Sight, another bundle's
@@ -316,29 +316,33 @@ export function alive(pid) {
 }
 
 // The copies of a bundle running now, recorded or not (DISH I-14): the
-// processes pgrep -f finds by the bundle's executable, kept only when ps
-// names that executable as their own program, compared as for a recorded
-// copy, so a process whose arguments merely hold the path (an editor or a
-// log reader, say) is never taken for a copy (round 13, the Product Owner's
-// decision of 28 October on DISH I-21). For app.mjs and release.mjs, whose
-// copies LaunchServices starts.
+// processes whose program, as ps names it, is the bundle's executable,
+// compared as for a recorded copy (realPathOf on both sides), so a process
+// whose arguments merely hold the path (an editor or a log reader, say) is
+// never taken for a copy (round 13, the Product Owner's decision of 28
+// October on DISH I-21). One listing of every process, read line by line and
+// compared exactly, never as a pattern (QA-G-52, round 18): pgrep -f read
+// the path as a regular expression, so a copy whose bundle path held ( [ +
+// or * was not found, and one with ( alone made pgrep fail, and a copy
+// started through a linked folder was not found by the real folder's
+// spelling. As in programOf, a process ending (the flag E) or ended (the
+// state Z) is no copy, and a listing that fails finds none. For app.mjs and
+// release.mjs, whose copies LaunchServices starts.
 export function copiesOf(bundle) {
-  const exe = path.join(bundle, 'Contents', 'MacOS', 'plain-sight');
-  const own = realPathOf(path.resolve(exe));
-  let found = [];
+  const own = realPathOf(path.resolve(bundle, 'Contents', 'MacOS', 'plain-sight'));
+  let out;
   try {
-    found = execFileSync('pgrep', ['-f', exe], { encoding: 'utf8' }).trim().split('\n').map(Number).filter((p) => Number.isInteger(p) && p > 0);
+    out = execFileSync('ps', ['-axww', '-o', 'pid=', '-o', 'stat=', '-o', 'comm='], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   } catch {
     return [];
   }
-  return found.filter((pid) => {
-    try {
-      const program = programOf(pid);
-      return program !== null && realPathOf(program) === own;
-    } catch {
-      return false;
-    }
-  });
+  const found = [];
+  for (const line of out.split('\n')) {
+    const [, pid, stat, program] = line.match(/^\s*(\d+)\s+(\S+)\s+(.*)$/) || [];
+    if (!pid || /[EZ]/.test(stat) || path.basename(program) !== path.basename(own)) continue;
+    if (realPathOf(program) === own) found.push(Number(pid));
+  }
+  return found;
 }
 // The end of a suite whose copies LaunchServices starts (app.mjs,
 // release.mjs): every copy running from its bundles is asked to quit
