@@ -14,8 +14,9 @@
 // page's own buttons. The app runs in the macOS App
 // Sandbox with four entitlements (Entitlements.plist), so the chosen folder is
 // remembered as a security-scoped bookmark (bookmark.rs); one of the four is
-// the network client, which the system web view needs to draw the page in
-// the sandbox. The app itself has no network code.
+// the network client: in the probe of 26 October the sandboxed page gave no
+// answer in 31 seconds without it and answered in 2.5 seconds with it. The
+// app itself has no network code.
 
 // No console window behind the app on Windows release builds (Windows comes later).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
