@@ -44,6 +44,9 @@ const STANDIN_PIDS = 'standin-pids.txt';
 // The late writer of the restore check's cases (round 10), written by the
 // parent into its temporary folder.
 const LATE = 'PLAIN_SIGHT_HARNESS_TEST_LATE';
+// DM-269 (round 21): the file in the box where the child records the pid of
+// each late writer it starts, so that the parent can end one by its pid.
+const LATE_PIDS = 'late-pids.txt';
 // The restore check's second look in a case that does not test the check:
 // 100 ms instead of 3 s, set through the harness's test-only setter.
 const RECHECK = 'PLAIN_SIGHT_HARNESS_TEST_RECHECK_MS';
@@ -71,6 +74,10 @@ const isTestFolder = (dir) => /^com\.pranavongole\.plainsight\.(testcopy|sbprobe
 // where the guard writes each signal it refused.
 const OUTSIDE = 'PLAIN_SIGHT_HARNESS_TEST_OUTSIDE';
 const REFUSALS = 'signal-refusals.txt';
+// DM-269 (round 21): what the hostile-prints case aims its lines at, in
+// JSON: the pids of the parent's own two stand-ins (one outside this run's
+// folder, one inside it but in no case's folder) and their folders.
+const TARGETS = 'PLAIN_SIGHT_HARNESS_TEST_TARGETS';
 
 // PO-R18-1 (round 19): a child of this suite never signals a process outside
 // its own case's folder, whatever the code it runs asks for. In round 18 a
@@ -175,6 +182,19 @@ if (process.argv[2] === '--child') {
   // PO-R18-1 (round 19): first, before the stand-ins and before any file
   // under test is imported (installSignalGuard says why and what it covers).
   const signalGuard = installSignalGuard(box);
+  // DM-269 (round 21): every process a case starts runs a program inside the
+  // case's folder, so that the parent, which ends a process a case printed
+  // only when ps shows it running a program there, can end what a case left
+  // running: node through a link in the box (the pid holders, the late
+  // writer, and the stand-in app through STANDIN_NODE), and sleep the same
+  // way.
+  const programHere = (name, target) => {
+    const file = path.join(box, 'programs', name);
+    if (!existsSync(file)) { mkdirSync(path.dirname(file), { recursive: true }); fs.symlinkSync(target, file); }
+    return file;
+  };
+  const nodeHere = programHere('node', process.execPath);
+  process.env.STANDIN_NODE = nodeHere;
   writeFileSync(path.join(os.tmpdir(), DRIVER), '');
   // A hook around every move and every removal of a data folder, bound
   // before the harness loads its own imports of renameSync and rmSync.
@@ -723,7 +743,7 @@ if (process.argv[2] === '--child') {
     async 'pid-reused-child'() {
       const gone = h.spawnApp('/usr/bin/true');
       if (gone.exitCode === null && gone.signalCode === null) await new Promise((resolve) => gone.once('exit', resolve));
-      const holder = await pidHolder(process.execPath);
+      const holder = await pidHolder(nodeHere);
       await stopCurrentFor({ child: gone, pid: holder.pid });
       h.recordLaunch(holder.pid, '/usr/bin/true', gone);   // the launch's record, its pid now the holder's
       await waitsFor(holder.pid);
@@ -733,7 +753,7 @@ if (process.argv[2] === '--child') {
     // release.mjs record each copy (by its bundle): the pid holder runs node,
     // not the copy's executable.
     async 'pid-reused-copy'() {
-      const holder = await pidHolder(process.execPath);
+      const holder = await pidHolder(nodeHere);
       h.recordLaunch(holder.pid, copyBundle);
       await stopCurrentFor({ pid: holder.pid });
       await waitsFor(holder.pid);
@@ -778,7 +798,7 @@ if (process.argv[2] === '--child') {
     // copy is ended by the SIGKILL 5 s later.
     async 'end-copies'() {
       const copy = await pidHolder(copyExecutable(), 'stays', 'COPY');
-      const bystander = await pidHolder(process.execPath, 'stays', 'BYSTANDER', [copyExecutable()]);
+      const bystander = await pidHolder(nodeHere, 'stays', 'BYSTANDER', [copyExecutable()]);
       console.log('COPIES ' + JSON.stringify(h.copiesOf(copyBundle)) + ' of ' + JSON.stringify([copy.pid, bystander.pid]));
       const asked = [];
       const t0 = Date.now();
@@ -795,7 +815,7 @@ if (process.argv[2] === '--child') {
     // "ps: fork: Resource temporarily unavailable", as ps does when the Mac
     // can start no process.
     async 'end-copies-ps-broken'() {
-      const bystander = await pidHolder(process.execPath, 'stays', 'BYSTANDER', [copyExecutable()]);
+      const bystander = await pidHolder(nodeHere, 'stays', 'BYSTANDER', [copyExecutable()]);
       const bin = path.join(box, 'bin');
       mkdirSync(bin, { recursive: true });
       writeFileSync(path.join(bin, 'ps'), '#!/bin/sh\necho "ps: fork: Resource temporarily unavailable" >&2\nexit 2\n');
@@ -896,16 +916,18 @@ if (process.argv[2] === '--child') {
     // one as "<defunct>" and an ending one by its short name in parentheses,
     // so the exact comparison alone already leaves it out. First a real copy
     // that has ended and is not reaped (a link to node at the copy's
-    // executable, started by a shell that then becomes sleep, which never
-    // reaps it). Then a stand-in listing that gives the copy's program on a
+    // executable, started by a shell that then becomes sleep, through a link
+    // to it in the box, and never reaps it). Then a stand-in listing that gives the copy's program on a
     // running line, an ending line and an ended line, under pids no process
     // can hold: only the running one is a copy, and the end of the suites'
     // copies asks it alone (its quit takes it off the list) and signals
     // nothing.
     async 'copies-ending'() {
       const exe = copyExecutable();
-      const shell = spawn('/bin/sh', ['-c', '"$0" -e "process.exit(0)" & exec /bin/sleep 5', exe], { stdio: 'ignore' });
+      const sleepHere = programHere('sleep', '/bin/sleep');
+      const shell = spawn('/bin/sh', ['-c', '"$0" -e "process.exit(0)" & exec "$1" 5', exe, sleepHere], { stdio: 'ignore' });
       const zombieOf = () => {
+        if (h.programOf(shell.pid) !== sleepHere) return null;
         const rows = childProcess.execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,stat=,comm='], { encoding: 'utf8' }).split('\n').map((l) => l.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/)).filter(Boolean);
         const row = rows.find((m) => Number(m[2]) === shell.pid && /^Z/.test(m[3]));
         return row ? { pid: Number(row[1]), stat: row[3], program: row[4] } : null;
@@ -926,6 +948,28 @@ if (process.argv[2] === '--child') {
       await h.endCopies([copyBundle], (pid) => { asked.push(pid); left = left.filter((row) => row[0] !== pid); fake.psList = listing(left); });
       console.log('ASKED ' + JSON.stringify(asked) + ' SIGNALS ' + (signalGuard.tried() - tried));
       fake.psList = null;
+    },
+    // DM-269 (round 21): the hostile prints, each aimed at the parent's own
+    // stand-ins alone (TARGETS): the Delivery Manager's recorder lines
+    // (ap.mjs: "HOLDER 4242 /", "BYSTANDER 4242 .", and an OUTSIDE line that
+    // names the program ps shows) with the far stand-in's pid in place of
+    // 4242, a file outside the run's folder, a file in the case's folder
+    // with the pid of a process outside it, the pid of a process in the run's
+    // folder but in no case's folder, a SECOND line, and both pids in the
+    // case's stand-in and late-writer pid files. The case signals nothing.
+    'hostile-prints'() {
+      const { outsider, neighbour, far, near } = JSON.parse(process.env[TARGETS]);
+      for (const line of [
+        'HOLDER ' + outsider + ' /',
+        'BYSTANDER ' + outsider + ' .',
+        'COPY ' + outsider + ' ' + path.join(far, 'holder-1-signals'),
+        'OTHER ' + outsider + ' ' + path.join(box, 'holder-2-signals'),
+        'HOLDER ' + neighbour + ' ' + path.join(box, 'holder-3-signals'),
+        'OUTSIDE ' + outsider + ' ' + path.join(far, 'stand-in'),
+        'SECOND ' + neighbour + ' stand-in ' + path.join(near, 'stand-in')
+      ]) console.log(line);
+      writeFileSync(path.join(box, STANDIN_PIDS), outsider + '\n' + neighbour + '\n');
+      writeFileSync(path.join(box, LATE_PIDS), outsider + '\n');
     },
     // PO-R18-1 (round 19): the signal guard's own proof. A stand-in outside
     // the case's folder: a link to /bin/sleep named plain-sight in a second
@@ -1008,7 +1052,7 @@ if (process.argv[2] === '--child') {
       const helperExe = copyExecutable() + '-helper';
       if (!existsSync(helperExe)) fs.symlinkSync(process.execPath, helperExe);
       const helper = await pidHolder(helperExe, 'quits', 'OTHER');
-      const bystander = await pidHolder(process.execPath, 'quits', 'BYSTANDER', [copyExecutable()]);
+      const bystander = await pidHolder(nodeHere, 'quits', 'BYSTANDER', [copyExecutable()]);
       console.log('OTHERS ' + JSON.stringify({ found: h.copiesOf(copyBundle), copy: copy.pid, other: other.pid, helper: helper.pid, bystander: bystander.pid }));
       for (const x of [copy, other, helper, bystander]) x.p.kill('SIGKILL');
     },
@@ -1129,7 +1173,7 @@ if (process.argv[2] === '--child') {
     async 'run-copy-pid-reused'() {
       await runSuite([{ name: 'a test that records a copy whose pid another program holds', fn: async () => {
         testData(dirs[0]);
-        const holder = await pidHolder(process.execPath);
+        const holder = await pidHolder(nodeHere);
         h.recordLaunch(holder.pid, copyBundle);
         console.log('ALIVE ' + h.alive(holder.pid));   // the rule's note, made well before the run ends
       } }]);
@@ -1299,13 +1343,16 @@ if (process.argv[2] === '--child') {
   // temporary folder, so no test build is ever started.
   // DM-249's launched half (round 10): a file of the person's, written into a
   // data folder before the run; and a late writer (the parent's LATE script),
-  // started by a test and never recorded as an app, which waits until the
+  // started by a test and never recorded as an app (its pid goes into
+  // late-pids.txt for the parent's end, DM-269), which waits until the
   // marker of the target's data folder (the folder the target is in, or the
   // one named) holds the person's own words again, that is until the
   // restore, then acts on the target 1 s later.
   const personFile = (dir, rel, text, mode = 0o644) => { const file = path.join(dir, rel); mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, text); chmodSync(file, mode); };
   const lateWriter = (target, action, folder = path.dirname(target)) => {
-    spawn(process.execPath, [process.env[LATE], marker(folder), real(home, folder), target, action], { stdio: 'ignore', detached: true }).unref();
+    const writer = spawn(nodeHere, [process.env[LATE], marker(folder), real(home, folder), target, action], { stdio: 'ignore', detached: true });
+    fs.appendFileSync(path.join(box, LATE_PIDS), writer.pid + '\n');
+    writer.unref();
   };
   // Round 12, the reused pid: a pid holder (the parent's script) started
   // under the program given, ready once it can take signals; it prints its
@@ -1341,7 +1388,7 @@ if (process.argv[2] === '--child') {
     await waitsFor(holder.pid);
     await holderAfter(holder);
   };
-  const pidHolder = async (program, mode = 'stays', label = program === process.execPath ? 'HOLDER' : 'COPY', extra = []) => {
+  const pidHolder = async (program, mode = 'stays', label = program === nodeHere ? 'HOLDER' : 'COPY', extra = []) => {
     holders += 1;
     const file = path.join(box, 'holder-' + holders + '-signals');
     const p = spawn(program, [process.env[HOLDER_ENV], file, mode, ...extra], { stdio: 'ignore' });
@@ -1459,7 +1506,9 @@ const ROOT = mkdtempSync(path.join(os.tmpdir(), 'plain-sight-harness-safety-'));
 // nothing to its output, so a closed pipe cannot end it, and it ends by
 // itself after 20 s. With STANDIN_MODE ignore it ignores SIGTERM, and with
 // frozen it stops itself (SIGSTOP) on it, so only a SIGKILL ends it (QA-01's
-// r9_standin.mjs modes, QA-G-44).
+// r9_standin.mjs modes, QA-G-44). It runs node through the link in the
+// case's own folder that the child names in STANDIN_NODE, so that ps shows
+// it there and the parent may end it (DM-269).
 const STANDIN_APP = path.join(ROOT, 'standin-app.mjs');
 const STANDIN_EXE = path.join(ROOT, 'standin-app');
 writeFileSync(STANDIN_APP, [
@@ -1476,7 +1525,7 @@ writeFileSync(STANDIN_APP, [
   "setTimeout(() => process.exit(0), 20000);"
 ].join('\n') + '\n');
 const shellQuoted = (p) => "'" + p.replace(/'/g, "'\\''") + "'";
-writeFileSync(STANDIN_EXE, '#!/bin/sh\nexec ' + shellQuoted(process.execPath) + ' ' + shellQuoted(STANDIN_APP) + '\n');
+writeFileSync(STANDIN_EXE, '#!/bin/sh\nexec "${STANDIN_NODE:?}" ' + shellQuoted(STANDIN_APP) + '\n');
 chmodSync(STANDIN_EXE, 0o755);
 
 // The late writer of the restore check's cases (round 10): waits until a
@@ -1540,25 +1589,70 @@ function fakeCopy(box, identifier) {
   return app;
 }
 
+// DM-269 (round 21): the parent's rule for ending what a case started.
+// Until round 20 the parent ended a case's processes by what its child
+// printed, unguarded: pkill -9 -f with a printed file (a child that printed
+// "HOLDER 4242 /" made it run pkill -9 -f /, which ends every process whose
+// command line holds a slash), and SIGKILL to a printed pid once ps showed
+// the printed program there (the Delivery Manager's recorder, ap.mjs). Now
+// the parent runs no pkill or killall at all and ends a process only by its
+// pid: a child it started itself and holds, or a pid a case printed or
+// wrote into a file in its box, and that one only when ps shows it running
+// a program whose resolved path lies (a) under this run's temporary folder
+// and (b) under one of that case's own folders (its box, or the second
+// folder the proof case gets). Anything else is refused, printed as PARENT
+// REFUSED, and fails the run. Every place the parent signals:
+// - endHolders: the pid holders a case printed (its HOLDER, COPY, OTHER and
+//   BYSTANDER lines), through endCasePid;
+// - endOutsideStandIns: the proof case's stand-ins (its OUTSIDE and SECOND
+//   lines), through endCasePid, in the case's second folder alone;
+// - standinsAfter: the stand-in apps a case recorded in standin-pids.txt,
+//   through endCasePid;
+// - endLeftovers, for every case at the end of the run: all three, and the
+//   late writers in late-pids.txt, through endCasePid (in place of the
+//   pkill -9 -f of the stand-in's, the late writer's and the pid holder's
+//   scripts);
+// - runCase's watchdog, the signal tests and secondRun: child.kill and
+//   c.kill on the child the parent itself started, through Node, which
+//   sends nothing to a child it has seen end;
+// - isAlive: signal 0, which sends nothing and only asks whether a pid is in
+//   use;
+// - the hostile-prints test: standIn.kill on the two stand-ins it started
+//   itself.
+const parentRefusals = [];
+const parentSent = [];
+const ranCases = [];
+let sayParent = (line) => console.log(line);
+const refuseParent = (what) => { parentRefusals.push(what); sayParent('PARENT REFUSED ' + what); };
+const realOrAsGiven = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+const liesIn = (file, dir) => path.join(realOrAsGiven(path.dirname(file)), path.basename(file)).startsWith(realOrAsGiven(dir) + path.sep);
+function endCasePid(pid, folders, what) {
+  if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) { refuseParent(what + ': ' + pid + ' is no pid a case can have started'); return; }
+  const ps = childProcess.spawnSync('/bin/ps', ['-ww', '-o', 'stat=', '-o', 'comm=', '-p', String(pid)], { encoding: 'utf8' });
+  const [, stat, program] = String(ps.stdout || '').replace(/\n+$/, '').match(/^\s*(\S+)\s+(.*)$/s) || [];
+  if (!stat || /[EZ]/.test(stat)) return;   // gone, ending or ended: nothing to end
+  if (liesIn(program, ROOT) && folders.some((dir) => liesIn(program, dir))) {
+    parentSent.push(pid);
+    try { process.kill(pid, 'SIGKILL'); } catch { /* it has ended */ }
+    return;
+  }
+  refuseParent(what + ': pid ' + pid + ' runs ' + program + ', not a program in ' + folders.join(' or ') + ' inside this run\'s folder ' + ROOT);
+}
+
 // Every case ends within its watchdog (120 s, or what it names): one that
 // hangs is ended with SIGKILL and fails, so a regression fails instead of
 // holding the suite (QA-G-44).
-// PO-R18-1 (round 19): the proof case's stand-in, if its case left it
-// running: ended by its pid once ps shows that pid runs the stand-in's
-// program, and never another.
-function endOutsideStandIn(out) {
-  const m = out.match(/^OUTSIDE (\d+) (.+)$/m);
-  if (!m) return;
-  let program = '';
-  try { program = childProcess.execFileSync('/bin/ps', ['-ww', '-o', 'comm=', '-p', m[1]], { encoding: 'utf8' }).trim(); } catch { return; }
-  if (program === m[2]) { try { process.kill(Number(m[1]), 'SIGKILL'); } catch { /* it has ended */ } }
-}
-
 // A signal the case's guard refused fails the case: the promise is rejected
 // with the refusals, unless the case is the guard's own proof (refusals).
-// outside makes the proof case's second temporary folder, outside ROOT, and
-// removes it after the case (PO-R18-1, round 19).
-function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100, watchdog = 120000, outside = false, refusals = false } = {}) {
+// outside gives the case a second folder (PO-R18-1, round 19): true makes
+// one beside the case's own folder, inside this run's folder (so that the
+// parent may end what runs there, DM-269), named as the case's with
+// -outside after it (so that a folder check without its separator would
+// take it for the case's own, DM-268); a path names the folder itself (the
+// hostile-prints test's, outside this run's folder). targets is the
+// hostile-prints case's TARGETS. Each case's result is kept for
+// endLeftovers at the end of the run.
+function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100, watchdog = 120000, outside = false, refusals = false, targets = null } = {}) {
   const box = path.join(ROOT, tag);
   const home = path.join(box, 'home');
   const tmp = path.join(box, 'tmp');
@@ -1566,11 +1660,13 @@ function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100,
   for (const d of [home, tmp, evidence]) mkdirSync(d, { recursive: true });
   const env = { ...process.env, HOME: home, TMPDIR: tmp, PLAIN_SIGHT_EVIDENCE: evidence, [BOX]: box, [STANDIN]: STANDIN_EXE, [LATE]: LATE_WRITER, [HOLDER_ENV]: HOLDER };
   // Nothing of the shell that runs npm test reaches the harness's settings.
-  for (const name of ['PLAIN_SIGHT_E2E_DOWNLOADS', 'PLAIN_SIGHT_APP', 'PLAIN_SIGHT_IDLE_MIN', 'PLAIN_SIGHT_ONLY', 'PLAIN_SIGHT_ALLOW_REAL_ID', 'PLAIN_SIGHT_SAFETY_ONLY', OUTSIDE]) delete env[name];
+  for (const name of ['PLAIN_SIGHT_E2E_DOWNLOADS', 'PLAIN_SIGHT_APP', 'PLAIN_SIGHT_IDLE_MIN', 'PLAIN_SIGHT_ONLY', 'PLAIN_SIGHT_ALLOW_REAL_ID', 'PLAIN_SIGHT_SAFETY_ONLY', OUTSIDE, TARGETS, 'STANDIN_NODE']) delete env[name];
   if (app) env.PLAIN_SIGHT_APP = fakeCopy(box, app);
   if (recheck !== null) env[RECHECK] = String(recheck);
-  const outsideDir = outside ? mkdtempSync(path.join(os.tmpdir(), 'plain-sight-outside-')) : null;
+  const outsideDir = typeof outside === 'string' ? outside : outside ? box + '-outside' : null;
+  if (outside === true) mkdirSync(outsideDir, { recursive: true });
   if (outsideDir) env[OUTSIDE] = outsideDir;
+  if (targets) env[TARGETS] = JSON.stringify(targets);
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--child', id], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   const timer = setTimeout(() => { out += '\nWATCHDOG: the case ran for ' + watchdog + ' ms and was ended with SIGKILL\n'; child.kill('SIGKILL'); }, watchdog);
@@ -1583,22 +1679,20 @@ function runCase(id, onOutput = () => {}, { app = null, tag = id, recheck = 100,
     const dirs = line ? JSON.parse(line.slice(5)).map((rel) => path.join(home, rel)) : [];
     const refusalFile = path.join(box, REFUSALS);
     const refused = existsSync(refusalFile) ? readFileSync(refusalFile, 'utf8').split('\n').filter(Boolean) : [];
-    if (outsideDir) {
-      endOutsideStandIn(out);
-      rmSync(outsideDir, { recursive: true, force: true });
-    }
-    if (refused.length && !refusals) {
-      reject(new Error('the case tried to signal a process outside its own folder, and the guard refused: ' + refused.join('; ') + '\nthe child\'s output:\n' + out));
-      return;
-    }
-    resolve({
-      code, signal, out, dirs, home, refused,
+    const result = {
+      code, signal, out, dirs, home, box, outsideDir, refused,
       intact: dirs.length > 0 && dirs.every((d) => existsSync(marker(d)) && readFileSync(marker(d), 'utf8') === real(home, d)),
       backups: existsSync(BACKUP_ROOT(home)) ? readdirSync(BACKUP_ROOT(home)) : [],
       tmpFiles: readdirSync(tmp),
       lock: existsSync(LOCK(home)),
       containers: existsSync(CONTAINERS(home)) ? readdirSync(CONTAINERS(home)) : []
-    });
+    };
+    ranCases.push(result);
+    if (refused.length && !refusals) {
+      reject(new Error('the case tried to signal a process outside its own folder, and the guard refused: ' + refused.join('; ') + '\nthe child\'s output:\n' + out));
+      return;
+    }
+    resolve(result);
   }));
 }
 
@@ -1864,17 +1958,17 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 // What became of the stand-ins a case started: the pids they recorded, those
 // still running just after the run ended, and the files one wrote into the
-// restored web data folder after it; then each is ended, so none outlives
-// the case.
+// restored web data folder after it; then each is ended through endCasePid
+// (DM-269), so none outlives the case.
 async function standinsAfter(r) {
   await pause(400);   // a stand-in started at the very end records its pid once node is up
-  const file = path.join(path.dirname(r.home), STANDIN_PIDS);
-  const pids = existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').map(Number).filter((p) => p > 0) : [];
-  const running = pids.filter(isAlive);
+  const file = path.join(r.box, STANDIN_PIDS);
+  const pids = existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean).map(Number) : [];
+  const running = pids.filter((pid) => pid > 1 && isAlive(pid));
   await pause(1800);   // a stand-in writes 1.5 s after it starts
   const web = path.join(r.home, 'Library', 'WebKit', 'plain-sight');
   const wrote = existsSync(web) ? readdirSync(web).filter((name) => name.startsWith('written-by-')) : [];
-  for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch { /* it has ended */ } }
+  for (const pid of pids) endCasePid(pid, [r.box], 'the stand-in app\'s pid ' + pid + ' in ' + file);
   return { pids, running, wrote };
 }
 const refusedFor = (signal) => new RegExp('was not launched: the run is ending \\(' + (signal ? signal + ' came' : 'its cleanup has begun') + '\\), so nothing may start again \\(DM-249\\)');
@@ -2342,9 +2436,33 @@ test('an app the run launched and nothing stopped is named by its pid after the 
 // LaunchServices was judged by its pid alone as well, so a pid another
 // program had taken read as a copy still running, a false exit 6 (QA-01's
 // observation 9). The pid holder stands for the program macOS gave the pid
-// to; each case ends it by the file it records signals in.
+// to; each case ends it by its pid, through endCasePid (DM-269, round 21;
+// until round 20 by the file it records signals in, with pkill -9 -f).
 const holdersOf = (r) => [...r.out.matchAll(/^(HOLDER|COPY|OTHER|BYSTANDER) (\d+) (\S+)$/gm)].map((m) => ({ kind: m[1], pid: Number(m[2]), file: m[3] }));
-const endHolders = (r) => { for (const { file } of holdersOf(r)) { try { childProcess.execFileSync('pkill', ['-9', '-f', file]); } catch { /* it has ended */ } } };
+const endHolders = (r) => { for (const { kind, pid, file } of holdersOf(r)) endCasePid(pid, [r.box], 'the line "' + kind + ' ' + pid + ' ' + file + '"'); };
+// DM-269 (round 21): the proof case's stand-ins (its OUTSIDE and SECOND
+// lines), which the case ends itself: one still running once the case has
+// ended is ended by its pid, through endCasePid, in the case's second folder
+// alone; a case without that folder has none, and such a line from it is
+// refused.
+const endOutsideStandIns = (r) => {
+  for (const m of r.out.matchAll(/^(?:OUTSIDE (\d+) .+|SECOND (\d+) \S+ .+)$/gm)) {
+    const pid = Number(m[1] || m[2]);
+    if (r.outsideDir) endCasePid(pid, [r.outsideDir], 'the line "' + m[0] + '"');
+    else refuseParent('the line "' + m[0] + '": the case has no second folder');
+  }
+};
+// DM-269: what a case may have left running, at the end of the run: its pid
+// holders, its proof stand-ins, and the pids in its stand-in and late-writer
+// pid files, each through endCasePid.
+const endLeftovers = (r) => {
+  endHolders(r);
+  endOutsideStandIns(r);
+  for (const name of [STANDIN_PIDS, LATE_PIDS]) {
+    const file = path.join(r.box, name);
+    for (const pid of existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : []) endCasePid(Number(pid), [r.box], 'the pid ' + pid + ' in ' + file);
+  }
+};
 const stopCurrentLine = (r) => (r.out.match(/^STOP CURRENT (.*) after (\d+) ms; current\(\) asked (\d+) time\(s\)$/m) || []).slice(1);
 const otherProgramNote = (pid) => ' pid ' + pid + ' now runs another program: not stopped';
 const neitherWaitedOnNorSignalled = (r, tag, holder) => {
@@ -2567,7 +2685,7 @@ test('a child of the safety suite signals nothing outside its own folder: the en
   const r = await runCase('signal-guard', undefined, { outside: true, refusals: true, watchdog: 60000 });
   ended(r, 0);
   const [, pid, exe] = r.out.match(/^OUTSIDE (\d+) (.+)$/m) || [];
-  assert.ok(pid && exe && exe.endsWith(path.join('Plain Sight.app', 'Contents', 'MacOS', 'plain-sight')) && !exe.startsWith(ROOT + path.sep), 'the stand-in runs outside every case\'s folder; the child\'s output:\n' + r.out);
+  assert.ok(pid && exe && exe.endsWith(path.join('Plain Sight.app', 'Contents', 'MacOS', 'plain-sight')) && exe.startsWith(r.box + '-outside' + path.sep), 'the stand-in runs outside the case\'s folder, in the folder beside it whose name starts with the case\'s; the child\'s output:\n' + r.out);
   assert.match(r.out, /^PART B REFUSALS 0$/m, 'the end of the case\'s own copies, none running, signals nothing, whatever runs outside; the child\'s output:\n' + r.out);
   assert.match(r.out, /^PART A REFUSALS 2 in \d+ ms$/m, 'the end of the outside bundle\'s copies: its quit and the SIGKILL 5 s later, both refused');
   assert.match(r.out, /^PART C REFUSALS 1$/m, 'a signal straight to the stand-in, refused');
@@ -2589,6 +2707,75 @@ test('a child of the safety suite signals nothing outside its own folder: the en
 });
 test('a signal the guard refuses fails the case that sent it, unless the case expects it (PO-R18-1)', async () => {
   await assert.rejects(runCase('signal-guard', undefined, { outside: true, tag: 'signal-guard-unexpected', watchdog: 60000 }), /^Error: the case tried to signal a process outside its own folder, and the guard refused: signal 15 to pid \d+ /);
+});
+// DM-269 (round 21): the parent's rule (endCasePid), fed hostile prints by
+// the case hostile-prints. The parent starts two stand-ins of its own, links
+// to /bin/sleep named stand-in: one in a folder outside this run's folder,
+// given to the case as its second folder, so that only the rule's first
+// half (this run's folder) refuses the OUTSIDE line; and one inside this
+// run's folder but in no case's folder, so that only the second half (the
+// case's own folders) refuses it. Every line and pid file of the case names
+// one of the two and nothing else, so a broken rule can reach only these.
+// Every way the parent ends a case's processes is run on the case
+// (endLeftovers, which takes in endHolders and endOutsideStandIns, and
+// standinsAfter): nothing is sent, each line and pid is refused and printed,
+// both stand-ins still run, and the parent then ends them itself. The
+// refusals it expects do not fail the run.
+test('the parent ends a pid a case printed only when ps shows it running a program inside that case\'s own folder in this run\'s folder: "HOLDER <pid> /", "BYSTANDER <pid> .", a file outside the run\'s folder, a file in the case\'s folder with the pid of a process outside it, the pid of a process in the run\'s folder but not the case\'s, OUTSIDE and SECOND lines and the pid files are each refused and printed, and nothing is sent (DM-269)', async () => {
+  const far = mkdtempSync(path.join(os.tmpdir(), 'hs-far-'));
+  const near = path.join(ROOT, 'in-no-case');
+  mkdirSync(near, { recursive: true });
+  const own = [];
+  const refusedBefore = parentRefusals.length;
+  const sentBefore = parentSent.length;
+  const printed = [];
+  const say = sayParent;
+  const programOf = (pid) => String(childProcess.spawnSync('/bin/ps', ['-ww', '-o', 'comm=', '-p', String(pid)], { encoding: 'utf8' }).stdout || '').trim();
+  try {
+    for (const dir of [far, near]) {
+      fs.symlinkSync('/bin/sleep', path.join(dir, 'stand-in'));
+      own.push(spawn(path.join(dir, 'stand-in'), ['60'], { stdio: 'ignore' }));
+    }
+    const [outsider, neighbour] = own;
+    for (const [standIn, dir] of [[outsider, far], [neighbour, near]]) {
+      for (let i = 0; i < 100 && programOf(standIn.pid) !== path.join(dir, 'stand-in'); i += 1) await pause(50);
+      assert.equal(programOf(standIn.pid), path.join(dir, 'stand-in'), 'the parent\'s own stand-in runs in ' + dir);
+    }
+    sayParent = (line) => printed.push(line);
+    const r = await runCase('hostile-prints', undefined, { outside: far, targets: { outsider: outsider.pid, neighbour: neighbour.pid, far, near } });
+    ended(r, 0);
+    endLeftovers(r);
+    await standinsAfter(r);
+    sayParent = say;
+    await pause(300);
+    const got = parentRefusals.slice(refusedBefore);
+    const pids = path.join(r.box, STANDIN_PIDS);
+    assert.deepEqual(got.map((x) => x.slice(0, x.indexOf(': pid '))), [
+      'the line "HOLDER ' + outsider.pid + ' /"',
+      'the line "BYSTANDER ' + outsider.pid + ' ."',
+      'the line "COPY ' + outsider.pid + ' ' + path.join(far, 'holder-1-signals') + '"',
+      'the line "OTHER ' + outsider.pid + ' ' + path.join(r.box, 'holder-2-signals') + '"',
+      'the line "HOLDER ' + neighbour.pid + ' ' + path.join(r.box, 'holder-3-signals') + '"',
+      'the line "OUTSIDE ' + outsider.pid + ' ' + path.join(far, 'stand-in') + '"',
+      'the line "SECOND ' + neighbour.pid + ' stand-in ' + path.join(near, 'stand-in') + '"',
+      'the pid ' + outsider.pid + ' in ' + pids,
+      'the pid ' + neighbour.pid + ' in ' + pids,
+      'the pid ' + outsider.pid + ' in ' + path.join(r.box, LATE_PIDS),
+      'the stand-in app\'s pid ' + outsider.pid + ' in ' + pids,
+      'the stand-in app\'s pid ' + neighbour.pid + ' in ' + pids
+    ], 'each line and each pid refused, in order; the refusals:\n' + got.join('\n'));
+    assert.ok(got.every((x) => x.includes(': pid ' + outsider.pid + ' runs ' + path.join(far, 'stand-in') + ', ') || x.includes(': pid ' + neighbour.pid + ' runs ' + path.join(near, 'stand-in') + ', ')), 'each refusal names the pid and the program ps shows; the refusals:\n' + got.join('\n'));
+    assert.deepEqual(printed, got.map((x) => 'PARENT REFUSED ' + x), 'and each is printed');
+    assert.equal(parentSent.length, sentBefore, 'nothing was sent');
+    assert.deepEqual(own.map((standIn) => [standIn.exitCode, standIn.signalCode]), [[null, null], [null, null]], 'both stand-ins still run');
+  } finally {
+    sayParent = say;
+    const at = ranCases.findIndex((c) => c.box === path.join(ROOT, 'hostile-prints'));
+    if (at >= 0) ranCases.splice(at, 1);
+    parentRefusals.splice(refusedBefore);
+    for (const standIn of own) standIn.kill('SIGKILL');
+    rmSync(far, { recursive: true, force: true });
+  }
 });
 // QA-G-52 (round 18): copiesOf asked pgrep -f with the bundle's executable,
 // which pgrep reads as a regular expression: a running copy whose bundle path
@@ -3041,11 +3228,11 @@ try {
     }
   }
 } finally {
-  // Any stand-in still running, found by its own script's path in this run's
-  // temporary folder, which nothing else runs (DM-249).
-  try { childProcess.execFileSync('pkill', ['-9', '-f', STANDIN_APP]); } catch { /* none left */ }
-  try { childProcess.execFileSync('pkill', ['-9', '-f', LATE_WRITER]); } catch { /* none left */ }
-  try { childProcess.execFileSync('pkill', ['-9', '-f', HOLDER]); } catch { /* none left */ }
+  // Any process a case left running (a stand-in app, a late writer, a pid
+  // holder or the proof case's stand-ins), ended by its pid under the
+  // parent's rule (endLeftovers, DM-269); until round 20 this was a
+  // pkill -9 -f of each script's path.
+  for (const r of ranCases) endLeftovers(r);
   rmSync(ROOT, { recursive: true, force: true });
 }
 if (existsSync(ROOT)) {
@@ -3055,6 +3242,14 @@ if (existsSync(ROOT)) {
   passed += 1;
   console.log('ok   - the temporary folder with every fake home in it is removed at the end');
 }
-console.log(`\n${passed} passed, ${failed} failed, ${chosen.length + 1} total. Errors: ${failed}`);
+// DM-269 (round 21): a pid the parent refused to end fails the run.
+if (parentRefusals.length) {
+  failed += 1;
+  console.log('FAIL - the parent ended only what the cases started inside their own folders: it refused ' + parentRefusals.length + ': ' + parentRefusals.join('; '));
+} else {
+  passed += 1;
+  console.log('ok   - the parent ended only what the cases started inside their own folders, and refused nothing');
+}
+console.log(`\n${passed} passed, ${failed} failed, ${chosen.length + 2} total. Errors: ${failed}`);
 if (ONLY) console.log(partOnly);
 process.exit(failed ? 1 : 0);

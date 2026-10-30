@@ -50,6 +50,12 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Round 21
+
+Wave G, round 21, 30 October 2026, Developer N (appstore-candidate).
+
+- The safety suite's parent no longer ends a case's processes by what a child printed (DM-269, process safety). Until now it ran `pkill -9 -f` with whatever file a child printed after HOLDER, COPY, OTHER or BYSTANDER (a child that printed "HOLDER 4242 /" would have made it run `pkill -9 -f /`, which ends every process whose command line holds a slash), sent SIGKILL to a printed OUTSIDE pid once ps showed the printed program there, sent SIGKILL to every pid in a case's stand-in pid file, and ended the run with `pkill -9 -f` of three scripts' paths. Now it runs no pkill or killall at all. It ends a child it started itself through Node, and any other process only by its pid, through one function (endCasePid), and only when ps shows that pid running a program whose resolved path lies under the run's temporary folder and under one of that case's own folders. Anything else is refused, printed as "PARENT REFUSED" and fails the run. Every other place the parent signals is named in the suite and goes through the same function: the pid holders, the proof case's stand-ins, the stand-in apps a case recorded, the late writers (whose pids a case now records), and the end of the run for every case. So that this rule can end what a case leaves running, every process a case starts now runs a program inside the case's folder: node and sleep through links in the box (the pid holders, the late writer, the stand-in app, the shell that becomes sleep), and the proof case's second folder lies beside the case's, inside the run's folder. A new test feeds the parent the Delivery Manager's hostile lines ("HOLDER <pid> /", "BYSTANDER <pid> .", an OUTSIDE line that names the program ps shows), a file outside the run's folder, a file in the case's folder with the pid of a process outside it, the pid of a process inside the run's folder but in no case's, and the pid files. They are aimed only at two stand-ins the parent starts itself, links to /bin/sleep, one outside the run's folder and one inside it. Every one is refused and printed, nothing is sent, and both still run. Config pins where the rule stands.
+
 ## Round 20
 
 Wave G, round 20, 30 October 2026, Developer N (appstore-candidate).

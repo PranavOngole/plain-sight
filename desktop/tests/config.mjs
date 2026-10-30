@@ -1161,6 +1161,40 @@ test('every child of the safety suite installs the signal guard first, before it
   assert.ok(guard.includes("  const SIGNALLING = /(^|[\\s;&|(`])(kill|pkill|killall|osascript)(\\s|$)/;\n"), 'and in a shell\'s command');
 });
 
+// DM-269 (round 21): the safety suite's parent ends what a case started only
+// by its pid, through endCasePid, once ps shows its program inside this
+// run's folder and inside the case's own (until round 20 it ran pkill -9 -f
+// with whatever file a child printed, and SIGKILL on a printed pid). It
+// names no kill, pkill, killall or osascript as a program, calls
+// process.kill only in endCasePid and in isAlive (signal 0, which sends
+// nothing), and a child process's kill only on a child it started itself;
+// every way it ends a case's processes goes through endCasePid. The
+// hostile-prints test proves the rule; this pins where it stands.
+test('the safety suite\'s parent runs no kill, pkill, killall or osascript, calls process.kill only in endCasePid after its two folder checks and in isAlive with signal 0, kills a child process only when it started that child itself, and ends a case\'s processes only through endCasePid (DM-269)', () => {
+  const text = read(path.join(DESKTOP, 'tests'), 'harness-safety.mjs');
+  const at = text.indexOf('\n// The parent: a box per case');
+  assert.ok(at > 0, 'the parent\'s part of the suite is found');
+  const code = text.slice(at).split('\n').filter((line) => !/^\s*\/\//.test(line)).join('\n');
+  assert.equal(/\b(execFileSync|execFile|execSync|exec|spawnSync|spawn|fork)\(\s*['"`](\/usr\/bin\/|\/bin\/)?(kill|pkill|killall|osascript)\b/.test(code), false, 'the parent runs none of kill, pkill, killall and osascript');
+  assert.deepEqual([...code.matchAll(/process\.kill\([^)]*\)/g)].map((m) => m[0]), ['process.kill(process.pid, \'SIGSTOP\')', 'process.kill(pid, \'SIGKILL\')', 'process.kill(pid, 0)'], 'process.kill only in the stand-in app\'s own script (to itself), in endCasePid and in isAlive');
+  // A function's text, from its first line to the first line that closes
+  // it at the start of a line.
+  const fn = (start, close) => { const from = code.indexOf(start); return from < 0 ? '' : code.slice(from, code.indexOf(close, from) + close.length); };
+  assert.ok(fn('function endCasePid(pid, folders, what) {', '\n}\n').includes('  if (liesIn(program, ROOT) && folders.some((dir) => liesIn(program, dir))) {\n    parentSent.push(pid);\n    try { process.kill(pid, \'SIGKILL\'); } catch { /* it has ended */ }\n'), 'endCasePid sends SIGKILL only after both checks: this run\'s folder and one of the case\'s own');
+  assert.ok(code.includes('const liesIn = (file, dir) => path.join(realOrAsGiven(path.dirname(file)), path.basename(file)).startsWith(realOrAsGiven(dir) + path.sep);\n'), 'a program lies in a folder only below it, separator included');
+  assert.ok(code.includes('const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };\n'), 'isAlive sends signal 0 only');
+  assert.deepEqual([...new Set([...code.matchAll(/\b(\w+)\.kill\(/g)].map((m) => m[1]).filter((name) => name !== 'process'))].sort(), ['c', 'child', 'standIn'], 'a child process\'s kill only on the parent\'s own children (child, c) and the hostile test\'s own stand-ins (standIn)');
+  assert.ok(code.includes('const endHolders = (r) => { for (const { kind, pid, file } of holdersOf(r)) endCasePid(pid, [r.box], \'the line "\' + kind + \' \' + pid + \' \' + file + \'"\'); };\n'), 'endHolders ends each printed pid through endCasePid, in the case\'s box');
+  const outsideEnd = fn('const endOutsideStandIns = (r) => {', '\n};\n');
+  assert.ok(outsideEnd.includes('    if (r.outsideDir) endCasePid(pid, [r.outsideDir], ') && !/\.kill\(/.test(outsideEnd), 'endOutsideStandIns, through endCasePid, in the case\'s second folder');
+  const after = fn('async function standinsAfter(r) {', '\n}\n');
+  assert.ok(after.includes('  for (const pid of pids) endCasePid(pid, [r.box], ') && !/\.kill\(/.test(after), 'standinsAfter, through endCasePid, in the case\'s box');
+  const leftovers = fn('const endLeftovers = (r) => {', '\n};\n');
+  assert.ok(leftovers.includes('  endHolders(r);\n  endOutsideStandIns(r);\n') && leftovers.includes('endCasePid(Number(pid), [r.box], ') && !/\.kill\(/.test(leftovers), 'endLeftovers, through the three above and endCasePid');
+  assert.ok(code.includes('  for (const r of ranCases) endLeftovers(r);\n  rmSync(ROOT, { recursive: true, force: true });\n'), 'the end of the run ends what the cases left through endLeftovers, before the run\'s folder is removed');
+  assert.ok(code.includes('if (parentRefusals.length) {\n  failed += 1;\n'), 'and a refusal fails the run');
+});
+
 // QA-G-53 (round 18): the panel helpers of the real-key suite (inPanel, goTo,
 // panelNodes, goToField, panelFolders, panelSummary, mustShowOwnFolder,
 // pressPanelButton) run only with a launched app, so the tests above pin
