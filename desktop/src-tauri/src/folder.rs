@@ -1722,6 +1722,9 @@ mod tests {
                 ("x2026-11-01 10-00-03.txt", b""),
                 ("2026-11-01 10-00-3.txt", b""),
                 ("2026-11-01 10-00-03 (99999999999999999999).txt", b""),
+                ("my holiday notes ok.txt", b""),
+                ("my holiday notes ok (2).md", b""),
+                ("2026-11-01 10-00-0x.txt", b""),
             ],
         );
         fs::create_dir(chosen.join("2026-11-01 11-00-00.txt")).unwrap();
@@ -1793,6 +1796,8 @@ mod tests {
             "2026-11-01 10-00-02 (1).txt",
             "2026-11-01 10-00-02.TXT",
             "2026-11-01 10-00-02.sight",
+            "my holiday notes ok.txt",
+            "2026-11-01 10-00-0x.txt",
         ] {
             assert_eq!(
                 folder.read(bad).unwrap_err(),
