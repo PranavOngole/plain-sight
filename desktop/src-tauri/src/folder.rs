@@ -4,7 +4,9 @@
 //! name, and it can only write `.txt`, `.md` or `.docx` files named
 //! "YYYY-MM-DD HH-MM-SS" into the folder the user picked. The page sends text
 //! only: the app makes a Word document itself (docx.rs), so no file is ever
-//! written from bytes the page made. Without a folder, Save shows the system
+//! written from bytes the page made. For Continue the page may also list the
+//! notes Save wrote into the folder and read one back as text (`list_notes`,
+//! `read_note`): only names Save makes, never a path, and never a Word file. Without a folder, Save shows the system
 //! save panel through `save_download` (D-49), starting in the Downloads folder
 //! with the name the page proposes, and writes the file where the panel put
 //! it, so the page learns whether the file was really written (DM-202).
@@ -17,7 +19,7 @@
 use std::borrow::Cow;
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -161,9 +163,21 @@ impl Folder {
         let failed = |e: String| format!("Could not write the file: {e}");
         let bytes = file_bytes(&name, text).map_err(failed)?;
         let mut current = self.lock()?;
+        let dir = self.path(&mut current, failed)?;
+        write_new(&dir, &name, &bytes).map_err(|e| failed(e.to_string()))
+    }
+
+    /// The folder's path. A closed folder's bookmark is tried again first, and
+    /// kept open if it opens, so a drive plugged in since launch works; its
+    /// failure goes through `failed`.
+    fn path(
+        &self,
+        current: &mut Option<Remembered>,
+        failed: impl Fn(String) -> String,
+    ) -> Result<PathBuf, String> {
         let folder = current.as_mut().ok_or("No folder is chosen")?;
-        let dir = match folder {
-            Remembered::Open { path, .. } => path.clone(),
+        match folder {
+            Remembered::Open { path, .. } => Ok(path.clone()),
             Remembered::Closed { bookmark, .. } => {
                 let file = self
                     .file
@@ -172,10 +186,51 @@ impl Folder {
                 let opened = self.bookmarks.open(bookmark).map_err(failed)?;
                 let path = opened.path.clone();
                 *folder = kept(file, opened);
-                path
+                Ok(path)
             }
-        };
-        write_new(&dir, &name, &bytes).map_err(|e| failed(e.to_string()))
+        }
+    }
+
+    /// The notes Save wrote into the folder, newest first (Continue): regular
+    /// files whose names `note_name` reads, by their moment and then their
+    /// counter, newest first; two of the same moment and counter (one per
+    /// format) by name, last first, so the order never depends on the system's.
+    /// Nothing else in the folder is listed: a note written by hand under
+    /// another name is not one Save wrote.
+    fn list(&self) -> Result<Vec<String>, String> {
+        let failed = |e: String| format!("Could not read the folder: {e}");
+        let mut current = self.lock().map_err(failed)?;
+        let dir = self.path(&mut current, |e| e).map_err(failed)?;
+        let mut notes = Vec::new();
+        for entry in fs::read_dir(&dir).map_err(|e| failed(e.to_string()))? {
+            let entry = entry.map_err(|e| failed(e.to_string()))?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let Some((moment, counter, _)) = note_name(&name) else {
+                continue;
+            };
+            // The entry itself, not what a link points to.
+            if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                notes.push((moment.to_owned(), counter, name));
+            }
+        }
+        notes.sort_by(|a, b| b.cmp(a));
+        Ok(notes.into_iter().map(|(_, _, name)| name).collect())
+    }
+
+    /// The text of one note Save wrote (Continue). Only a name `note_name`
+    /// reads, so never a path or another file; a Word file is refused, since
+    /// the app writes it but does not read it back.
+    fn read(&self, name: &str) -> Result<String, String> {
+        let (_, _, ext) = note_name(name).ok_or("That is not a note the app wrote")?;
+        if ext == ".docx" {
+            return Err(WORD_NOTE.to_owned());
+        }
+        let failed = |e: String| format!("Could not read the note: {e}");
+        let mut current = self.lock().map_err(failed)?;
+        let dir = self.path(&mut current, |e| e).map_err(failed)?;
+        read_note_file(&dir.join(name))
     }
 }
 
@@ -260,6 +315,19 @@ pub fn write_text_file(
     folder: State<'_, Folder>,
 ) -> Result<String, String> {
     folder.write(&base, &ext, &text)
+}
+
+/// Continue: the names of the notes Save wrote into the folder, newest first.
+#[tauri::command(async)]
+pub fn list_notes(folder: State<'_, Folder>) -> Result<Vec<String>, String> {
+    folder.list()
+}
+
+/// Continue: the text of one of those notes, by its name. The page gets the
+/// text only, never a path, and the app opens nothing else.
+#[tauri::command(async)]
+pub fn read_note(name: String, folder: State<'_, Folder>) -> Result<String, String> {
+    folder.read(&name)
 }
 
 /// Save without a folder: the system save panel, started in the Downloads
@@ -575,6 +643,16 @@ fn downloads_dir<R: Runtime>(window: &WebviewWindow<R>) -> Result<PathBuf, Strin
 /// The plain files Save writes, by extension (index.html, PLAIN_FORMATS).
 const PLAIN_EXTENSIONS: [&str; 3] = [".txt", ".md", ".docx"];
 
+/// The largest note `read_note` hands to the page (8 MB, 8,388,608 bytes).
+const NOTE_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// `read_note`'s answer for a Word file, which the page shows as it is.
+const WORD_NOTE: &str =
+    "The newest note is a Word file, which the app cannot read; save as .txt or .md to continue here";
+
+/// `read_note`'s answer for a note above NOTE_LIMIT.
+const TOO_LARGE: &str = "The note is too large to bring back";
+
 /// The formats Save proposes to the save panel, by extension, each with the
 /// name its filter gets (rfd shows the name on Windows and Linux only; on
 /// macOS the extensions become the panel's allowed file types).
@@ -731,6 +809,58 @@ fn is_moment(base: &str) -> bool {
                 b == s
             }
         })
+}
+
+/// A note Save wrote, by its name (Continue): the moment, then either nothing
+/// or the counter `numbered` adds (" (2)", " (3)" and on: no leading zero, never
+/// " (1)"), then one of the three plain extensions, all exactly as Save writes
+/// them. Answers the moment, the counter (1 for none) and the extension, and
+/// None for every other name, a path among them.
+fn note_name(name: &str) -> Option<(&str, u64, &str)> {
+    let ext = PLAIN_EXTENSIONS
+        .into_iter()
+        .find(|ext| name.ends_with(ext))?;
+    let stem = &name[..name.len() - ext.len()];
+    let moment = stem.get(..19)?;
+    if !is_moment(moment) {
+        return None;
+    }
+    let rest = &stem[19..];
+    if rest.is_empty() {
+        return Some((moment, 1, ext));
+    }
+    let digits = rest.strip_prefix(" (")?.strip_suffix(')')?;
+    if digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let counter: u64 = digits.parse().ok()?;
+    (counter >= 2).then_some((moment, counter, ext))
+}
+
+/// The text of the note at `path`, for `read_note`: a regular file, not a link
+/// or a folder, of NOTE_LIMIT bytes or less, read as UTF-8 with any invalid
+/// byte sequence becoming U+FFFD, and with every "\r\n" and lone "\r" made
+/// "\n", as the page's Open does for a plain note. A leading U+FEFF is text
+/// the person typed and stays. A link put in the note's place between the
+/// check and the open would be followed; the limit holds either way.
+fn read_note_file(path: &Path) -> Result<String, String> {
+    let failed = |e: io::Error| format!("Could not read the note: {e}");
+    let found = fs::symlink_metadata(path).map_err(failed)?;
+    if !found.file_type().is_file() {
+        return Err("Could not read the note: it is not a plain file".to_owned());
+    }
+    // One byte past the limit is enough to know the note is too large, so
+    // nothing larger is ever held in memory.
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .and_then(|file| file.take(NOTE_LIMIT + 1).read_to_end(&mut bytes))
+        .map_err(failed)?;
+    if bytes.len() as u64 > NOTE_LIMIT {
+        return Err(TOO_LARGE.to_owned());
+    }
+    Ok(String::from_utf8_lossy(&bytes)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n"))
 }
 
 /// Writes `bytes` into a new file in `dir` under the first free name and
@@ -1510,6 +1640,245 @@ mod tests {
             format!("{BASE}.txt"),
             "Save still writes into the folder the page shows"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Continue: list_notes and read_note.
+
+    /// A folder holding `files` (name, contents), chosen in a fresh Folder.
+    fn folder_with(tag: &str, files: &[(&str, &[u8])]) -> (PathBuf, PathBuf, Folder) {
+        let dir = scratch(tag);
+        let chosen = dir.join("Notes");
+        fs::create_dir(&chosen).unwrap();
+        for (name, bytes) in files {
+            fs::write(chosen.join(name), bytes).unwrap();
+        }
+        let (folder, _) = load(&dir.join("data"));
+        folder.remember(chosen.clone()).unwrap();
+        (dir, chosen, folder)
+    }
+
+    #[test]
+    fn the_notes_are_listed_newest_first_by_moment_then_counter() {
+        let (dir, _, folder) = folder_with(
+            "list-order",
+            &[
+                ("2026-10-31 23-59-59.docx", b""),
+                ("2026-11-01 10-00-02.txt", b""),
+                ("2026-11-01 10-00-02 (2).txt", b""),
+                ("2026-11-01 10-00-02 (10).md", b""),
+                ("2026-11-01 09-00-00.md", b""),
+            ],
+        );
+        assert_eq!(
+            folder.list().unwrap(),
+            [
+                "2026-11-01 10-00-02 (10).md",
+                "2026-11-01 10-00-02 (2).txt",
+                "2026-11-01 10-00-02.txt",
+                "2026-11-01 09-00-00.md",
+                "2026-10-31 23-59-59.docx",
+            ],
+            "the counter counts as a number, and no counter counts as 1"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn two_notes_of_one_moment_and_counter_are_ordered_by_name() {
+        let (dir, _, folder) = folder_with(
+            "list-tie",
+            &[
+                ("2026-11-01 10-00-02.md", b""),
+                ("2026-11-01 10-00-02.txt", b""),
+                ("2026-11-01 10-00-02.docx", b""),
+            ],
+        );
+        assert_eq!(
+            folder.list().unwrap(),
+            [
+                "2026-11-01 10-00-02.txt",
+                "2026-11-01 10-00-02.md",
+                "2026-11-01 10-00-02.docx"
+            ]
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_the_notes_save_wrote_are_listed() {
+        let (dir, chosen, folder) = folder_with(
+            "list-only",
+            &[
+                ("2026-11-01 10-00-02.txt", b"a note"),
+                ("notes.txt", b""),
+                ("2026-11-01 10-00-03.TXT", b""),
+                ("2026-11-01 10-00-03 (1).txt", b""),
+                ("2026-11-01 10-00-03 (02).txt", b""),
+                ("2026-11-01 10-00-03 ().txt", b""),
+                ("2026-11-01 10-00-03 (2) .txt", b""),
+                ("2026-11-01 10-00-03.txt.bak", b""),
+                ("2026-11-01 10-00-03 (2).sight", b""),
+                ("x2026-11-01 10-00-03.txt", b""),
+                ("2026-11-01 10-00-3.txt", b""),
+                ("2026-11-01 10-00-03 (99999999999999999999).txt", b""),
+            ],
+        );
+        fs::create_dir(chosen.join("2026-11-01 11-00-00.txt")).unwrap();
+        std::os::unix::fs::symlink(
+            chosen.join("2026-11-01 10-00-02.txt"),
+            chosen.join("2026-11-01 12-00-00.txt"),
+        )
+        .unwrap();
+        assert_eq!(
+            folder.list().unwrap(),
+            ["2026-11-01 10-00-02.txt"],
+            "hand-named files, other cases, a folder and a link are not notes Save wrote"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn listing_and_reading_need_a_folder_and_open_a_closed_one_again() {
+        let dir = scratch("list-closed");
+        let data = dir.join("data");
+        let (folder, _) = load(&data);
+        assert_eq!(
+            folder.list().unwrap_err(),
+            "Could not read the folder: No folder is chosen"
+        );
+        assert_eq!(
+            folder.read("2026-11-01 10-00-02.txt").unwrap_err(),
+            "Could not read the note: No folder is chosen"
+        );
+        let chosen = dir.join("On a drive");
+        let unplugged = dir.join("unplugged");
+        fs::create_dir(&chosen).unwrap();
+        fs::write(chosen.join("2026-11-01 10-00-02.txt"), "kept text").unwrap();
+        folder.remember(chosen.clone()).unwrap();
+        fs::rename(&chosen, &unplugged).unwrap(); // the drive is unplugged
+        let (folder, fake) = load(&data);
+        assert_eq!(
+            folder.list().unwrap_err(),
+            "Could not read the folder: the folder is not there"
+        );
+        assert_eq!(
+            folder.read("2026-11-01 10-00-02.txt").unwrap_err(),
+            "Could not read the note: the folder is not there"
+        );
+        fs::rename(&unplugged, &chosen).unwrap(); // and plugged in again
+        assert_eq!(folder.list().unwrap(), ["2026-11-01 10-00-02.txt"]);
+        assert_eq!(fake.log(), ["open On a drive"], "opened by the listing");
+        assert_eq!(folder.read("2026-11-01 10-00-02.txt").unwrap(), "kept text");
+        assert_eq!(
+            fake.log(),
+            ["open On a drive"],
+            "and kept open: the read opened nothing again"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_note_takes_only_a_name_list_notes_would_list() {
+        let (dir, _, folder) = folder_with("read-names", &[("2026-11-01 10-00-02.txt", b"text")]);
+        fs::write(dir.join("2026-11-01 10-00-02.txt"), "outside the folder").unwrap();
+        for bad in [
+            "",
+            "notes.txt",
+            "../2026-11-01 10-00-02.txt",
+            "./2026-11-01 10-00-02.txt",
+            "Notes/2026-11-01 10-00-02.txt",
+            "/etc/2026-11-01 10-00-02.txt",
+            "2026-11-01 10-00-02.txt/..",
+            "2026-11-01 10-00-02 (1).txt",
+            "2026-11-01 10-00-02.TXT",
+            "2026-11-01 10-00-02.sight",
+        ] {
+            assert_eq!(
+                folder.read(bad).unwrap_err(),
+                "That is not a note the app wrote",
+                "{bad:?} must be refused"
+            );
+        }
+        assert_eq!(folder.read("2026-11-01 10-00-02.txt").unwrap(), "text");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_note_refuses_a_word_file_with_the_words_the_page_shows() {
+        let (dir, _, folder) = folder_with("read-docx", &[("2026-11-01 10-00-02.docx", b"PK")]);
+        assert_eq!(
+            folder.read("2026-11-01 10-00-02.docx").unwrap_err(),
+            "The newest note is a Word file, which the app cannot read; save as .txt or .md to continue here"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_note_refuses_a_note_above_8_mb_and_reads_one_of_8_mb() {
+        let limit = usize::try_from(NOTE_LIMIT).unwrap();
+        assert_eq!(limit, 8_388_608);
+        let (dir, chosen, folder) = folder_with("read-size", &[]);
+        fs::write(chosen.join("2026-11-01 10-00-02.txt"), vec![b'a'; limit]).unwrap();
+        fs::write(
+            chosen.join("2026-11-01 10-00-03.txt"),
+            vec![b'a'; limit + 1],
+        )
+        .unwrap();
+        assert_eq!(folder.read("2026-11-01 10-00-02.txt").unwrap().len(), limit);
+        assert_eq!(
+            folder.read("2026-11-01 10-00-03.txt").unwrap_err(),
+            "The note is too large to bring back"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_note_reads_utf8_lossily_and_makes_every_line_end_a_line_feed() {
+        let (dir, _, folder) = folder_with(
+            "read-text",
+            &[(
+                "2026-11-01 10-00-02.md",
+                b"\xef\xbb\xbfone\r\ntwo\rthree\nfour \xff end\r",
+            )],
+        );
+        assert_eq!(
+            folder.read("2026-11-01 10-00-02.md").unwrap(),
+            "\u{feff}one\ntwo\nthree\nfour \u{fffd} end\n",
+            "a leading U+FEFF stays as text, a bad byte becomes U+FFFD"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_note_refuses_a_folder_or_a_link_in_a_notes_place() {
+        let (dir, chosen, folder) = folder_with("read-link", &[]);
+        fs::write(dir.join("secret.txt"), "outside the folder").unwrap();
+        std::os::unix::fs::symlink(
+            dir.join("secret.txt"),
+            chosen.join("2026-11-01 10-00-02.txt"),
+        )
+        .unwrap();
+        fs::create_dir(chosen.join("2026-11-01 10-00-03.txt")).unwrap();
+        for name in ["2026-11-01 10-00-02.txt", "2026-11-01 10-00-03.txt"] {
+            assert_eq!(
+                folder.read(name).unwrap_err(),
+                "Could not read the note: it is not a plain file",
+                "{name}"
+            );
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_note_save_wrote_comes_back_exactly() {
+        let (dir, _, folder) = folder_with("read-back", &[]);
+        let text = "first line\n\tindented, \u{1f600} and a final break\n";
+        let first = folder.write(BASE, ".txt", "older").unwrap();
+        let name = folder.write(BASE, ".txt", text).unwrap();
+        assert_eq!(name, format!("{BASE} (2).txt"));
+        assert_eq!(folder.list().unwrap(), [name.clone(), first]);
+        assert_eq!(folder.read(&name).unwrap(), text);
         fs::remove_dir_all(&dir).unwrap();
     }
 

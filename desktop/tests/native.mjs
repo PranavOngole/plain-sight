@@ -191,6 +191,14 @@ const pick = (p, group, value) => {
   radio.dispatchEvent(new p.w.Event('change', { bubbles: true }));
 };
 
+test('the fake adapter has exactly the calls of desktop/adapter.js, so these tests drive the surface the app gives the page', () => {
+  const adapter = readFileSync(path.join(ROOT, 'desktop', 'adapter.js'), 'utf8');
+  const block = adapter.slice(adapter.indexOf("fixed('PlainSightNative', Object.freeze({"), adapter.indexOf('}));'));
+  const calls = [...block.matchAll(/^    (\w+): /gm)].map((m) => m[1]).sort();
+  assert.deepEqual(calls, ['forgetFolder', 'listNotes', 'onQuit', 'onUnsavedText', 'pickFolder', 'readNote', 'saveDownload', 'savedFolder', 'writeTextFile']);
+  assert.deepEqual(Object.keys(fakeNative().api).sort(), calls);
+});
+
 test('without the adapter the page keeps its browser wording and registers nothing', async () => {
   const p = await loadPage();
   try {

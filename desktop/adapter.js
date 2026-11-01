@@ -1,7 +1,8 @@
 // The desktop app's side of the page. The page calls window.PlainSightNative
 // (index.html, search for "native") and each call here becomes one of the
 // app's own commands (src-tauri/src/folder.rs). The app keeps the folder's
-// path; the page only ever gets the folder's name (D-07). The app also runs
+// path; the page only ever gets the folder's name (D-07), and for Continue the
+// names and the text of the notes Save wrote there, never a path. The app also runs
 // window.__plainSightQuit before it closes or quits (src-tauri/src/quit.rs).
 //
 // The app injects this before the page runs, in the main frame only, after
@@ -30,6 +31,11 @@
     // put it and answers with the name used, null when the panel was
     // cancelled, or fails, so the page's toast tells the truth (D-49).
     saveDownload: (name, text) => invoke('save_download', { name, text }),
+    // Continue: the names of the notes Save wrote into the folder, newest
+    // first, and the text of one of them by its name. A failure answers the
+    // app's own words, which the page shows.
+    listNotes: () => invoke('list_notes'),
+    readNote: (name) => invoke('read_note', { name }),
     onQuit: (callback) => { if (typeof callback === 'function') quitCallback = callback; },
     // The page's answer to "would a quit lose text?": true when text is on the
     // page and no vault keeps it; the app then asks before it quits (D-48).

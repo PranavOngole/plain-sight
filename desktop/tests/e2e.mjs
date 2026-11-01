@@ -534,14 +534,14 @@ test('the folder is remembered across a relaunch, in the app\'s own data folder'
   assert.equal(folderFiles().length, count + 1);
 });
 
-test('the adapter cannot be replaced, gives no path, refuses any other file name, and the page can call nothing else', async () => {
+test('the adapter cannot be replaced, gives no path, refuses any other file name, reads back only a note Save names, and the page can call nothing else', async () => {
   const facts = await js(`(() => {
     const n = window.PlainSightNative;
     let replaced = false; try { window.PlainSightNative = {}; replaced = window.PlainSightNative !== n; } catch (e) {}
     let deleted = false; try { deleted = delete window.PlainSightNative; } catch (e) {}
     return { frozen: Object.isFrozen(n), replaced, deleted, still: window.PlainSightNative === n, keys: Object.keys(n).sort() };
   })()`);
-  assert.deepEqual(facts, { frozen: true, replaced: false, deleted: false, still: true, keys: ['forgetFolder', 'onQuit', 'onUnsavedText', 'pickFolder', 'saveDownload', 'savedFolder', 'writeTextFile'] });
+  assert.deepEqual(facts, { frozen: true, replaced: false, deleted: false, still: true, keys: ['forgetFolder', 'listNotes', 'onQuit', 'onUnsavedText', 'pickFolder', 'readNote', 'saveDownload', 'savedFolder', 'writeTextFile'] });
   await js(`(() => { window.__r = {}; const I = window.__TAURI_INTERNALS__.invoke; const N = window.PlainSightNative;
     const note = (k, p) => p.then((v) => { window.__r[k] = 'ok ' + JSON.stringify(v); }, (e) => { window.__r[k] = 'refused ' + String(e); });
     note('saved', N.savedFolder());
@@ -555,6 +555,10 @@ test('the adapter cannot be replaced, gives no path, refuses any other file name
     note('downloadTraversal', N.saveDownload('../../outside.txt', 'x'));
     note('downloadSlash', N.saveDownload('untitled-draft-20261021-0000.sight/../../x', 'x'));
     note('downloadOtherName', N.saveDownload('notes.sh', 'x'));
+    note('readTraversal', N.readNote('../../outside.txt'));
+    note('readSlash', N.readNote('2026-10-21 00-00-00.txt/../../x.txt'));
+    note('readHosts', N.readNote('/etc/hosts'));
+    note('readOtherName', N.readNote('notes.txt'));
     const others = ['plugin:dialog|open', 'plugin:window|close', 'plugin:event|listen', 'plugin:fs|read_text_file', 'plugin:app|version', 'plugin:webview|print', 'plugin:menu|new', 'plugin:path|resolve_directory', 'plugin:image|new', 'plugin:resources|close', 'plugin:tray|new', 'plugin:shell|open', 'plugin:http|fetch', 'plugin:opener|open_url', 'plugin:updater|check', 'plugin:clipboard-manager|read_text', 'plugin:notification|notify', 'quit_ready'];
     others.forEach((cmd, i) => note('other' + i + ' ' + cmd, I(cmd, { path: '/etc/hosts', event: 'x', handler: 0, url: 'https://example.com' })));
     return true; })()`);
@@ -566,6 +570,7 @@ test('the adapter cannot be replaced, gives no path, refuses any other file name
   for (const k of ['extTraversal', 'extOther']) assert.match(r[k], /^refused .*only \.txt, \.md and \.docx/, k);
   assert.match(r.extMissing, /^refused /, 'a call without the text is refused');
   for (const k of ['downloadTraversal', 'downloadSlash', 'downloadOtherName', 'downloadDocm']) assert.match(r[k], /^refused .*not one Save makes/, k);
+  for (const k of ['readTraversal', 'readSlash', 'readHosts', 'readOtherName']) assert.equal(r[k], 'refused That is not a note the app wrote', k);
   const others = Object.keys(r).filter((k) => k.startsWith('other'));
   assert.equal(others.length, 18, 'eighteen other commands were tried');
   for (const k of others) assert.match(r[k], /^refused /, k + ' is refused');

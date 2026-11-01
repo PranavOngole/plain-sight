@@ -1,6 +1,6 @@
 // Declares the app's own commands. The page may call each one only because
 // capabilities/main.json grants its permission (decision D-10); the capability
-// grants exactly these six and no core or plugin permission.
+// grants exactly these eight and no core or plugin permission.
 
 use std::path::Path;
 
@@ -28,6 +28,8 @@ fn main() {
             "forget_folder",
             "write_text_file",
             "save_download",
+            "list_notes",
+            "read_note",
             "quit_ready",
         ]),
     ))

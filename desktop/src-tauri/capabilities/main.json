@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "The main window, for the app's own page only. It may call the folder and Save commands (pick_folder, saved_folder, forget_folder, write_text_file, save_download) and quit_ready, all declared in build.rs, and nothing else.",
+  "description": "The main window, for the app's own page only. It may call the folder and Save commands (pick_folder, saved_folder, forget_folder, write_text_file, save_download), the two that read back a note Save wrote for Continue (list_notes, read_note) and quit_ready, all declared in build.rs, and nothing else.",
   "windows": ["main"],
   "local": true,
   "permissions": [
@@ -10,6 +10,8 @@
     "allow-forget-folder",
     "allow-write-text-file",
     "allow-save-download",
+    "allow-list-notes",
+    "allow-read-note",
     "allow-quit-ready"
   ]
 }
