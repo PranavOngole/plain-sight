@@ -35,9 +35,18 @@ const STAMP = /^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}$/;
 // A fake adapter with the same surface as desktop/adapter.js. It records
 // every call; files is the set of names already in the folder, so the
 // counter rule can be checked from the page's side.
-function fakeNative({ saved = null, pick = { name: 'Build_Test_1' }, failPick = false, failForget = false, failWrite = false, failDownload = false, cancelDownload = false, downloadAnswer = null, writeGate = null, downloadGate = null } = {}) {
+//
+// Continue (folder.rs: list_notes, read_note): notes holds the folder's notes
+// as [name, text], newest first; every Save through writeTextFile puts its
+// file first, as the app's listing would order it. listNotes and readNote
+// answer as the app does: a failure is a plain string, which is what Tauri's
+// invoke rejects with for a command's Err (tauri 2.12.4, scripts/core.js),
+// and a .docx is refused with the app's own words.
+const WORD_REFUSED = 'The newest note is a Word file, which the app cannot read; save as .txt or .md to continue here';
+function fakeNative({ saved = null, pick = { name: 'Build_Test_1' }, failPick = false, failForget = false, failWrite = false, failDownload = false, cancelDownload = false, downloadAnswer = null, writeGate = null, downloadGate = null, notes = [], failList = null, failRead = null, listGate = null } = {}) {
   const calls = [];
   const files = new Set();
+  const held = notes.map(([name, text]) => [name, text]);
   let quit = null;
   let unsaved = null;
   let folder = saved;
@@ -60,7 +69,22 @@ function fakeNative({ saved = null, pick = { name: 'Build_Test_1' }, failPick = 
         let name = base + ext;
         for (let n = 2; files.has(name); n++) name = base + ' (' + n + ')' + ext;
         files.add(name);
+        held.unshift([name, text]);
         return name;
+      },
+      listNotes: async () => {
+        calls.push(['listNotes']);
+        if (listGate) await listGate;   // the listing still under way, until the test lets it answer
+        if (failList) throw failList;
+        return held.map(([name]) => name);
+      },
+      readNote: async (name) => {
+        calls.push(['readNote', name]);
+        if (failRead) throw failRead;
+        if (name.endsWith('.docx')) throw WORD_REFUSED;
+        const note = held.find(([n]) => n === name);
+        if (!note) throw 'That is not a note the app wrote';
+        return note[1];
       },
       // As the app does (folder.rs): the save panel's name, or null when it was cancelled (D-49).
       saveDownload: async (name, text) => {
@@ -76,7 +100,21 @@ function fakeNative({ saved = null, pick = { name: 'Build_Test_1' }, failPick = 
   };
 }
 
-async function loadPage({ native = null, storage = {}, html = HTML } = {}) {
+// onDerive, given a function, runs before every key derivation the page asks
+// for (and is awaited), so a test can count derivations or slow one down.
+function cryptoWith(onDerive) {
+  if (!onDerive) return webcrypto;
+  return {
+    getRandomValues: (a) => webcrypto.getRandomValues(a),
+    subtle: {
+      importKey: (...a) => webcrypto.subtle.importKey(...a),
+      deriveKey: async (...a) => { await onDerive(); return webcrypto.subtle.deriveKey(...a); },
+      encrypt: (...a) => webcrypto.subtle.encrypt(...a),
+      decrypt: (...a) => webcrypto.subtle.decrypt(...a)
+    }
+  };
+}
+async function loadPage({ native = null, storage = {}, html = HTML, onDerive = null } = {}) {
   const errors = [];
   const downloads = [];
   const virtualConsole = new VirtualConsole();
@@ -89,7 +127,7 @@ async function loadPage({ native = null, storage = {}, html = HTML } = {}) {
     virtualConsole,
     beforeParse(window) {
       window.Math.random = () => 1;   // no simulated typos
-      Object.defineProperty(window, 'crypto', { value: webcrypto, configurable: true });
+      Object.defineProperty(window, 'crypto', { value: cryptoWith(onDerive), configurable: true });
       window.URL.createObjectURL = (blob) => { downloads.push({ blob, name: null }); return 'blob:http://localhost/' + downloads.length; };
       window.URL.revokeObjectURL = () => {};
       window.HTMLAnchorElement.prototype.click = function () { const d = downloads[downloads.length - 1]; if (d) d.name = this.download; };
@@ -158,6 +196,7 @@ test('without the adapter the page keeps its browser wording and registers nothi
   try {
     assert.match(p.$('#vault-on').parentElement.textContent, /in this browser/);
     assert.match(p.$('#folder-note').textContent, /Folder access exists in Chrome/);
+    assert.doesNotMatch(p.$('#folder-note').textContent, /The phrase stops a guess/, 'the folder half of Continue is the app\'s: the web page does not speak of it');
     assert.ok(p.d.querySelectorAll('[data-app]').length >= 6, 'the app wording is carried in data-app attributes');
     assert.match(p.$('#intro').textContent, /download/i, 'on the web the intro speaks of downloads');
     assert.equal(p.$('#folder-status').textContent, 'Save downloads an encrypted .sight file.');
@@ -185,7 +224,7 @@ test('with the adapter the folder box offers the system picker, no browser help,
     assert.equal(p.$('#btn-folder').hidden, false, 'the folder button shows in the app');
     assert.equal(p.$('#folder-help').hidden, true, 'no browser-specific help in the app');
     assert.equal(p.$('#folder-note').textContent.includes('Chrome'), false, 'the browser sentence is gone');
-    assert.match(p.$('#folder-note').textContent, /straight into that folder\. Plain means anyone who can open the file can read it, and the computer indexes, previews and backs it up like any document; a synced folder uploads it\.\s*$/);   // main 1.3.10's wording (Web_PS_011); the app's empty span ends the note there
+    assert.match(p.$('#folder-note').textContent, /straight into that folder\. Plain means anyone who can open the file can read it, and the computer indexes, previews and backs it up like any document; a synced folder uploads it\.\s+The phrase stops a guess at the keyboard\. It does not lock the files: anyone who can open the folder, or who presses Open and picks a file, can read a plain note\.$/);   // main 1.3.10's wording (Web_PS_011), the browser's sentence emptied in the app, then the app's sentence on what the phrase does and does not do (Continue)
     assert.match(p.$('#vault-on').parentElement.textContent, /Save my text on this computer, encrypted/);
     assert.match(p.$('#intro').textContent, /Nothing you type leaves this app/);
     assert.match(p.$('#intro').textContent, /Closing the window or quitting erases the hidden text/);
@@ -768,7 +807,7 @@ test('the page keeps no lasting copy of the hidden text: no savedText, every cha
   assert.deepEqual(writes('edits'), ['let edits = 0;', SET_REAL], 'the count moves only with the buffer');
   const MARK_FN = 'function markSaved(at, wipes) { if (native && wipes === wipeCount) savedAt = at; }';
   assert.deepEqual(writes('savedAt'), ['savedAt = null;', 'let savedAt = null;', MARK_FN], 'the mark is set only by markSaved and dropped by the wipe');
-  assert.deepEqual([...script.matchAll(/markSaved\(([^)]*)\)/g)].map((m) => m[1]), ['at, wipes', 'at, wipes', 'at, wipes', 'at, wipes', 'edits, wipes', 'edits, wipes'], 'the mark takes a count: a Save\'s count at its click, an Open\'s after the replace');
+  assert.deepEqual([...script.matchAll(/markSaved\(([^)]*)\)/g)].map((m) => m[1]), ['at, wipes', 'at, wipes', 'at, wipes', 'at, wipes', 'edits, wipes', 'edits, wipes', 'edits, wipes'], 'the mark takes a count: a Save\'s count at its click, an Open\'s after the replace, and Continue\'s after its replace when the page holds exactly the note');
   assert.equal(script.split('const at = edits;').length - 1, 3, 'each of the three Saves takes the count at its click');
   assert.ok(script.includes('native.onUnsavedText(() => real.length > 0 && !vaultOpen() && edits !== savedAt);'), 'the quit question compares counts');
 });
@@ -1171,6 +1210,521 @@ test('the page makes, byte for byte, the Word document the app is held to (tests
     assert.match(p.downloads[0].name, /^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\.docx$/);
     const bytes = Buffer.from(await p.downloads[0].blob.arrayBuffer());
     assert.ok(bytes.equals(expected), 'the same bytes as tests/fixtures/sample.docx (' + bytes.length + ' and ' + expected.length + ' bytes)');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+// ---------------------------------------------------------------------------
+// Continue in the app (1 November 2026, on the App Store candidate): the phrase
+// on a line of its own, then Enter twice, brings back a locked copy, or, with a
+// folder chosen and no copy kept, the newest note in the folder. The phrase
+// check (plainSight.continueCheck) is written on Start or Esc on the intro.
+// ---------------------------------------------------------------------------
+const PHRASE = 'correct horse battery staple';
+const CHECK_KEY = 'plainSight.continueCheck';
+const ONE_PHRASE = 'With a copy kept on this device, the phrase brings back the copy; with no copy kept, it brings back the newest note in the folder.';
+const NO_COPY_NOTE = 'To come back to your text: type your phrase on the page on a line of its own, then press Enter twice. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.';
+// A record in the page's own format, made outside the page, as the page would store it.
+async function recordFor(text, phrase, iterations = 310000) {
+  const salt = webcrypto.getRandomValues(new Uint8Array(16));
+  const iv = webcrypto.getRandomValues(new Uint8Array(12));
+  const base = await webcrypto.subtle.importKey('raw', new TextEncoder().encode(phrase), 'PBKDF2', false, ['deriveKey']);
+  const key = await webcrypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+  const data = new Uint8Array(await webcrypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(text)));
+  const b64 = (u) => Buffer.from(u).toString('base64');
+  return JSON.stringify({ format: 'plain-sight', version: 1, cipher: 'AES-256-GCM', kdf: 'PBKDF2-SHA-256', iterations, salt: b64(salt), iv: b64(iv), data: b64(data) });
+}
+// The plaintext of a stored record under a phrase, or null when the phrase does not open it.
+async function openRecord(json, phrase) {
+  try {
+    const r = JSON.parse(json);
+    const base = await webcrypto.subtle.importKey('raw', new TextEncoder().encode(phrase), 'PBKDF2', false, ['deriveKey']);
+    const key = await webcrypto.subtle.deriveKey({ name: 'PBKDF2', salt: Buffer.from(r.salt, 'base64'), iterations: r.iterations, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    return new TextDecoder().decode(await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv: Buffer.from(r.iv, 'base64') }, key, Buffer.from(r.data, 'base64')));
+  } catch (err) { return null; }
+}
+const stored = (p, key) => p.w.localStorage.getItem(key);
+async function chooseFolder(p) {
+  if (p.$('#intro').hidden) p.$('#btn-help').click();
+  p.$('#btn-folder').click();
+  await until(() => /into the folder/.test(p.$('#folder-status').textContent), 'the folder chosen');
+}
+const enter2 = (p) => { p.press('Enter'); p.press('Enter'); };
+const counter = () => { const c = { n: 0 }; c.spy = async () => { c.n += 1; }; return c; };
+// Two notes in the folder, newest first, a folder remembered from the last run and the phrase check: what a person comes back to.
+const NOTES = [['2026-11-01 10-00-02 (2).txt', 'the newest note\nwith two lines'], ['2026-11-01 10-00-02.txt', 'an older note'], ['2026-11-01 09-59-59.md', 'the oldest note']];
+async function comeBack({ notes = NOTES, extra = {}, storage = {}, onDerive = null } = {}) {
+  const native = fakeNative({ saved: { name: 'Notes' }, notes, ...extra });
+  const p = await loadPage({ native, onDerive, storage: { 'plainSight.introSeen': '1', [CHECK_KEY]: await recordFor('check', PHRASE), ...storage } });
+  await p.settle();   // the remembered folder arrives from the app
+  return { native, p };
+}
+const listed = (native) => native.calls.filter((c) => c[0] === 'listNotes').length;
+
+test('Continue in the app: with a folder chosen the phrase field is in use with the box unticked; choosing or giving up the folder on the open intro turns it on or off and leaves what is typed and the box alone; the note then says which comes back', async () => {
+  const native = fakeNative();
+  const p = await loadPage({ native });
+  try {
+    await p.settle();
+    assert.equal(p.$('#vault-on').checked, false);
+    assert.equal(p.$('#vault-phrase').disabled, true, 'no folder, box unticked: the field is not in use');
+    assert.equal(p.$('#vault-status').textContent, NO_COPY_NOTE, 'without a folder the note teaches the copy only');
+    await chooseFolder(p);
+    assert.equal(p.$('#vault-phrase').disabled, false, 'a folder chosen: the field is in use');
+    assert.equal(p.$('#vault-on').checked, false, 'the box is left as it was');
+    assert.equal(p.$('#vault-status').textContent, NO_COPY_NOTE + ' ' + ONE_PHRASE, 'the note says what the phrase brings back, true whether or not a copy is kept');
+    p.$('#vault-phrase').value = 'being typed';
+    p.$('#btn-folder-forget').click();
+    await until(() => p.$('#vault-phrase').disabled, 'the field out of use once the folder is given up');
+    assert.equal(p.$('#vault-phrase').value, 'being typed', 'what is typed stays');
+    assert.equal(p.$('#vault-status').textContent, NO_COPY_NOTE);
+    p.$('#vault-on').checked = true;
+    p.$('#vault-on').dispatchEvent(new p.w.Event('change', { bubbles: true }));
+    assert.equal(p.$('#vault-phrase').disabled, false, 'the box ticked: in use, folder or not');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: Start with a folder chosen writes the phrase check, a record in the vault\'s shape that opens to the word "check" under the phrase only, holding neither the phrase nor the text; typing in the field writes nothing; no copy is made with the box unticked', async () => {
+  const native = fakeNative();
+  const p = await loadPage({ native });
+  try {
+    await chooseFolder(p);
+    p.start();
+    p.type('the hidden words of today');
+    await chooseFolder(p);
+    const field = p.$('#vault-phrase');
+    field.value = PHRASE;
+    field.dispatchEvent(new p.w.Event('input', { bubbles: true }));
+    field.dispatchEvent(new p.w.Event('change', { bubbles: true }));
+    await p.settle(500);
+    assert.equal(stored(p, CHECK_KEY), null, 'nothing is written while the phrase is typed: Start or Esc writes it');
+    p.start();
+    await until(() => stored(p, CHECK_KEY), 'the phrase check');
+    const raw = stored(p, CHECK_KEY);
+    const rec = JSON.parse(raw);
+    assert.deepEqual(Object.keys(rec).sort(), ['cipher', 'data', 'format', 'iterations', 'iv', 'kdf', 'salt', 'version']);
+    assert.deepEqual([rec.format, rec.version, rec.cipher, rec.kdf, rec.iterations], ['plain-sight', 1, 'AES-256-GCM', 'PBKDF2-SHA-256', 310000], 'the vault\'s shape and round count');
+    assert.deepEqual([Buffer.from(rec.salt, 'base64').length, Buffer.from(rec.iv, 'base64').length], [16, 12]);
+    assert.equal(await openRecord(raw, PHRASE), 'check', 'the phrase opens it to the fixed word');
+    assert.equal(await openRecord(raw, 'another phrase entirely'), null, 'another phrase does not');
+    for (const needle of ['correct', 'horse', 'hidden words', 'today']) assert.ok(!raw.includes(needle), 'the record holds no ' + needle);
+    assert.equal(stored(p, 'plainSight.vault'), null, 'no copy with the box unticked');
+    assert.equal(await p.real(), 'the hidden words of today', 'the page text is untouched');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: Esc on the intro writes the phrase check like Start; a new phrase replaces it under a fresh salt; an empty field leaves it as it is', async () => {
+  const native = fakeNative();
+  const p = await loadPage({ native });
+  try {
+    await chooseFolder(p);
+    p.$('#vault-phrase').value = PHRASE;
+    p.press('Escape');                       // on the intro, Esc applies every choice like Start
+    await until(() => stored(p, CHECK_KEY), 'the phrase check after Esc');
+    assert.equal(p.$('#intro').hidden, true);
+    const first = stored(p, CHECK_KEY);
+    assert.equal(await openRecord(first, PHRASE), 'check');
+    p.$('#btn-help').click();
+    p.$('#vault-phrase').value = 'a second phrase here';
+    p.start();
+    await until(() => stored(p, CHECK_KEY) !== first, 'the replaced check');
+    const second = stored(p, CHECK_KEY);
+    assert.equal(await openRecord(second, 'a second phrase here'), 'check', 'the new phrase opens it');
+    assert.equal(await openRecord(second, PHRASE), null, 'the old phrase no longer does');
+    assert.notEqual(JSON.parse(second).salt, JSON.parse(first).salt, 'a fresh salt');
+    p.$('#btn-help').click();
+    p.start();
+    await p.settle(500);
+    assert.equal(stored(p, CHECK_KEY), second, 'an empty field leaves the check as it is');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: with a folder chosen and the box unticked, a phrase of 1 to 11 characters is refused with the vault\'s words and the intro stays open; nothing is written', async () => {
+  const native = fakeNative();
+  const p = await loadPage({ native });
+  try {
+    await chooseFolder(p);
+    p.$('#vault-phrase').value = 'elevenchars';
+    p.start();
+    assert.equal(p.$('#intro').hidden, false, 'the intro stays open');
+    assert.equal(p.toast(), 'Use a phrase of at least 12 characters');
+    await p.settle(500);
+    assert.equal(stored(p, CHECK_KEY), null, 'no phrase check');
+    p.$('#vault-phrase').value = 'twelve chars';
+    p.start();
+    assert.equal(p.$('#intro').hidden, true, '12 characters are accepted');
+    await until(() => stored(p, CHECK_KEY), 'the phrase check');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: "Stop using the folder" deletes the phrase check; when the app cannot forget the folder, the check stays with it', async () => {
+  const kept = await comeBack({ extra: { failForget: true } });
+  try {
+    kept.p.$('#btn-help').click();
+    kept.p.$('#btn-folder-forget').click();
+    await until(() => kept.p.toast() === 'Could not stop using the folder', 'the refusal');
+    assert.ok(stored(kept.p, CHECK_KEY), 'the folder is still in use, and so is its check');
+    assert.deepEqual(kept.p.errors, []);
+  } finally { kept.p.close(); }
+  const { p } = await comeBack();
+  try {
+    p.$('#btn-help').click();
+    p.$('#btn-folder-forget').click();
+    await until(() => p.$('#btn-folder-forget').hidden, 'the folder given up');
+    assert.equal(stored(p, CHECK_KEY), null, 'the phrase check is deleted with the folder');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: with the box ticked and a folder chosen, the one field keys both the copy and the phrase check, so the two phrases can never differ', async () => {
+  const native = fakeNative();
+  const p = await loadPage({ native });
+  try {
+    await chooseFolder(p);
+    p.$('#vault-on').checked = true;
+    p.$('#vault-on').dispatchEvent(new p.w.Event('change', { bubbles: true }));
+    p.$('#vault-phrase').value = PHRASE;
+    p.start();
+    await until(() => stored(p, CHECK_KEY) && stored(p, 'plainSight.vault'), 'both records');
+    assert.equal(await openRecord(stored(p, CHECK_KEY), PHRASE), 'check');
+    assert.equal(await openRecord(stored(p, 'plainSight.vault'), PHRASE), '', 'the copy opens with the same phrase');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: after two Saves into the folder and Esc, the phrase on a line of its own and Enter twice bring back the newest note, silently; the quit question answers false, and true after the next key', async () => {
+  const native = fakeNative();
+  const p = await loadPage({ native });
+  try {
+    await chooseFolder(p);
+    p.$('#vault-phrase').value = PHRASE;
+    p.start();
+    await until(() => stored(p, CHECK_KEY), 'the phrase check');
+    p.type('first draft');
+    p.$('#btn-save').click();
+    await until(() => /^Saved /.test(p.toast()), 'the first Save');
+    p.type(' and more');
+    const firstToast = p.toast();
+    p.$('#btn-save').click();
+    await until(() => native.calls.filter((c) => c[0] === 'writeTextFile').length === 2 && p.toast() !== firstToast, 'the second Save');
+    const newest = p.toast().match(/^Saved (.+) in Build_Test_1$/)[1];
+    p.press('Escape');
+    assert.equal(await p.real(), '');
+    p.type(PHRASE);
+    enter2(p);
+    await until(() => native.calls.some((c) => c[0] === 'readNote'), 'the note read');
+    await p.settle();
+    assert.equal(await p.real(), 'first draft and more', 'the newest note is back, and the phrase line and its two Enters are gone');
+    const read = native.calls.filter((c) => c[0] === 'readNote');
+    assert.equal(read.length, 1);
+    assert.equal(read[0][1], newest, 'the first name the app listed: the second Save\'s file');
+    assert.equal(p.toast(), 'Saved ' + newest + ' in Build_Test_1', 'silent on success: the last toast is still the Save\'s');
+    assert.equal(p.$('#cover').textContent.length > 0, true, 'the cover was rebuilt');
+    assert.equal(native.unsaved(), false, 'the page holds exactly what the note holds: nothing to lose');
+    p.type('x');
+    assert.equal(native.unsaved(), true, 'a key later, text a quit would lose');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: text typed before the phrase line follows the note, and the quit question answers true, since that text is not on disk', async () => {
+  const { native, p } = await comeBack();
+  try {
+    p.type('typed today first\n' + PHRASE);
+    enter2(p);
+    await until(() => native.calls.some((c) => c[0] === 'readNote'), 'the note read');
+    await p.settle();
+    assert.equal(await p.real(), 'the newest note\nwith two linestyped today first\n', 'the note first, then the text typed before, in order');
+    assert.equal(native.unsaved(), true, 'the text typed before is not in the note');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: keys typed while the check runs follow the note, and the quit question answers true', async () => {
+  let release;
+  const { native, p } = await comeBack({ extra: { listGate: new Promise((r) => { release = r; }) } });
+  try {
+    p.type(PHRASE);
+    enter2(p);
+    await until(() => listed(native) === 1, 'the listing asked for');
+    p.type('ab');
+    release();
+    await until(() => native.calls.some((c) => c[0] === 'readNote'), 'the note read');
+    await p.settle();
+    assert.equal(await p.real(), 'the newest note\nwith two linesab');
+    assert.equal(native.unsaved(), true, 'the keys typed during the check are not in the note');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: a wrong line changes nothing and shows nothing, and the folder is never listed; one Enter derives nothing; a line under 12 characters is never derived', async () => {
+  const c = counter();
+  const { native, p } = await comeBack({ onDerive: c.spy });
+  try {
+    p.type('not the phrase at all');
+    enter2(p);
+    await p.settle(500);
+    assert.equal(c.n, 1, 'the line was tried');
+    assert.equal(await p.real(), 'not the phrase at all\n\n', 'nothing changed');
+    assert.equal(p.toast(), '', 'no message');
+    assert.equal(listed(native), 0, 'the folder was never listed');
+    p.press('Escape');
+    p.type(PHRASE);
+    p.press('Enter');
+    await p.settle(400);
+    assert.equal(c.n, 1, 'one Enter: nothing derived');
+    p.press('Escape');
+    p.type('elevenchars');
+    enter2(p);
+    await p.settle(300);
+    assert.equal(c.n, 1, 'a line of 11 characters: nothing derived');
+    assert.equal(listed(native), 0);
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: a locked copy wins over the folder, and a failure there never tries the folder, even with the phrase the folder\'s check would take', async () => {
+  const { native, p } = await comeBack({ storage: { 'plainSight.vault': await recordFor('the copy text', 'the copy phrase here') } });
+  try {
+    p.type(PHRASE);                          // opens the folder's check, not the copy
+    enter2(p);
+    await p.settle(800);
+    assert.equal(listed(native), 0, 'the folder is never tried while a copy is kept');
+    assert.equal(await p.real(), PHRASE + '\n\n', 'nothing changed');
+    assert.ok(!p.d.body.classList.contains('vault-open'));
+    p.press('Escape');
+    p.type('the copy phrase here');
+    enter2(p);
+    await until(() => p.d.body.classList.contains('vault-open'), 'the copy open');
+    assert.equal(await p.real(), 'the copy text', 'the copy came back');
+    assert.equal(listed(native), 0, 'and the folder was not listed');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: after a note came back nothing is tried until Esc; after Esc the phrase works again', async () => {
+  const c = counter();
+  const { native, p } = await comeBack({ onDerive: c.spy });
+  try {
+    p.type(PHRASE);
+    enter2(p);
+    await until(() => native.calls.some((x) => x[0] === 'readNote'), 'the note read');
+    await p.settle();
+    const n = c.n;
+    p.type('\n' + PHRASE);
+    enter2(p);
+    await p.settle(500);
+    assert.equal(c.n, n, 'nothing derived after a bring-back');
+    assert.equal(listed(native), 1);
+    p.press('Escape');
+    p.type(PHRASE);
+    enter2(p);
+    await until(() => listed(native) === 2, 'tried again after Esc');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: nothing is tried while the vault is open, folder and phrase check or not', async () => {
+  const c = counter();
+  const { native, p } = await comeBack({ onDerive: c.spy });
+  try {
+    p.$('#btn-help').click();
+    p.$('#vault-on').checked = true;
+    p.$('#vault-on').dispatchEvent(new p.w.Event('change', { bubbles: true }));
+    p.$('#vault-phrase').value = PHRASE;
+    p.start();
+    await until(() => p.d.body.classList.contains('vault-open'), 'the vault open');
+    await p.settle(300);
+    const n = c.n;
+    p.type(PHRASE);
+    enter2(p);
+    await p.settle(500);
+    assert.equal(c.n, n, 'no key derived while the vault is open');
+    assert.equal(listed(native), 0);
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: Esc while the note is on its way cancels it; the page stays blank', async () => {
+  let release;
+  const { native, p } = await comeBack({ extra: { listGate: new Promise((r) => { release = r; }) } });
+  try {
+    p.type(PHRASE);
+    enter2(p);
+    await until(() => listed(native) === 1, 'the listing asked for');
+    p.press('Escape');
+    release();
+    await p.settle(300);
+    assert.equal(await p.real(), '', 'nothing came back after Esc');
+    assert.equal(native.calls.some((c) => c[0] === 'readNote'), false, 'the note was not read');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: after the right phrase a toast says why no note came, and the page stays as typed: a Word file newest, an empty folder, a folder the app could not read, a note too large', async () => {
+  const cases = [
+    [{ notes: [['2026-11-01 10-00-03.docx', ''], ...NOTES] }, WORD_REFUSED],
+    [{ notes: [] }, 'No note in the folder yet'],
+    [{ extra: { failList: 'Could not read the folder: Operation not permitted (os error 1)' } }, 'Could not read the folder: Operation not permitted (os error 1)'],
+    [{ extra: { failRead: 'The note is too large to bring back' } }, 'The note is too large to bring back']
+  ];
+  for (const [opts, words] of cases) {
+    const { p } = await comeBack(opts);
+    try {
+      p.type(PHRASE);
+      enter2(p);
+      await until(() => p.toast() === words, JSON.stringify(words));
+      assert.equal(await p.real(), PHRASE + '\n\n', 'the page is as typed: ' + words);
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+});
+
+test('Continue in the app: another folder chosen, or a phrase check replaced, while the check runs drops it', async () => {
+  for (const change of ['folder', 'check']) {
+    let release;
+    const { native, p } = await comeBack({ extra: { listGate: new Promise((r) => { release = r; }) } });
+    try {
+      p.type(PHRASE);
+      enter2(p);
+      await until(() => listed(native) === 1, 'the listing asked for');
+      if (change === 'folder') {
+        const check = stored(p, CHECK_KEY);
+        await chooseFolder(p);               // "Choose a different folder": the phrase check stays
+        assert.equal(stored(p, CHECK_KEY), check, 'the phrase check is untouched by another folder');
+        p.start();                           // the intro closes, so the peek can read the page
+      } else {
+        p.w.localStorage.setItem(CHECK_KEY, await recordFor('check', 'a different phrase here'));
+      }
+      release();
+      await p.settle(300);
+      assert.equal(await p.real(), PHRASE + '\n\n', change + ': nothing came back');
+      assert.equal(native.calls.some((c) => c[0] === 'readNote'), false, change + ': no note read');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+});
+
+test('Continue in the app: a Backspace back into the phrase line while the check runs drops it; the page keeps what was typed', async () => {
+  let release;
+  const { native, p } = await comeBack({ extra: { listGate: new Promise((r) => { release = r; }) } });
+  try {
+    p.type(PHRASE);
+    enter2(p);
+    await until(() => listed(native) === 1, 'the listing asked for');
+    p.press('Backspace');                    // the second Enter goes
+    p.type('x');
+    release();
+    await p.settle(300);
+    assert.equal(await p.real(), PHRASE + '\nx', 'nothing removed or added');
+    assert.equal(native.calls.some((c) => c[0] === 'readNote'), false, 'the note was not read');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: "Stop using the folder" while the phrase check is still being made leaves no check behind', async () => {
+  let slow = true;
+  const native = fakeNative();
+  const p = await loadPage({ native, onDerive: async () => { if (slow) await sleep(400); } });
+  try {
+    await chooseFolder(p);
+    p.$('#vault-phrase').value = PHRASE;
+    p.start();                               // the check's key derives for 400 ms
+    p.$('#btn-help').click();
+    p.$('#btn-folder-forget').click();
+    await until(() => p.$('#btn-folder-forget').hidden, 'the folder given up');
+    slow = false;
+    await p.settle(800);
+    assert.equal(stored(p, CHECK_KEY), null, 'the slower write never lands after the folder was given up');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: without a folder no phrase check is written, whatever the vault does', async () => {
+  const native = fakeNative();
+  const p = await loadPage({ native });
+  try {
+    await p.settle();
+    p.$('#vault-on').checked = true;
+    p.$('#vault-on').dispatchEvent(new p.w.Event('change', { bubbles: true }));
+    p.$('#vault-phrase').value = PHRASE;
+    p.start();
+    await until(() => p.d.body.classList.contains('vault-open'), 'the vault open');
+    await p.settle(500);
+    assert.equal(stored(p, CHECK_KEY), null, 'no folder, no phrase check');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: with a folder chosen the phrase field stays in use when the box is unticked and when another document changes the copy while the intro is open', async () => {
+  const { p } = await comeBack();
+  try {
+    p.$('#btn-help').click();
+    assert.equal(p.$('#vault-phrase').disabled, false, 'a folder remembered from the last run: in use at once');
+    p.$('#vault-on').checked = true;
+    p.$('#vault-on').dispatchEvent(new p.w.Event('change', { bubbles: true }));
+    p.$('#vault-on').checked = false;
+    p.$('#vault-on').dispatchEvent(new p.w.Event('change', { bubbles: true }));
+    assert.equal(p.$('#vault-phrase').disabled, false, 'unticked again: still in use for the folder');
+    const record = await recordFor('words', 'another phrase here');
+    p.w.localStorage.setItem('plainSight.vault', record);
+    p.w.dispatchEvent(new p.w.StorageEvent('storage', { key: 'plainSight.vault', oldValue: null, newValue: record }));
+    assert.equal(p.$('#vault-on').checked, true, 'the intro follows the other document\'s copy');
+    p.w.localStorage.removeItem('plainSight.vault');
+    p.w.dispatchEvent(new p.w.StorageEvent('storage', { key: 'plainSight.vault', oldValue: record, newValue: null }));
+    assert.equal(p.$('#vault-on').checked, false, 'and its delete');
+    assert.equal(p.$('#vault-phrase').disabled, false, 'the redraw keeps the field in use for the folder');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: a record that opens under the phrase to anything but the word "check" brings back nothing', async () => {
+  const { native, p } = await comeBack({ storage: { [CHECK_KEY]: await recordFor('not the check word', PHRASE) } });
+  try {
+    p.type(PHRASE);
+    enter2(p);
+    await p.settle(600);
+    assert.equal(listed(native), 0, 'the folder was never listed');
+    assert.equal(await p.real(), PHRASE + '\n\n');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: localStorage never holds the phrase, the typed text, a note\'s text or its name, and holds only the page\'s known keys (tests/smoke.mjs KNOWN_KEYS)', async () => {
+  const known = new Set([...readFileSync(path.join(ROOT, 'tests', 'smoke.mjs'), 'utf8').match(/const KNOWN_KEYS = new Set\(\[([^\]]*)\]\)/)[1].matchAll(/'([^']+)'/g)].map((m) => m[1]));
+  assert.ok(known.has(CHECK_KEY), 'smoke.mjs knows the phrase check');
+  const native = fakeNative({ notes: [['2026-11-01 08-00-00.txt', 'SENTINEL note text']] });
+  const p = await loadPage({ native });
+  const check = (step) => {
+    for (let i = 0; i < p.w.localStorage.length; i++) {
+      const k = p.w.localStorage.key(i);
+      const v = p.w.localStorage.getItem(k);
+      assert.ok(known.has(k), step + ': unknown key ' + k);
+      for (const needle of ['SENTINEL', 'correct', 'horse', 'battery', '2026-11-01 08-00-00', 'typed words']) assert.ok(!k.includes(needle) && !v.includes(needle), step + ': ' + k + ' holds ' + needle);
+    }
+  };
+  try {
+    await chooseFolder(p);
+    p.$('#vault-phrase').value = PHRASE;
+    p.start();
+    await until(() => stored(p, CHECK_KEY), 'the phrase check');
+    check('phrase set');
+    p.type('typed words');
+    p.$('#btn-save').click();
+    await until(() => /^Saved /.test(p.toast()), 'the Save');
+    check('saved');
+    p.press('Escape');
+    p.type(PHRASE);
+    enter2(p);
+    await until(() => native.calls.some((c) => c[0] === 'readNote'), 'the note read');
+    await p.settle();
+    check('brought back');
+    p.press('Escape');
+    check('Esc');
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
 });
