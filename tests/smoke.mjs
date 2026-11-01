@@ -5023,6 +5023,32 @@ test('Continue after a lock the device caused: the phrase on its own line opens 
   } finally { proto.setItem = setItem; p.close(); }
 });
 
+test('Continue after a lock the device caused, with every word on the page erased by Backspace: the phrase brings back the copy, never an empty page written over it (QA-G-02)', async () => {
+  const p = await loadPage();
+  const proto = p.w.Storage.prototype;
+  const setItem = proto.setItem;
+  try {
+    p.start();
+    p.type('first words');
+    await p.vaultOn('correct horse battery staple');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);  // the copy holds "first words"
+    let refuse = true;
+    proto.setItem = function (key, value) { if (refuse && key === 'plainSight.vault') throw new p.w.DOMException('The quota has been exceeded.', 'QuotaExceededError'); return setItem.call(this, key, value); };
+    p.type(' more');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);
+    assert.ok(!p.d.body.classList.contains('vault-open'), 'locked by the refusal');
+    for (let i = 0; i < 'first words more'.length; i++) p.press('Backspace');
+    assert.equal(await p.readReal(), '', 'the page is empty');
+    refuse = false;
+    p.type('correct horse battery staple');
+    p.continueKeys();
+    await sleep(900);
+    assert.ok(p.d.body.classList.contains('vault-open'));
+    assert.equal(await p.readReal(), 'first words', 'nothing on the page is newer than the copy, so the copy comes back');
+    assert.deepEqual(p.errors, []);
+  } finally { proto.setItem = setItem; p.close(); }
+});
+
 test('Continue replaces the chord: with a copy on the device, Ctrl+E, Ctrl+Enter, Cmd+E and Cmd+Enter go to the browser and record nothing', async () => {
   const c = countDerives();
   const q = await loadPage({ storage: await lockedCopyStorage(), failDerive: c.spy });
@@ -5097,6 +5123,7 @@ test('the intro teaches the new route in a browser: a line of its own, then Ente
     const box = p.$('#vault-on').closest('fieldset');
     assert.equal(box.querySelector('legend').textContent, 'Come back to your text (optional)');
     assert.equal(p.$('#vault-status').textContent, 'To come back to your text: type your phrase on the page on a line of its own, then press Enter twice. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.');
+    assert.equal(HTML.match(/<p class="note" id="vault-status">([^<]*)<\/p>/)[1], p.$('#vault-status').textContent, 'the note in the markup, shown before the script runs, says the same');
     assert.doesNotMatch(box.textContent, /press E\b|Ctrl\s*\+\s*E|Cmd\s*\+\s*E/, 'the chord is not taught');
     p.start();
     p.type('saved words');
