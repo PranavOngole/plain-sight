@@ -1842,6 +1842,41 @@ test('Continue in the app: an intro opened while the copy\'s key derives says th
   } finally { p.close(); }
 });
 
+test('Continue in the app: an Open that lands while the note is listed or read, from a blank page, drops the note: the page holds the opened text alone (DISH-C-80)', async () => {
+  for (const [gate, call] of [['listGate', 'listNotes'], ['readGate', 'readNote']]) {
+    let release;
+    const { native, p } = await comeBack({ extra: { [gate]: new Promise((r) => { release = r; }) } });
+    try {
+      p.type(PHRASE);
+      enter2(p);
+      await until(() => native.calls.some((c) => c[0] === call), gate + ': the app asked');
+      chooseFile(p, new p.w.File(['opened from a note'], 'other.txt', { type: 'text/plain' }));   // the page is blank: no question, the note replaces it
+      await until(() => p.toast() === 'Opened', gate + ': the Open landed');
+      release();
+      await p.settle(300);
+      assert.equal(await p.real(), 'opened from a note', gate + ': the folder note did not land in front of the opened text');
+      assert.deepEqual(p.errors, []);
+    } finally { p.close(); }
+  }
+});
+
+test('Continue in the app: a key typed and taken back while the note is on its way, back to exactly where the check stood, does not drop it (DISH-C-81)', async () => {
+  let release;
+  const { native, p } = await comeBack({ extra: { listGate: new Promise((r) => { release = r; }) } });
+  try {
+    p.type('before words\n' + PHRASE);
+    enter2(p);
+    await until(() => listed(native) === 1, 'the listing asked for');
+    p.type('a');
+    p.press('Backspace');                    // back to exactly the length the check watches
+    release();
+    await until(() => native.calls.some((c) => c[0] === 'readNote'), 'the note read');
+    await p.settle();
+    assert.equal(await p.real(), 'the newest note\nwith two linesbefore words\n', 'the note came back in front of the text typed before');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
 test('Continue in the app: a record that opens under the phrase to anything but the word "check" brings back nothing', async () => {
   const c = counter();
   const { native, p } = await comeBack({ onDerive: c.spy, storage: { [CHECK_KEY]: await recordFor('not the check word', PHRASE) } });

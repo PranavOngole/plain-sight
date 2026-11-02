@@ -831,7 +831,7 @@
   function backspace() {
     if (peeking) endPeek();
     if (real.length) setReal(real.slice(0, -lastCharLength(real)));   // one character, never half an emoji (QA-F-04)
-    if (real.length < continueAt) continueAt = 0;   // back into the phrase's line or before it: a Continue check in flight would no longer remove only what it should
+    if (real.length < continueAt) continueAt = -1;   // back into the phrase's line or before it: a Continue check in flight would no longer remove only what it should
     if (steps.length) undoStep();
     updateHeader();
     vaultScheduleSave();
@@ -1085,7 +1085,7 @@
   // Replaces the hidden buffer with text and rebuilds the screen to match.
   function replaceReal(text) {
     setReal(text);
-    continueAt = 0;           // a Continue check still in flight is dropped: the page it would change is gone
+    continueAt = -1;          // a Continue check still in flight is dropped: the page it would change is gone
     lockedTextSalts = null;   // Open, or Continue, replaced the page: it no longer holds the copy plus more (QA-G-02)
     rebuildCoverForLength(real.length);
     if (peeking) realEl.textContent = real;
@@ -1697,7 +1697,7 @@
   // must be the phrase alone. The key derives in the background: typing never
   // waits, and a check runs only when there is something to bring back.
   // ------------------------------------------------------------------
-  let continueAt = 0;        // the buffer's length when the latest check began; a Backspace that reaches below it, or any replace of the page, sets it to 0, which drops that check
+  let continueAt = -1;       // the buffer's length when the latest check began; a Backspace that reaches below it, or any replace of the page, sets it to -1, which drops that check: no length is -1, so even a check watching an empty page is dropped (DISH-C-80)
   let broughtBack = false;   // in the app, a folder note came back since the last wipe or load: the folder is not tried again until then
   let checkAttempt = 0;      // bumps on every write of the phrase check and when the folder is given up; a write still deriving its key is dropped
 

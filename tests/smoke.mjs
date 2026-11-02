@@ -4950,7 +4950,7 @@ test('Continue: nothing is tried while the vault is open, so a paragraph break c
   } finally { q.close(); }
 });
 
-test('Continue: a Backspace that reaches the phrase line drops the check; a Backspace over keys typed during the check does not; an Open during the check drops it', async () => {
+test('Continue: a Backspace that reaches the phrase line drops the check; a Backspace over keys typed during the check does not, even back to exactly where it began; an Open during the check drops it', async () => {
   const q = await loadPage({ storage: await lockedCopyStorage(), slowDerive: 300 });
   try {
     q.type('correct horse battery staple');
@@ -4968,6 +4968,15 @@ test('Continue: a Backspace that reaches the phrase line drops the check; a Back
     await sleep(800);
     assert.ok(q.d.body.classList.contains('vault-open'), 'not dropped');
     assert.equal(await q.readReal(), 'saved texta');
+    q.press('Escape');
+    await sleep(300);
+    q.type('correct horse battery staple');
+    q.continueKeys();
+    q.type('a');
+    q.press('Backspace');                    // back to exactly the length the check began at (DISH-C-81)
+    await sleep(800);
+    assert.ok(q.d.body.classList.contains('vault-open'), 'not dropped at exactly the length the check began at');
+    assert.equal(await q.readReal(), 'saved texta', 'the copy as the Esc above saved it, and nothing else');
     q.press('Escape');
     await sleep(300);
     q.type('correct horse battery staple');
