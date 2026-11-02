@@ -360,7 +360,7 @@ test('the content security policy is enforced twice: by the shell\'s header and 
   assert.ok(violations.every((v) => v.directive === 'connect-src'));
 });
 
-test('the device vault keeps its copy across a quit and a relaunch, and the phrase plus Cmd+E then Cmd+Return reopens it', async () => {
+test('the device vault keeps its copy across a quit and a relaunch, and the phrase on a line of its own, then Return twice, reopens it; Cmd+E is not the page\'s', async () => {
   await page.press('Escape');
   await page.openIntro();
   await js(`(() => { const box = document.getElementById('vault-on'); box.click(); document.getElementById('vault-phrase').value = ${JSON.stringify(PHRASE)}; return box.checked; })()`);
@@ -374,21 +374,33 @@ test('the device vault keeps its copy across a quit and a relaunch, and the phra
   await launch();
   assert.equal(await page.shown('intro'), false, 'no intro on a return');
   await page.type(PHRASE);
-  assert.equal(await page.press('e', { meta: true }), true, 'Cmd+E is taken while a vault exists');
-  assert.equal(await page.press('Enter', { meta: true }), true, 'Cmd+Return is taken');
+  assert.equal(await page.press('e', { meta: true }), false, 'Cmd+E is not taken by the page, copy or not');
+  assert.equal(await page.press('Enter'), true, 'the first Return is the page\'s, as always');
+  assert.equal(await page.press('Enter'), true, 'and the second');
   await until(() => js(`document.body.classList.contains('vault-open')`), 'the vault to reopen', 10000);
   assert.equal(await page.peekText(), 'kept in the vault');
   await picture('a06-vault-open.png');
 });
 
-test('a wrong phrase does nothing', async () => {
+test('a wrong phrase does nothing, nor the phrase inside a sentence; the old chord is no longer the page\'s', async () => {
+  for (const line of ['this is not the phrase at all', 'a sentence ending with ' + PHRASE]) {
+    await page.press('Escape');
+    await page.type(line);
+    await page.press('Enter');
+    await page.press('Enter');
+    await sleep(2500);
+    assert.equal(await js(`document.body.classList.contains('vault-open')`), false, JSON.stringify(line));
+    assert.equal(await page.peekText(), line + '\n\n', JSON.stringify(line) + ' changed nothing');
+  }
   await page.press('Escape');
-  await page.type('this is not the phrase at all');
-  await page.press('e', { meta: true });
-  await page.press('Enter', { meta: true });
+  await page.type(PHRASE);
+  for (const mods of [{ meta: true }, { ctrl: true }]) {
+    assert.equal(await page.press('e', mods), false, JSON.stringify(mods) + ' E goes to the app, not the page');
+    assert.equal(await page.press('Enter', mods), false, JSON.stringify(mods) + ' Return goes to the app, not the page');
+  }
   await sleep(2500);
-  assert.equal(await js(`document.body.classList.contains('vault-open')`), false);
-  assert.equal(await page.peekText(), 'this is not the phrase at all');
+  assert.equal(await js(`document.body.classList.contains('vault-open')`), false, 'the chord opens nothing');
+  assert.equal(await page.peekText(), PHRASE, 'and records nothing');
 });
 
 // ---------------------------------------------------------------------------
@@ -534,14 +546,99 @@ test('the folder is remembered across a relaunch, in the app\'s own data folder'
   assert.equal(folderFiles().length, count + 1);
 });
 
-test('the adapter cannot be replaced, gives no path, refuses any other file name, and the page can call nothing else', async () => {
+// ---------------------------------------------------------------------------
+// Continue (1 November 2026): the phrase on a line of its own, then Enter
+// twice. With a folder chosen and no copy kept, the newest note the app's
+// Save wrote into the folder comes back inside the page (folder.rs:
+// list_notes, read_note). The vault test above made a copy; the first test
+// here unticks it, and the last turns it on again for the quit tests below.
+// ---------------------------------------------------------------------------
+const WORD_REFUSED = 'The newest note is a Word file, which the app cannot read; save as .txt or .md to continue here';
+const unsavedNow = () => js('window.__plainSightUnsaved()');
+const folderArrived = () => until(async () => (await js(`document.getElementById('folder-status').textContent`)).includes('into the folder'), 'the remembered folder', 10000);
+test('Continue: with a folder and no copy, the phrase on a line of its own and Enter twice bring back the newest note after a relaunch, inside the page; the quit question then answers false, and true after the next key', async () => {
+  await page.press('Escape');
+  await page.openIntro();
+  await js(`(() => { const box = document.getElementById('vault-on'); if (box.checked) box.click(); document.getElementById('vault-phrase').value = ${JSON.stringify(PHRASE)}; return box.checked; })()`);
+  await page.start();
+  await until(() => js(`Boolean(localStorage.getItem('plainSight.continueCheck')) && !localStorage.getItem('plainSight.vault')`), 'the phrase check, and no copy', 10000);
+  await page.type('an older note for Continue');
+  await page.click('btn-save');
+  await page.waitToast(' in Notes for the test');
+  await page.press('Escape');
+  await page.type('the newest note for Continue');
+  const before = await page.toast();
+  await page.click('btn-save');
+  await until(async () => (await page.toast()) !== before && (await page.toast()).endsWith(' in Notes for the test'), 'the second Save');
+  const newest = (await page.toast()).replace(/^Saved /, '').replace(/ in Notes for the test$/, '');
+  note('the newest note: ' + newest);
+  await stopApp(app);
+  await launch({ PLAIN_SIGHT_E2E_PICK: '/nonexistent/should-not-be-used' });
+  await folderArrived();
+  await page.type(PHRASE);
+  assert.equal(await page.press('Enter'), true, 'the first Enter is the page\'s, as always');
+  assert.equal(await page.press('Enter'), true, 'and the second');
+  await until(async () => (await unsavedNow()) === false, 'the note to come back (the quit question answers false)', 10000);
+  assert.equal(await page.peekText(), 'the newest note for Continue', 'the newest note is back, and the phrase line and its two Enters are gone');
+  assert.equal(readFileSync(path.join(FOLDER, newest), 'utf8'), 'the newest note for Continue', 'the note on disk is untouched');
+  assert.equal(await js(`document.body.innerText.includes(${JSON.stringify(EVIDENCE)})`), false, 'no path on the page');
+  assert.equal(documentWindows().length, 1, 'nothing else opened');
+  await picture('k01-continue-note-back.png');
+  await page.type('x');
+  assert.equal(await unsavedNow(), true, 'a key later, text a quit would lose');
+});
+
+test('Continue: a Word file newest brings the app\'s words in a toast after the right phrase, and the phrase leaves the page all the same', async () => {
+  await page.press('Escape');
+  await page.openIntro();
+  await page.choose('folder-format', 'docx');
+  await page.start();
+  await page.type('a Word note');
+  await page.click('btn-save');
+  await page.waitToast('.docx in Notes for the test');
+  await page.press('Escape');
+  await page.type(PHRASE);
+  await page.press('Enter');
+  await page.press('Enter');
+  await page.waitToast(WORD_REFUSED);
+  assert.equal(await page.peekText(), '', 'nothing came back, and the right phrase and its two Enters are gone, so no later Save writes them');
+  assert.equal(await unsavedNow(), false, 'nothing is left that a quit would lose');
+  await page.press('Escape');
+  await page.openIntro();
+  await page.choose('folder-format', 'txt');
+  await page.start();
+});
+
+test('Continue: with the folder, a wrong phrase and the phrase inside a sentence bring back nothing', async () => {
+  for (const line of ['not the phrase for the folder', 'a sentence ending with ' + PHRASE]) {
+    await page.press('Escape');
+    await page.type(line);
+    await page.press('Enter');
+    await page.press('Enter');
+    await sleep(2500);
+    assert.equal(await page.peekText(), line + '\n\n', JSON.stringify(line) + ' changed nothing');
+  }
+});
+
+test('Continue: the vault turned on again from the same field keys the copy and the phrase check together', async () => {
+  await page.press('Escape');
+  await page.openIntro();
+  const check = await js(`localStorage.getItem('plainSight.continueCheck')`);
+  await js(`(() => { const box = document.getElementById('vault-on'); if (!box.checked) box.click(); document.getElementById('vault-phrase').value = ${JSON.stringify(PHRASE)}; return box.checked; })()`);
+  await page.start();
+  await until(() => js(`document.body.classList.contains('vault-open')`), 'the vault to open', 10000);
+  await until(async () => (await js(`localStorage.getItem('plainSight.continueCheck')`)) !== check, 'the phrase check written again', 10000);
+  await page.press('Escape');   // locked: the quit tests below open it with the phrase
+});
+
+test('the adapter cannot be replaced, gives no path, refuses any other file name, reads back only a note Save names, and the page can call nothing else', async () => {
   const facts = await js(`(() => {
     const n = window.PlainSightNative;
     let replaced = false; try { window.PlainSightNative = {}; replaced = window.PlainSightNative !== n; } catch (e) {}
     let deleted = false; try { deleted = delete window.PlainSightNative; } catch (e) {}
     return { frozen: Object.isFrozen(n), replaced, deleted, still: window.PlainSightNative === n, keys: Object.keys(n).sort() };
   })()`);
-  assert.deepEqual(facts, { frozen: true, replaced: false, deleted: false, still: true, keys: ['forgetFolder', 'onQuit', 'onUnsavedText', 'pickFolder', 'saveDownload', 'savedFolder', 'writeTextFile'] });
+  assert.deepEqual(facts, { frozen: true, replaced: false, deleted: false, still: true, keys: ['forgetFolder', 'listNotes', 'onQuit', 'onUnsavedText', 'pickFolder', 'readNote', 'saveDownload', 'savedFolder', 'writeTextFile'] });
   await js(`(() => { window.__r = {}; const I = window.__TAURI_INTERNALS__.invoke; const N = window.PlainSightNative;
     const note = (k, p) => p.then((v) => { window.__r[k] = 'ok ' + JSON.stringify(v); }, (e) => { window.__r[k] = 'refused ' + String(e); });
     note('saved', N.savedFolder());
@@ -555,6 +652,10 @@ test('the adapter cannot be replaced, gives no path, refuses any other file name
     note('downloadTraversal', N.saveDownload('../../outside.txt', 'x'));
     note('downloadSlash', N.saveDownload('untitled-draft-20261021-0000.sight/../../x', 'x'));
     note('downloadOtherName', N.saveDownload('notes.sh', 'x'));
+    note('readTraversal', N.readNote('../../outside.txt'));
+    note('readSlash', N.readNote('2026-10-21 00-00-00.txt/../../x.txt'));
+    note('readHosts', N.readNote('/etc/hosts'));
+    note('readOtherName', N.readNote('notes.txt'));
     const others = ['plugin:dialog|open', 'plugin:window|close', 'plugin:event|listen', 'plugin:fs|read_text_file', 'plugin:app|version', 'plugin:webview|print', 'plugin:menu|new', 'plugin:path|resolve_directory', 'plugin:image|new', 'plugin:resources|close', 'plugin:tray|new', 'plugin:shell|open', 'plugin:http|fetch', 'plugin:opener|open_url', 'plugin:updater|check', 'plugin:clipboard-manager|read_text', 'plugin:notification|notify', 'quit_ready'];
     others.forEach((cmd, i) => note('other' + i + ' ' + cmd, I(cmd, { path: '/etc/hosts', event: 'x', handler: 0, url: 'https://example.com' })));
     return true; })()`);
@@ -566,6 +667,7 @@ test('the adapter cannot be replaced, gives no path, refuses any other file name
   for (const k of ['extTraversal', 'extOther']) assert.match(r[k], /^refused .*only \.txt, \.md and \.docx/, k);
   assert.match(r.extMissing, /^refused /, 'a call without the text is refused');
   for (const k of ['downloadTraversal', 'downloadSlash', 'downloadOtherName', 'downloadDocm']) assert.match(r[k], /^refused .*not one Save makes/, k);
+  for (const k of ['readTraversal', 'readSlash', 'readHosts', 'readOtherName']) assert.equal(r[k], 'refused That is not a note the app wrote', k);
   const others = Object.keys(r).filter((k) => k.startsWith('other'));
   assert.equal(others.length, 18, 'eighteen other commands were tried');
   for (const k of others) assert.match(r[k], /^refused /, k + ' is refused');
@@ -742,13 +844,13 @@ for (const [how, quit] of QUIT_PATHS) {
     const words = 'typed just before ' + how;
     await page.press('Escape');
     await page.type(PHRASE);
-    await page.press('e', { meta: true });
-    await page.press('Enter', { meta: true });
+    await page.press('Enter');
+    await page.press('Enter');
     await until(() => js(`document.body.classList.contains('vault-open')`), 'the vault to open', 10000);
     await page.press('Escape');            // locked again, empty page
     await page.type(PHRASE);
-    await page.press('e', { meta: true });
-    await page.press('Enter', { meta: true });
+    await page.press('Enter');
+    await page.press('Enter');
     await until(() => js(`document.body.classList.contains('vault-open')`), 'the vault to open again', 10000);
     const before = await page.peekText();
     await page.type(words);               // no pause: the autosave has not run
@@ -762,8 +864,8 @@ for (const [how, quit] of QUIT_PATHS) {
     assert.ok(ms >= 600 && ms < 2500, how + ': ended after ' + ms + ' ms');
     await launch();
     await page.type(PHRASE);
-    await page.press('e', { meta: true });
-    await page.press('Enter', { meta: true });
+    await page.press('Enter');
+    await page.press('Enter');
     await until(() => js(`document.body.classList.contains('vault-open')`), 'the vault to reopen', 10000);
     assert.equal(await page.peekText(), before + words, 'the copy holds every keystroke typed before ' + how);
   });

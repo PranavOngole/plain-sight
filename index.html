@@ -306,13 +306,15 @@
     <p class="note"><span data-app="Closing the window or quitting erases the hidden text unless you keep a copy on this device.">Reloading or closing the tab erases the hidden text unless you keep a copy on this device.</span> The header belongs to the cover: its word count counts the text on screen, not your words.</p>
     <!-- Device vault: optional, off by default. The hidden text is saved in
          localStorage as AES-256-GCM ciphertext under a phrase; the key exists
-         only in memory while the vault is open. -->
+         only in memory while the vault is open. In the app, with a folder
+         chosen, the same phrase also brings back the newest note in the folder
+         (Continue): the field is then in use with the box ticked or not. -->
     <fieldset class="vault">
-      <legend><strong>Keep my text on this device</strong> (optional)</legend>
+      <legend><strong>Come back to your text</strong> (optional)</legend>
       <label class="check"><input type="checkbox" id="vault-on"> <span data-app="Save my text on this computer, encrypted, so I can come back to it later.">Save my text in this browser, encrypted, so I can come back to it later.</span></label>
       <label for="vault-phrase">Phrase, 12 characters or more</label>
-      <input id="vault-phrase" class="secret" type="password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore disabled>
-      <p class="note" id="vault-status">To come back to your text later: type your phrase on the blank page, then hold <kbd data-mod>Ctrl</kbd>, press <kbd>E</kbd>, then <kbd>Enter</kbd>. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.</p>
+      <input id="vault-phrase" class="secret" type="password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore aria-describedby="vault-status" disabled>
+      <p class="note" id="vault-status">To come back to your text: type your phrase on the page on a line of its own, then press Enter twice. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.</p>
     </fieldset>
     <!-- Save location. Where the browser offers folder access (Chrome, Edge:
          the File System Access API) Save can write a plain .txt, .md or .docx
@@ -344,7 +346,7 @@
         <label class="check"><input type="radio" name="folder-format" value="md"> <span><code>.md</code></span></label>
         <label class="check"><input type="radio" name="folder-format" value="docx"> <span><code>.docx</code></span></label>
       </div>
-      <p class="note" id="folder-note">With a folder chosen, Save writes a plain file named by the moment you press it, such as <code>2026-10-20 14-55-03.txt</code> (or <code>.md</code>, or <code>.docx</code> for Word), straight into that folder. Plain means anyone who can open the file can read it, and the computer indexes, previews and backs it up like any document; a synced folder uploads it. <span data-app="">Folder access exists in Chrome, Edge and other Chromium browsers; Brave needs a setting turned on; Safari and Firefox download instead.</span></p>
+      <p class="note" id="folder-note">With a folder chosen, Save writes a plain file named by the moment you press it, such as <code>2026-10-20 14-55-03.txt</code> (or <code>.md</code>, or <code>.docx</code> for Word), straight into that folder. Plain means anyone who can open the file can read it, and the computer indexes, previews and backs it up like any document; a synced folder uploads it. <span data-app="">Folder access exists in Chrome, Edge and other Chromium browsers; Brave needs a setting turned on; Safari and Firefox download instead.</span><span data-app=" The phrase stops a guess at the keyboard. It does not lock the files: anyone who can open the folder, or who presses Open and picks a file, can read a plain note."></span></p>
     </fieldset>
     <!-- Super Stealth (BR-46): how many quick clicks on the ? button bring this screen back. Kept in localStorage
          under plainSight.helpClicks only when the person changes it, so an untouched setting follows the default. -->
@@ -402,8 +404,8 @@
   // ------------------------------------------------------------------
   // Constants
   // ------------------------------------------------------------------
-  const UNLOCK_WINDOW_MS = 2000;       // Cmd+E (Ctrl+E) must be followed by Cmd+Enter within this
-  const VAULT_MIN_PHRASE = 12;         // shortest phrase the device vault accepts
+  const VAULT_MIN_PHRASE = 12;         // shortest phrase the device vault accepts, and the shortest line Continue tries
+  const CONTINUE_CHECK_TEXT = 'check'; // the plaintext of the phrase check: a fixed word, never the phrase or the text
   const HELP_CLICKS_DEFAULT = 1;       // Super Stealth: clicks on ? that open the intro when nothing is set; 1 while the site is in development, 3 from go-live (BR-46)
   const HELP_CLICK_WINDOW_MS = 600;    // a click more than this after the previous one starts a new series
   const VAULT_SAVE_DELAY_MS = 1500;    // autosave settles this long after the last keystroke
@@ -420,7 +422,8 @@
     folderVersion: 'plainSight.folderVersion',  // a timestamp that tells other tabs the save folder changed
     saveMode: 'plainSight.saveMode',   // 'sight' (encrypted download) or a plain format ('txt', 'md', 'docx') when no folder is in use
     folderFormat: 'plainSight.folderFormat',   // the plain format Save writes into a chosen folder: 'txt' (the default), 'md' or 'docx'
-    helpClicks: 'plainSight.helpClicks'   // Super Stealth: how many quick clicks on ? open the intro, '1' to '5'; absent means the default (BR-46)
+    helpClicks: 'plainSight.helpClicks',   // Super Stealth: how many quick clicks on ? open the intro, '1' to '5'; absent means the default (BR-46)
+    continueCheck: 'plainSight.continueCheck'   // in the app with a folder chosen: a record in the vault's shape that opens to the word "check" under the phrase (Continue); never the phrase or the text
   };
   const FILE_EXT = '.sight';
   // The plain formats Save can write, unencrypted: the text as it is, the text
@@ -828,6 +831,7 @@
   function backspace() {
     if (peeking) endPeek();
     if (real.length) setReal(real.slice(0, -lastCharLength(real)));   // one character, never half an emoji (QA-F-04)
+    if (real.length < continueAt) continueAt = -1;   // back into the phrase's line or before it: a Continue check in flight would no longer remove only what it should
     if (steps.length) undoStep();
     updateHeader();
     vaultScheduleSave();
@@ -841,6 +845,7 @@
     unlockAttempt += 1;
     wipeCount += 1;          // an Open still deriving its key is cancelled
     setupAttempt += 1;       // a vault setup or phrase change still deriving its key is dropped
+    checkAttempt += 1;       // and so is a phrase check still deriving its key, so the copy and the check never end under two phrases (DM-C-01)
     if (vaultOpen()) {
       const key = vaultKey;
       const salt = vaultSalt;
@@ -850,6 +855,7 @@
       vaultWrite(key, salt, iterations, text);
     }
     setReal('');
+    broughtBack = false;     // Continue may bring a folder note back again
     savedAt = null;          // in the app, the mark of the last Save or Open goes with the text (QA-G-31)
     lockedTextSalts = null;
     resetCover();
@@ -883,8 +889,8 @@
     if (key === 'Control' || key === 'Meta' || key === 'Shift' || key === 'Alt') return;   // a modifier on its own
 
     // Chords with Ctrl or Cmd (either works on every platform): peek, copy
-    // while peeking, and the two halves of the vault unlock. Every other chord,
-    // and anything with Alt, belongs to the browser and is not recorded.
+    // while peeking, and the intro. Every other chord, and anything with Alt,
+    // belongs to the browser and is not recorded.
     if (e.ctrlKey || e.metaKey || e.altKey) {
       // In the app, Cmd+C with no peek would reach the Edit menu's Copy, which
       // with nothing selected empties the clipboard (Mac_PS_006): the key is
@@ -895,14 +901,6 @@
       if (e.shiftKey && k === 'g') { e.preventDefault(); togglePeek(); return; }
       if (e.shiftKey && k === 'h') { e.preventDefault(); blurActive(); openIntro(); return; }   // Super Stealth: the intro comes back whatever the click setting (BR-46)
       if (!e.shiftKey && k === 'c' && peeking) { e.preventDefault(); copyReal(); return; }
-      if (!e.shiftKey && k === 'e' && vaultStored()) { e.preventDefault(); unlockArmedAt = Date.now(); return; }
-      if (!e.shiftKey && key === 'Enter' && unlockArmedAt && Date.now() - unlockArmedAt <= UNLOCK_WINDOW_MS) {
-        e.preventDefault();
-        unlockArmedAt = 0;
-        vaultTryUnlock();
-        return;
-      }
-      unlockArmedAt = 0;
       return;
     }
 
@@ -919,7 +917,8 @@
     // Shift+Tab stays with the browser so keyboard users can reach the buttons
     // (Safari skips buttons by default; there it is Option+Shift+Tab).
     if (key === 'Tab' && e.shiftKey) return;
-    if (key === 'Enter' || key === 'Tab') { e.preventDefault(); typeChar(key === 'Enter' ? '\n' : '\t'); return; }
+    if (key === 'Enter') { e.preventDefault(); typeChar('\n'); continueOnEnter(); return; }   // Continue: the phrase on a line of its own, then Enter twice
+    if (key === 'Tab') { e.preventDefault(); typeChar('\t'); return; }
     if (isOneCharacter(key)) { e.preventDefault(); typeChar(key); return; }
     // Arrows, function keys, Shift on its own and the rest go to the browser.
   }
@@ -1087,7 +1086,8 @@
   // Replaces the hidden buffer with text and rebuilds the screen to match.
   function replaceReal(text) {
     setReal(text);
-    lockedTextSalts = null;   // Open, or the chord, replaced the page: it no longer holds the copy plus more (QA-G-02)
+    continueAt = -1;          // a Continue check still in flight is dropped: the page it would change is gone
+    lockedTextSalts = null;   // Open, or Continue, replaced the page: it no longer holds the copy plus more (QA-G-02)
     rebuildCoverForLength(real.length);
     if (peeking) realEl.textContent = real;
     vaultScheduleSave();
@@ -1112,12 +1112,11 @@
   let vaultSalt = null;
   let vaultIterations = PBKDF2_ITERATIONS;   // the count the key in memory was derived with; every record this tab saves states it
   let vaultSaveTimer = null;
-  let unlockArmedAt = 0;
   let vaultGeneration = 0;   // bumps when the vault is turned off and when another tab changes the copy; a write started before that is dropped
   let setupAttempt = 0;      // bumps on every vault setup, on every lock, on Esc and on untick; a setup still deriving its key is dropped
   let setupPending = 0;      // the attempt number of a setup still deriving its key, 0 when none
   let drawnSalt = null;      // the salt of the copy the intro's vault box last showed, null for none; this tab's own saves update it
-  let unlockAttempt = 0;     // bumps on every chord and on Esc; an unlock started before that is dropped
+  let unlockAttempt = 0;     // bumps on every try to open a copy or bring a note back (Continue, the intro's phrase) and on Esc; a try started before that is dropped
   let wipeCount = 0;         // bumps on Esc; an Open still deriving its key is cancelled
   let lockedTextSalts = null; // the salts of the copies this tab's vault had when a refused write locked it while the text stayed on the page: the refused record's, and the one still on the device (a new phrase's first write refused leaves the earlier phrase's copy there, DM-230); that text is newer than both, so the intro's phrase reopens the vault around it (QA-G-02); null otherwise
   let writeChain = Promise.resolve();   // vault writes run one after another, in the order they were asked for
@@ -1191,7 +1190,6 @@
     vaultSalt = null;
     clearTimeout(vaultSaveTimer);
     vaultSaveTimer = null;
-    unlockArmedAt = 0;
     setupAttempt += 1;      // a setup or phrase change still deriving its key is dropped with the lock
     body.classList.remove('vault-open');
   }
@@ -1277,30 +1275,6 @@
     clearTimeout(vaultSaveTimer);
     vaultSaveTimer = setTimeout(() => { vaultSaveTimer = null; vaultSaveNow(); }, VAULT_SAVE_DELAY_MS);
   }
-  // The unlock chord. The hidden buffer holds the phrase the user just typed.
-  // Right phrase: the saved text replaces it and the vault is open. Wrong
-  // phrase, no vault, or a vault already open: nothing happens, on purpose.
-  async function vaultTryUnlock() {
-    const raw = storageGet(STORAGE.vault);   // the copy as it is now
-    const stored = vaultStored();
-    if (!stored || vaultOpen() || !real) return;
-    const attempt = ++unlockAttempt;
-    const phrase = real;
-    try {
-      const r = await decryptRecord(stored, phrase);
-      if (attempt !== unlockAttempt || vaultOpen()) return;   // Esc, a newer chord, or opened meanwhile
-      if (storageGet(STORAGE.vault) !== raw) return;          // deleted, re-keyed or rewritten meanwhile: an untick here, or another tab
-      vaultKey = r.key;
-      vaultSalt = r.salt;
-      vaultIterations = r.iterations;   // the copy keeps the count it was made with (the chord)
-      body.classList.add('vault-open');
-      const extra = real.startsWith(phrase) ? real.slice(phrase.length) : '';   // keys typed while the key derived
-      replaceReal(r.text + extra);
-    } catch (err) {
-      /* nothing happens, on purpose */
-    }
-  }
-
   // ------------------------------------------------------------------
   // Save folder: the File System Access API (Chrome, Edge). The chosen
   // folder's handle is kept in IndexedDB so it survives a reload; the
@@ -1312,7 +1286,8 @@
   const FOLDER_STORE = 'handles';
   // The desktop app (desktop/ in this repository) injects this adapter before
   // the page runs: the system folder picker, file writes into the chosen
-  // folder and a quit hook. No browser has it. The app keeps the folder's
+  // folder, the list and the text of the notes Save wrote there (Continue)
+  // and a quit hook. No browser has it. The app keeps the folder's
   // path; the page only sees a { name } object in place of a handle.
   const native = window.PlainSightNative || null;
   // In the app: the count of edits at which the page's text was what a file
@@ -1385,6 +1360,7 @@
   async function folderForget() {
     try { await folderStore(null); } catch (err) { toast('Could not stop using the folder'); return; }   // the app still keeps it
     folderHandle = null;
+    continueCheckForget();   // the phrase check goes with the folder
     folderAnnounce();
     folderRender();
     const kind = saveMode() === 'sight' ? 'an encrypted file' : 'a ' + PLAIN_FORMATS[saveMode()].label;
@@ -1439,6 +1415,11 @@
     await writable.close();
     return name;
   }
+  // Continue: the names of the notes the app's Save wrote into the folder, newest first, and one of them as text
+  // (folder.rs: list_notes, read_note). In a browser both answer null in this release, and Continue never tries the
+  // folder there: reading a folder through the directory handle is the web line's later work.
+  async function folderList() { return native ? native.listNotes() : null; }
+  async function folderRead(name) { return native ? native.readNote(name) : null; }
   function saveMode() { const m = storageGet(STORAGE.saveMode); return isPlainFormat(m) ? m : 'sight'; }
   function setSaveMode(mode) { storageSet(STORAGE.saveMode, isPlainFormat(mode) ? mode : ''); }
   function folderFormat() { const f = storageGet(STORAGE.folderFormat); return isPlainFormat(f) ? f : 'txt'; }
@@ -1537,6 +1518,10 @@
     }
   }
   function folderRender() {
+    if (cryptoAvailable()) {   // in the app the folder also uses the phrase field (Continue); the box and a phrase being typed stay as they are
+      vaultPhraseEl.disabled = !phraseFieldUsed();
+      vaultStatusRefresh(false);
+    }
     const help = folderHelpText();
     folderHelpEl.textContent = help;
     folderHelpEl.hidden = !help;
@@ -1704,6 +1689,149 @@
   }
 
   // ------------------------------------------------------------------
+  // Continue: the phrase on a line of its own, then Enter twice, brings the
+  // text back. A locked copy on this device comes first, in a browser and in
+  // the app; in the app, with a folder chosen and no copy kept, the newest
+  // note the app's Save wrote into the folder. A wrong phrase does nothing at
+  // all, with no message, and the two Enters stay the paragraph break they
+  // were. The page keeps nothing that says how long the phrase is, so the line
+  // must be the phrase alone. The key derives in the background: typing never
+  // waits, and a check runs only when there is something to bring back.
+  // ------------------------------------------------------------------
+  let continueAt = -1;       // the buffer's length when the latest check began; a Backspace that reaches below it, or any replace of the page, sets it to -1, which drops that check: no length is -1, so even a check watching an empty page is dropped (DISH-C-80)
+  let broughtBack = false;   // in the app, a folder note came back since the last wipe or load: the folder is not tried again until then
+  let checkAttempt = 0;      // bumps on every write of the phrase check and when the folder is given up; a write still deriving its key is dropped
+
+  function continueCheckStored() {
+    const raw = storageGet(STORAGE.continueCheck);
+    if (!raw) return null;
+    try {
+      const v = JSON.parse(raw);
+      return looksLikeCoverFile(v) ? v : null;
+    } catch (err) {
+      return null;
+    }
+  }
+  // What Continue would bring back now: 'vault' for a locked copy, 'folder' in the app with a folder chosen, a phrase
+  // check and nothing brought back since the last wipe or load, or null, and then a paragraph break costs nothing.
+  // With a copy on the device the folder is never tried, whatever the result: it is one phrase.
+  function continueSource() {
+    if (vaultOpen()) return null;
+    if (vaultStored()) return 'vault';
+    if (native && folderHandle && !broughtBack && continueCheckStored()) return 'folder';
+    return null;
+  }
+  // After an Enter on the writing screen (the intro's fields and the password dialog keep their keys, onKeyDown).
+  function continueOnEnter() {
+    if (!real.endsWith('\n\n')) return;
+    const head = real.slice(0, -2);
+    const line = head.slice(head.lastIndexOf('\n') + 1);
+    if (line.length < VAULT_MIN_PHRASE) return;
+    const source = continueSource();
+    if (source === 'vault') continueFromCopy(line, real.length);
+    else if (source === 'folder') continueFromFolder(line, real.length);
+  }
+  // The page once a check succeeds, without the phrase's line and its two Enters: what was typed before that line,
+  // then the keys typed while the check ran. The first `at` characters are as they were when it began, or the check
+  // was dropped (continueAt).
+  function continueRest(line, at) { return real.slice(0, at - line.length - 2) + real.slice(at); }
+
+  // The locked copy. Right phrase: the copy opens and its text goes in front of everything typed today (QA-G-02,
+  // DM-105), unless a lock the device caused left that text on the page, newer than the copy: then the page text stays
+  // as it is and becomes the copy at the next save, as on the intro (QA-G-02, DM-230). Esc, a newer try, a change to
+  // the page before the check, or the copy changed meanwhile: nothing happens, on purpose. The copy cannot open
+  // meanwhile without one of these: the intro's phrase is a newer try, and a new phrase needs the copy deleted first.
+  async function continueFromCopy(phrase, at) {
+    const raw = storageGet(STORAGE.vault);   // the copy as it is now
+    const stored = vaultStored();
+    const attempt = ++unlockAttempt;
+    continueAt = at;
+    try {
+      const r = await decryptRecord(stored, phrase);
+      if (attempt !== unlockAttempt || continueAt !== at) return;
+      if (storageGet(STORAGE.vault) !== raw) return;          // deleted, re-keyed or rewritten meanwhile: an untick here, or another tab
+      vaultKey = r.key;
+      vaultSalt = r.salt;
+      vaultIterations = r.iterations;   // the copy keeps the count it was made with
+      body.classList.add('vault-open');
+      if (!introEl.hidden) vaultStatusRefresh();   // an intro opened while the key derived says the vault is open; the box stays as the person left it
+      const rest = continueRest(phrase, at);
+      const kept = lockedTextSalts !== null && lockedTextSalts.has(bytesToBase64(r.salt)) && rest !== '';
+      replaceReal(kept ? rest : r.text + rest);
+    } catch (err) {
+      /* a wrong phrase: nothing happens, on purpose */
+    }
+  }
+
+  // In the app, with a folder chosen and no copy: the phrase opens the phrase check, then the app lists the notes its
+  // Save wrote into the folder, newest first, and reads the first (folder.rs: list_notes, read_note). The app hands
+  // over text, never a path, and opens nothing else: the note comes back inside this page. A wrong phrase: nothing.
+  // The right phrase leaves the page at once, its line and its two Enters with it, whatever happens next, so a later
+  // Save never writes the phrase and the quit question never counts it; the note then goes in front of whatever the
+  // page holds. A toast only when the note cannot come.
+  async function continueFromFolder(phrase, at) {
+    const raw = storageGet(STORAGE.continueCheck);
+    const check = continueCheckStored();
+    const handle = folderHandle;
+    const attempt = ++unlockAttempt;
+    const wipes = wipeCount;
+    let mark = at;             // the page's length that the check watches: continueAt drops it when the page goes below it or is replaced
+    continueAt = mark;
+    const current = () => attempt === unlockAttempt && continueAt === mark && folderHandle === handle && storageGet(STORAGE.continueCheck) === raw;   // Esc or a newer try, the page changed under the check, another folder, another phrase
+    let r;
+    try { r = await decryptRecord(check, phrase); } catch (err) { return; }   // a wrong phrase: nothing happens, on purpose
+    if (r.text !== CONTINUE_CHECK_TEXT || !current()) return;
+    replaceReal(continueRest(phrase, at));   // the right phrase: gone from the page now
+    mark = at - phrase.length - 2;           // from now on the check watches only what was typed before the phrase's line: keys typed during the check may go (DM-C-02)
+    continueAt = mark;
+    let text;
+    try {
+      const names = await folderList();
+      if (!current()) return;
+      if (!Array.isArray(names)) { toast('Could not read the folder'); return; }   // the app answers a list or a failure
+      if (names.length === 0) { toast('No note in the folder yet'); return; }
+      text = await folderRead(names[0]);
+    } catch (err) {
+      if (current()) toast(appReason(err) || 'Could not read the folder');
+      return;
+    }
+    if (!current()) return;
+    if (typeof text !== 'string') { toast('Could not read the folder'); return; }   // the app answers text or a failure; anything else brings nothing back
+    if (text === '') { toast('No note in the folder yet'); return; }   // an empty file is no note: the listing skips them, and one emptied after the listing is the same (QA-C-82)
+    const page = real;
+    replaceReal(text + page);
+    broughtBack = true;
+    if (page === '') markSaved(edits, wipes);   // the page holds exactly what the note holds, as after an Open; text typed around the phrase is on no disk, so a quit still asks
+  }
+  // The app's own words for a failure: a command's error reaches the page as a string (Tauri's invoke rejects with it:
+  // tauri 2.12.4, scripts/core.js and scripts/ipc-protocol.js). Anything else, such as a JavaScript error, is no words of
+  // the app's, and the caller shows its own.
+  function appReason(err) { return typeof err === 'string' ? err : ''; }
+
+  // The phrase check: a record in the vault's shape whose plaintext is the fixed word "check", under the key the
+  // phrase derives (the vault's own derivation and round count, a fresh salt and IV). It holds neither the phrase nor
+  // the text, so decrypting it with a line typed on the page is the whole check. Written in the app, with a folder
+  // chosen, on Start or Esc on the intro only, never while the phrase is typed.
+  async function continueCheckWrite(phrase) {
+    const attempt = ++checkAttempt;
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    let record;
+    try {
+      const key = await deriveKey(phrase, salt, PBKDF2_ITERATIONS);
+      record = await encryptRecord(key, salt, PBKDF2_ITERATIONS, CONTINUE_CHECK_TEXT);
+    } catch (err) {
+      if (attempt === checkAttempt) toast('The phrase could not be set up for the folder');
+      return;
+    }
+    if (attempt !== checkAttempt) return;   // a newer phrase, or the folder given up, meanwhile
+    if (!storageSet(STORAGE.continueCheck, JSON.stringify(record))) toast('The phrase could not be kept on this computer: storage is full or blocked');
+  }
+  function continueCheckForget() {
+    checkAttempt += 1;
+    storageSet(STORAGE.continueCheck, '');
+  }
+
+  // ------------------------------------------------------------------
   // Dialogs
   // ------------------------------------------------------------------
   let pwResolve = null;
@@ -1758,7 +1886,7 @@
     drawnSalt = record ? record.salt : null;
     const pending = vaultSetupPending();   // a setup still deriving its key shows as ticked, so an untick is deliberate
     vaultOnEl.checked = stored || vaultOpen() || pending;
-    vaultPhraseEl.disabled = !vaultOnEl.checked;
+    vaultPhraseEl.disabled = !phraseFieldUsed();
     vaultStatusEl.textContent = vaultStatusText(stored, pending);
   }
   // followCopy false: the status follows the state but the intro keeps following the copy it drew, for a
@@ -1770,14 +1898,18 @@
     vaultStatusEl.textContent = vaultStatusText(record !== null, vaultSetupPending());
   }
   function vaultStatusText(stored, pending) {
-    return vaultOpen()
+    const state = vaultOpen()
       ? 'The vault is open and saving as you type. Untick to delete the saved copy. Enter a new phrase to change it.'
       : pending
       ? 'Your phrase is being set up. Untick to cancel it.'
       : stored
-      ? 'A saved copy is on this device. Type your phrase on the blank page, then hold ' + modKeyName() + ', press E, then Enter. Untick to delete the copy.'
-      : 'To come back to your text later: type your phrase on the blank page, then hold ' + modKeyName() + ', press E, then Enter. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.';
+      ? 'A saved copy is on this device. Type your phrase on the page on a line of its own, then press Enter twice. Untick to delete the copy.'
+      : 'To come back to your text: type your phrase on the page on a line of its own, then press Enter twice. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.';
+    // In the app with a folder chosen, what the phrase brings back, in words true whether or not a copy is kept (Continue).
+    return native && folderHandle ? state + ' With a copy kept on this device, the phrase brings back the copy; with no copy kept, it brings back the newest note Plain Sight saved there. Type it in the field above and press Start to set it.' : state;
   }
+  // The phrase field is in use while the box is ticked, and in the app also while a folder is chosen (Continue).
+  function phraseFieldUsed() { return vaultOnEl.checked || Boolean(native && folderHandle); }
   // Super Stealth (BR-46): the ? button opens the intro after the set number of quick clicks, one by default while the
   // site is in development, so a stray click shows nothing. Enter or Space on the focused button fires the same clicks,
   // and Ctrl or Cmd plus Shift plus H opens the intro whatever the setting.
@@ -1846,11 +1978,22 @@
   let closingIntro = false;
   function startWriting() {
     if (closingIntro) return;
+    // In the app with a folder chosen the phrase also keys the phrase check (Continue), box ticked or not: a phrase
+    // too short is refused as the vault refuses it, so nobody believes a phrase was set that was not. An empty field
+    // leaves the check as it is.
+    const phrase = vaultPhraseEl.value;
+    const folderUsesPhrase = () => cryptoAvailable() && Boolean(native && folderHandle);
+    if (folderUsesPhrase() && phrase.length > 0 && phrase.length < VAULT_MIN_PHRASE) {
+      toast('Use a phrase of at least ' + VAULT_MIN_PHRASE + ' characters');
+      vaultPhraseEl.focus();
+      return;
+    }
+    const done = () => { if (folderUsesPhrase() && phrase.length >= VAULT_MIN_PHRASE) continueCheckWrite(phrase); closeIntro(); };
     const result = applyVaultChoice();
-    if (result === true) { closeIntro(); return; }
+    if (result === true) { done(); return; }
     if (result === false) return;
     closingIntro = true;
-    result.then((ok) => { if (ok) closeIntro(); }).finally(() => { closingIntro = false; });
+    result.then((ok) => { if (ok) done(); }).finally(() => { closingIntro = false; });
   }
   function closeIntro() {
     vaultPhraseEl.value = '';
@@ -1960,7 +2103,7 @@
     $('#btn-help').addEventListener('click', onHelpClick);
     helpClicksEl.addEventListener('change', () => { helpClicksDirty = true; });   // the person's own change: kept at Start, and another tab's change no longer redraws it
     $('#btn-start').addEventListener('click', startWriting);
-    vaultOnEl.addEventListener('change', () => { vaultPhraseEl.disabled = !vaultOnEl.checked; if (vaultOnEl.checked) vaultPhraseEl.focus(); });
+    vaultOnEl.addEventListener('change', () => { vaultPhraseEl.disabled = !phraseFieldUsed(); if (vaultOnEl.checked) vaultPhraseEl.focus(); });
     pwForm.addEventListener('submit', (e) => {
       e.preventDefault();
       if (pwConfirmOnly) { finishPassword(''); return; }

@@ -17,7 +17,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HTML = readFileSync(path.join(ROOT, 'index.html'), 'utf8');
-const UNLOCK_WINDOW_MS = 2000;
 const VAULT_SAVE_DELAY_MS = 1500;
 const TEN_MINUTES = 10 * 60 * 1000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -220,10 +219,11 @@ async function loadPage({ random = () => 1, storage = {}, inject = true, folder 
       page.peekChord();
       return text;
     },
-    unlockChord() {
-      const armed = page.press('e', { ctrlKey: true });
-      const fired = page.press('Enter', { ctrlKey: true });
-      return { armed, fired };
+    // Continue: the phrase on a line of its own, then Enter twice. Answers whether the page took each Enter.
+    continueKeys() {
+      const first = page.press('Enter');
+      const second = page.press('Enter');
+      return { first, second };
     },
     storageDump() {
       const ls = page.w.localStorage;
@@ -467,8 +467,8 @@ test('keys with Ctrl, Cmd or Alt held are not recorded and not prevented; isComp
     assert.equal(p.press('b', { metaKey: true }), false);
     assert.equal(p.press('b', { altKey: true }), false);
     assert.equal(p.press('s', { metaKey: true }), false, 'Cmd+S goes to the browser');
-    assert.equal(p.press('e', { ctrlKey: true }), false, 'Ctrl+E goes to the browser while no vault exists');
-    assert.equal(p.press('Enter', { ctrlKey: true }), false, 'Ctrl+Enter goes to the browser while no vault exists');
+    assert.equal(p.press('e', { ctrlKey: true }), false, 'Ctrl+E goes to the browser');
+    assert.equal(p.press('Enter', { ctrlKey: true }), false, 'Ctrl+Enter goes to the browser');
     assert.equal(p.press('a', { isComposing: true }), false);
     assert.equal(p.press('Enter', { isComposing: true }), false);
     assert.equal(p.coverText(), '');
@@ -1221,7 +1221,7 @@ test('device vault: on with a phrase, ciphertext only in localStorage, autosave,
   } finally { p.close(); }
 });
 
-test('device vault: the unlock chord restores the saved text on a later visit; a wrong phrase does nothing; untick deletes the copy', async () => {
+test('device vault: the phrase on a line of its own, then Enter twice, restores the saved text on a later visit; a wrong phrase does nothing; untick deletes the copy', async () => {
   const p = await loadPage();
   let storage;
   try {
@@ -1239,38 +1239,30 @@ test('device vault: the unlock chord restores the saved text on a later visit; a
     assert.equal(q.$('#intro').hidden, true);
     assert.ok(!q.d.body.classList.contains('vault-open'), 'locked on arrival');
     assert.equal(q.coverText(), '', 'nothing on screen');
-    // Wrong phrase: the chord does nothing and the typed phrase stays.
+    // Wrong phrase: nothing happens; the line and the two Enters stay as typed.
     q.type('wrong phrase typed here');
-    let r = q.unlockChord();
-    assert.equal(r.armed, true, 'Ctrl+E is handled while a vault exists');
-    assert.equal(r.fired, true, 'Ctrl+Enter completes the chord');
+    let r = q.continueKeys();
+    assert.equal(r.first, true, 'the first Enter is typed into the page as always');
+    assert.equal(r.second, true, 'and so is the second');
     await sleep(500);
     assert.ok(!q.d.body.classList.contains('vault-open'), 'still locked');
-    assert.equal(await q.readReal(), 'wrong phrase typed here', 'nothing changed');
+    assert.equal(await q.readReal(), 'wrong phrase typed here\n\n', 'nothing changed: the two Enters stay the paragraph break they were');
+    assert.equal(q.toast(), '', 'no message for a wrong phrase');
     q.press('Escape');
-    // Right phrase.
+    // Right phrase, on the blank page.
     q.type('correct horse battery staple');
-    q.unlockChord();
+    q.continueKeys();
     await sleep(500);
     assert.ok(q.d.body.classList.contains('vault-open'), 'open');
-    assert.equal(await q.readReal(), 'kept between visits', 'the saved text replaced the phrase');
+    assert.equal(await q.readReal(), 'kept between visits', 'the saved text replaced the phrase and its two Enters');
     assert.equal(q.coverLength(), 'kept between visits'.length, 'the cover was rebuilt to the saved length');
+    assert.equal(q.toast(), '', 'silent on success');
     for (const v of Object.values(q.storageDump())) assert.ok(!v.includes('kept between') && !v.includes('correct horse'));
-    // The chord does nothing while the vault is already open.
-    q.type(' plus');
-    q.unlockChord();
+    // Nothing is tried while the vault is open: the phrase on its own line stays text.
+    q.type(' plus\ncorrect horse battery staple');
+    q.continueKeys();
     await sleep(300);
-    assert.equal(await q.readReal(), 'kept between visits plus');
-    // Enter outside the window does not fire.
-    q.press('Escape');
-    q.type('correct horse battery staple');
-    q.press('e', { ctrlKey: true });
-    const realNow = q.w.Date.now();
-    q.w.Date.now = () => realNow + UNLOCK_WINDOW_MS + 1000;
-    assert.equal(q.press('Enter', { ctrlKey: true }), false, 'a late Enter is the browser\'s');
-    await sleep(300);
-    assert.ok(!q.d.body.classList.contains('vault-open'));
-    q.w.Date.now = () => realNow;
+    assert.equal(await q.readReal(), 'kept between visits plus\ncorrect horse battery staple\n\n');
     // Untick in the intro: the copy is deleted.
     q.$('#btn-help').click();
     assert.equal(q.$('#vault-on').checked, true, 'the intro shows the vault as on');
@@ -1279,7 +1271,12 @@ test('device vault: the unlock chord restores the saved text on a later visit; a
     q.start();
     assert.equal(q.storageDump()['plainSight.vault'], undefined, 'copy deleted');
     assert.equal(q.toast(), 'Saved copy deleted from this device');
-    assert.equal(q.press('e', { ctrlKey: true }), false, 'Ctrl+E is the browser\'s again');
+    q.press('Escape');
+    q.type('correct horse battery staple');
+    q.continueKeys();
+    await sleep(400);
+    assert.ok(!q.d.body.classList.contains('vault-open'), 'no copy, nothing to bring back');
+    assert.equal(await q.readReal(), 'correct horse battery staple\n\n');
     assert.deepEqual(q.errors, []);
   } finally { q.close(); }
 });
@@ -1357,10 +1354,16 @@ test('device vault: a phrase entered while the copy is locked opens it (text typ
   } finally { q.close(); }
 });
 
-test('device vault: an unreadable record can be deleted from the intro, and Ctrl+E is left to the browser while the record is unreadable', async () => {
-  const p = await loadPage({ storage: { 'plainSight.vault': '{not json', 'plainSight.introSeen': '1' } });
+test('device vault: an unreadable record can be deleted from the intro, and the phrase then Enter twice does nothing while the record is unreadable', async () => {
+  let derives = 0;
+  const p = await loadPage({ storage: { 'plainSight.vault': '{not json', 'plainSight.introSeen': '1' }, failDerive: () => { derives += 1; return false; } });
   try {
-    assert.equal(p.press('e', { ctrlKey: true }), false, 'an unreadable record does not arm the chord');
+    p.type('correct horse battery staple');
+    p.continueKeys();
+    await sleep(300);
+    assert.equal(derives, 0, 'an unreadable record is nothing to bring back: no key is derived');
+    assert.equal(await p.readReal(), 'correct horse battery staple\n\n', 'the line and the Enters stay text');
+    p.press('Escape');
     p.$('#btn-help').click();
     assert.equal(p.$('#vault-on').checked, false, 'unreadable: shown as off');
     p.$('#vault-on').checked = false;
@@ -1370,7 +1373,7 @@ test('device vault: an unreadable record can be deleted from the intro, and Ctrl
   } finally { p.close(); }
 });
 
-test('device vault: Esc cancels an unlock in flight; keys typed during the derivation are kept after the saved text; another chord resets the armed state', async () => {
+test('device vault: Esc cancels a check in flight; keys typed during the derivation are kept after the saved text', async () => {
   const p = await loadPage();
   let storage;
   try {
@@ -1382,29 +1385,20 @@ test('device vault: Esc cancels an unlock in flight; keys typed during the deriv
   } finally { p.close(); }
   const q = await loadPage({ storage });
   try {
-    // Esc right after the chord: the unlock never lands.
+    // Esc right after the two Enters: the check never lands.
     q.type('correct horse battery staple');
-    q.unlockChord();
+    q.continueKeys();
     q.press('Escape');
     await sleep(700);
     assert.ok(!q.d.body.classList.contains('vault-open'), 'cancelled');
     assert.equal(await q.readReal(), '', 'buffer stays empty');
     // Keys typed while the key derives are kept after the saved text.
     q.type('correct horse battery staple');
-    q.unlockChord();
+    q.continueKeys();
     q.type('ab');
     await sleep(700);
     assert.ok(q.d.body.classList.contains('vault-open'));
     assert.equal(await q.readReal(), 'saved textab');
-    q.press('Escape');
-    await sleep(300);
-    // Ctrl+E, then another chord, then Ctrl+Enter: not an unlock.
-    q.type('correct horse battery staple');
-    assert.equal(q.press('e', { ctrlKey: true }), true);
-    assert.equal(q.press('b', { ctrlKey: true }), false, 'another chord goes to the browser');
-    assert.equal(q.press('Enter', { ctrlKey: true }), false, 'and the armed state is gone');
-    await sleep(400);
-    assert.ok(!q.d.body.classList.contains('vault-open'), 'not unlocked');
     assert.deepEqual(q.errors, []);
   } finally { q.close(); }
 });
@@ -1677,14 +1671,14 @@ test('Esc while a vault write is still encrypting never loses the save: new vaul
     assert.ok(!p.d.body.classList.contains('vault-open'));
     assert.equal(await decryptVault(JSON.parse(p.storageDump()['plainSight.vault']), phrase), 'first save', 'the copy exists and holds the text');
     // Double Esc: the first Esc's write is encrypting when the second lands.
-    p.type(phrase); p.unlockChord(); await sleep(700);
+    p.type(phrase); p.continueKeys(); await sleep(700);
     assert.ok(p.d.body.classList.contains('vault-open'), 'reopened');
     p.type(' second');
     p.press('Escape'); p.press('Escape');
     await sleep(1200);
     assert.equal(await decryptVault(JSON.parse(p.storageDump()['plainSight.vault']), phrase), 'first save second', 'nothing dropped');
     // Phrase change: Esc while the re-keyed copy is being written.
-    p.type(phrase); p.unlockChord(); await sleep(700);
+    p.type(phrase); p.continueKeys(); await sleep(700);
     p.type(' third');
     p.$('#btn-help').click();
     p.$('#vault-phrase').value = 'a brand new phrase here';
@@ -2189,7 +2183,7 @@ test('after another tab deletes the copy, the intro no longer shows a setup as p
     assert.ok(!p.d.body.classList.contains('vault-open'), 'this tab locked');
     p.$('#btn-help').click();
     assert.equal(p.$('#vault-on').checked, false, 'nothing stored, nothing open, nothing pending');
-    assert.match(p.$('#vault-status').textContent, /To come back to your text later/);
+    assert.match(p.$('#vault-status').textContent, /^To come back to your text: type your phrase on the page on a line of its own/);
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
 });
@@ -2205,11 +2199,11 @@ async function lockedCopyStorage() {
   } finally { p.close(); }
 }
 
-test('device vault: an untick during an unlock in flight drops the unlock, so nothing reopens on a deleted copy', async () => {
+test('device vault: an untick during a check in flight drops the check, so nothing reopens on a deleted copy', async () => {
   const q = await loadPage({ storage: await lockedCopyStorage() });
   try {
     q.type('correct horse battery staple');
-    q.unlockChord();                         // the key derives in the background
+    q.continueKeys();                         // the key derives in the background
     q.$('#btn-help').click();
     q.$('#vault-on').checked = false;
     q.start();                               // untick: the copy is deleted at once
@@ -2217,23 +2211,23 @@ test('device vault: an untick during an unlock in flight drops the unlock, so no
     await sleep(900);
     assert.ok(!q.d.body.classList.contains('vault-open'), 'nothing reopened');
     assert.equal(q.storageDump()['plainSight.vault'] || '', '', 'no copy written back');
-    assert.equal(await q.readReal(), 'correct horse battery staple', 'the typed phrase stays as text');
+    assert.equal(await q.readReal(), 'correct horse battery staple\n\n', 'the typed phrase and its two Enters stay as text');
     assert.deepEqual(q.errors, []);
   } finally { q.close(); }
 });
 
-test('device vault: a copy deleted by another tab during an unlock in flight drops the unlock', async () => {
+test('device vault: a copy deleted by another tab during a check in flight drops the check', async () => {
   const q = await loadPage({ storage: await lockedCopyStorage() });
   try {
     q.type('correct horse battery staple');
-    q.unlockChord();
+    q.continueKeys();
     const original = q.storageDump()['plainSight.vault'];
     q.w.localStorage.removeItem('plainSight.vault');
     q.w.dispatchEvent(new q.w.StorageEvent('storage', { key: 'plainSight.vault', oldValue: original, newValue: null }));
     await sleep(900);
     assert.ok(!q.d.body.classList.contains('vault-open'), 'nothing reopened');
     assert.equal(q.storageDump()['plainSight.vault'], undefined, 'no copy written back');
-    assert.equal(await q.readReal(), 'correct horse battery staple');
+    assert.equal(await q.readReal(), 'correct horse battery staple\n\n');
     assert.deepEqual(q.errors, []);
   } finally { q.close(); }
 });
@@ -2271,7 +2265,7 @@ test('device vault: a failed key derivation drops the setup, says so, and leaves
     assert.equal(p.toast(), 'The vault could not be set up');
     p.$('#btn-help').click();
     assert.equal(p.$('#vault-on').checked, false, 'nothing shown as pending');
-    assert.match(p.$('#vault-status').textContent, /To come back to your text later/);
+    assert.match(p.$('#vault-status').textContent, /^To come back to your text: type your phrase on the page on a line of its own/);
     p.$('#vault-on').checked = true;              // the next try works
     p.$('#vault-on').dispatchEvent(new p.w.Event('change', { bubbles: true }));
     p.$('#vault-phrase').value = 'correct horse battery staple';
@@ -2345,11 +2339,11 @@ test('device vault: a phrase change still deriving is dropped when another tab d
   } finally { p.close(); }
 });
 
-test('device vault: a copy rewritten by another tab under the same salt during an unlock drops the unlock', async () => {
+test('device vault: a copy rewritten by another tab under the same salt during a check drops the check', async () => {
   const q = await loadPage({ storage: await lockedCopyStorage() });
   try {
     q.type('correct horse battery staple');
-    q.unlockChord();
+    q.continueKeys();
     const original = q.storageDump()['plainSight.vault'];
     const other = JSON.parse(original);
     other.data = other.data.slice(0, -4) + (other.data.endsWith('AAAA') ? 'BBBB' : 'AAAA');   // same salt, other ciphertext
@@ -2359,7 +2353,7 @@ test('device vault: a copy rewritten by another tab under the same salt during a
     await sleep(900);
     assert.ok(!q.d.body.classList.contains('vault-open'), 'not opened on a copy that changed');
     assert.equal(q.storageDump()['plainSight.vault'], rewritten, 'the other copy is untouched');
-    assert.equal(await q.readReal(), 'correct horse battery staple');
+    assert.equal(await q.readReal(), 'correct horse battery staple\n\n');
     assert.deepEqual(q.errors, []);
   } finally { q.close(); }
 });
@@ -2377,7 +2371,7 @@ test('device vault: a setup dropped by Esc is not shown as pending', async () =>
     p.press('Escape');                       // wipes the page and drops the setup
     p.$('#btn-help').click();
     assert.equal(p.$('#vault-on').checked, false, 'nothing pending');
-    assert.match(p.$('#vault-status').textContent, /To come back to your text later/);
+    assert.match(p.$('#vault-status').textContent, /^To come back to your text: type your phrase on the page on a line of its own/);
     p.start();
     await sleep(900);
     assert.ok(!p.d.body.classList.contains('vault-open'));
@@ -2487,7 +2481,7 @@ test('device vault: another tab clearing this site\'s storage locks this tab at 
     assert.equal(await p.readReal(), 'cleared away', 'the text on the page stays');
     p.$('#btn-help').click();
     assert.equal(p.$('#vault-on').checked, false);
-    assert.match(p.$('#vault-status').textContent, /To come back to your text later/);
+    assert.match(p.$('#vault-status').textContent, /^To come back to your text: type your phrase on the page on a line of its own/);
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
 });
@@ -2532,7 +2526,7 @@ test('device vault: an open intro on a locked tab follows the copy: a same-salt 
     q.w.localStorage.removeItem('plainSight.vault');
     q.w.dispatchEvent(new q.w.StorageEvent('storage', { key: 'plainSight.vault', oldValue: rewritten, newValue: null }));
     assert.equal(q.$('#vault-on').checked, false, 'the box follows the deleted copy');
-    assert.match(q.$('#vault-status').textContent, /To come back to your text later/);
+    assert.match(q.$('#vault-status').textContent, /^To come back to your text: type your phrase on the page on a line of its own/);
     assert.deepEqual(q.errors, []);
   } finally { q.close(); }
 });
@@ -2653,7 +2647,7 @@ test('device vault: an open intro showing a saved copy unticks at once when anot
     q.w.localStorage.clear();
     q.w.dispatchEvent(new q.w.StorageEvent('storage', { key: null, oldValue: null, newValue: null }));
     assert.equal(q.$('#vault-on').checked, false);
-    assert.match(q.$('#vault-status').textContent, /To come back to your text later/);
+    assert.match(q.$('#vault-status').textContent, /^To come back to your text: type your phrase on the page on a line of its own/);
     assert.deepEqual(q.errors, []);
   } finally { q.close(); }
 });
@@ -2714,7 +2708,7 @@ test('device vault: an intro reopened while this tab\'s own first save is in fli
     assert.equal(p.toast(), 'The saved copy changed in another tab; this tab is locked');
     assert.ok(!p.d.body.classList.contains('vault-open'), 'locked');
     assert.equal(p.$('#vault-on').checked, false, 'the intro follows the deleted copy');
-    assert.match(p.$('#vault-status').textContent, /To come back to your text later/);
+    assert.match(p.$('#vault-status').textContent, /^To come back to your text: type your phrase on the page on a line of its own/);
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
 });
@@ -2845,7 +2839,7 @@ test('device vault: an open intro follows the silent lock when the open vault\'s
     p.d.dispatchEvent(new p.w.Event('visibilitychange'));
     assert.ok(!p.d.body.classList.contains('vault-open'), 'locked');
     assert.equal(p.storageDump()['plainSight.vault'], undefined, 'nothing written');
-    assert.match(p.$('#vault-status').textContent, /To come back to your text later/, 'the status follows the lock and the missing copy');
+    assert.match(p.$('#vault-status').textContent, /^To come back to your text: type your phrase on the page on a line of its own/, 'the status follows the lock and the missing copy');
     assert.equal(p.$('#vault-on').checked, true, 'the box keeps the person\'s choice until Start');
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
@@ -3078,7 +3072,7 @@ test('device vault: a copy made with another iteration count keeps that count th
   const p = await loadPage({ storage: { 'plainSight.vault': record, 'plainSight.introSeen': '1' } });
   try {
     p.type('correct horse battery staple');
-    p.unlockChord();
+    p.continueKeys();
     await sleep(900);
     assert.ok(p.d.body.classList.contains('vault-open'), 'opened at the record\'s own count');
     p.type(' and new');
@@ -3089,7 +3083,7 @@ test('device vault: a copy made with another iteration count keeps that count th
     const q = await loadPage({ storage: p.storageDump() });   // the next visit
     try {
       q.type('correct horse battery staple');
-      q.unlockChord();
+      q.continueKeys();
       await sleep(900);
       assert.ok(q.d.body.classList.contains('vault-open'), 'the next visit opens the copy');
       assert.equal(await q.readReal(), 'old words and new');
@@ -3322,7 +3316,7 @@ test('device vault: a phrase change of a copy made at another count saves under 
   const p = await loadPage({ storage: { 'plainSight.vault': record, 'plainSight.introSeen': '1' } });
   try {
     p.type('correct horse battery staple');
-    p.unlockChord();
+    p.continueKeys();
     await sleep(900);
     assert.ok(p.d.body.classList.contains('vault-open'));
     p.$('#btn-help').click();
@@ -3341,7 +3335,7 @@ test('device vault: the save at Esc states the count the key was made with, for 
   const p = await loadPage({ storage: { 'plainSight.vault': record, 'plainSight.introSeen': '1' } });
   try {
     p.type('correct horse battery staple');
-    p.unlockChord();
+    p.continueKeys();
     await sleep(900);
     assert.ok(p.d.body.classList.contains('vault-open'));
     p.type(' then Esc');
@@ -3578,7 +3572,7 @@ test('device vault: a save the device refuses locks the vault and says so, inste
     assert.equal(p.storageDump()['plainSight.vault'], undefined, 'no copy');
     p.$('#btn-help').click();
     assert.equal(p.$('#vault-on').checked, false, 'nothing stored, nothing open, nothing pending');
-    assert.match(p.$('#vault-status').textContent, /To come back to your text later/);
+    assert.match(p.$('#vault-status').textContent, /^To come back to your text: type your phrase on the page on a line of its own/);
     p.start();
     assert.equal(await p.readReal(), 'kept words and more xfresh words', 'the text on the page was never touched');
     assert.deepEqual(p.errors, []);
@@ -3628,7 +3622,7 @@ test('device vault: a note larger than the device will store, opened with the va
     const q = await loadPage({ storage: p.storageDump(), storageQuota: 6000 });
     try {
       q.type('correct horse battery staple');
-      q.unlockChord();
+      q.continueKeys();
       await sleep(500);
       assert.ok(q.d.body.classList.contains('vault-open'));
       assert.equal(await q.readReal(), 'old words');
@@ -4105,7 +4099,7 @@ test('device vault: after a lock because the device refused the copy, the phrase
   } finally { proto.setItem = setItem; p.close(); }
 });
 
-test('device vault: the intro path without such a lock is unchanged: Esc then the phrase on the intro puts the saved text before what was typed since; and after a lock the device caused, Esc then the phrase and the chord on the blank page bring back the earlier copy without the unsaved tail (QA-G-02, V4)', async () => {
+test('device vault: the intro path without such a lock is unchanged: Esc then the phrase on the intro puts the saved text before what was typed since; and after a lock the device caused, Esc then the phrase and Enter twice on the blank page bring back the earlier copy without the unsaved tail (QA-G-02, V4)', async () => {
   const p = await loadPage();
   const proto = p.w.Storage.prototype;
   const setItem = proto.setItem;
@@ -4135,10 +4129,10 @@ test('device vault: the intro path without such a lock is unchanged: Esc then th
     assert.equal(await p.readReal(), '', 'Esc wipes the page, the unsaved tail with it');
     refuse = false;
     p.type('correct horse battery staple');
-    p.unlockChord();
+    p.continueKeys();
     await sleep(900);
     assert.ok(p.d.body.classList.contains('vault-open'));
-    assert.equal(await p.readReal(), 'saved part. typed before ', 'the chord brings back the earlier copy only');
+    assert.equal(await p.readReal(), 'saved part. typed before ', 'the phrase and Enter twice bring back the earlier copy only');
     assert.deepEqual(p.errors, []);
   } finally { proto.setItem = setItem; p.close(); }
 });
@@ -4310,7 +4304,7 @@ test('the masked text fields keep the page\'s styling: where the browser masks t
 const U = (n) => String.fromCharCode(n);
 const C = (n) => String.fromCodePoint(n);
 const CR = U(13), LF = U(10), TAB = U(9);
-const KNOWN_KEYS = new Set(['plainSight.introSeen', 'plainSight.customText', 'plainSight.cover', 'plainSight.vault', 'plainSight.folderVersion', 'plainSight.saveMode', 'plainSight.folderFormat']);
+const KNOWN_KEYS = new Set(['plainSight.introSeen', 'plainSight.customText', 'plainSight.cover', 'plainSight.vault', 'plainSight.folderVersion', 'plainSight.saveMode', 'plainSight.folderFormat', 'plainSight.continueCheck']);
 async function waitFor(fn, ms = 6000, step = 20) {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) { const v = await fn(); if (v) return v; await sleep(step); }
@@ -4460,7 +4454,7 @@ test('AT-10 (expected PASS per the README; written to fail on a duplication) aft
   } finally { p.close(); }
 });
 
-test('AT-12 (expected PASS) honesty: through a session that uses every new surface (four download formats, three folder formats, Open of a note and of a .sight, the vault on, a lock, an unlock, an untick), localStorage never holds the typed text, the note, its name, a password or the phrase, and holds no key outside the page\'s seven', async () => {
+test('AT-12 (expected PASS) honesty: through a session that uses every new surface (four download formats, three folder formats, Open of a note and of a .sight, the vault on, a lock, an unlock, an untick), localStorage never holds the typed text, the note, its name, a password or the phrase, and holds no key outside the page\'s known keys', async () => {
   const folder = fakeFolder('Notes');
   const p = await loadPage({ folder });
   const needles = ['SENTINEL', 'alpha-typed', 'beta-note', 'gamma-name', 'delta-password', 'epsilon-phrase'];
@@ -4493,9 +4487,9 @@ test('AT-12 (expected PASS) honesty: through a session that uses every new surfa
     await sleep(300);
     check('Esc lock');
     p.type('SENTINEL epsilon-phrase');
-    p.unlockChord();
+    p.continueKeys();
     await waitFor(() => p.d.body.classList.contains('vault-open'), 4000);
-    check('chord unlock');
+    check('Continue');
     p.$('#btn-help').click();
     p.$('#vault-on').checked = false;
     p.$('#vault-on').dispatchEvent(new p.w.Event('change', { bubbles: true }));
@@ -4533,7 +4527,7 @@ test('a leading U+FEFF in the hidden text survives a .sight round trip and the v
     p.press('Escape');
     await sleep(300);
     p.type('a phrase for the vault');
-    p.unlockChord();
+    p.continueKeys();
     await waitFor(() => p.d.body.classList.contains('vault-open'), 4000);
     const unlocked = await p.readReal();
     assert.equal(opened, before, 'a .sight gives back exactly what was saved');
@@ -4590,7 +4584,7 @@ test('honesty: no network API is called through a session that uses every new su
     p.press('Escape');
     await sleep(300);
     p.type('SENTINEL phrase words');
-    p.unlockChord();
+    p.continueKeys();
     await waitFor(() => p.d.body.classList.contains('vault-open'), 4000);
     assert.deepEqual(p.netCalls, [], 'no network API was called');
     assert.deepEqual(p.errors, []);
@@ -4879,6 +4873,304 @@ test('the masked fields keep the look of the password fields they replaced: the 
     const css = [...p.d.querySelectorAll('style')].map((s) => s.textContent).join('\n');
     assert.match(css, /\.card input\.secret \{\s*width: 100%; display: block; font: 16px var\(--sans\); padding: 8px 10px;\s*border: 1px solid var\(--rule\); border-radius: 6px;\s*\}/, 'the field rule: full width, the page font, its padding and border');
     assert.match(css, /\.vault input\.secret:disabled \{ background: #f6f5f2; color: var\(--muted\); \}/, 'the disabled rule: the page\'s disabled background and muted text');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+// ---------------------------------------------------------------------------
+// Continue (1 November 2026, on the App Store candidate): the phrase on a line of its own, then Enter twice, brings the
+// text back; the Ctrl+E then Enter chord is gone. In a browser only the copy on this device comes back (the folder half
+// is the Mac app's in this release: desktop/tests/native.mjs). lockedCopyStorage() above holds "saved text" under
+// "correct horse battery staple".
+// ---------------------------------------------------------------------------
+const countDerives = () => { const c = { n: 0 }; c.spy = () => { c.n += 1; return false; }; return c; };
+
+test('Continue: mid-document the phrase on a line of its own puts the saved text in front of everything typed today, and only the phrase line and its two Enters go; the phrase inside a sentence does nothing', async () => {
+  const q = await loadPage({ storage: await lockedCopyStorage() });
+  try {
+    q.type('a sentence that ends with correct horse battery staple');
+    q.continueKeys();
+    await sleep(700);
+    assert.ok(!q.d.body.classList.contains('vault-open'), 'inside a sentence the line is not the phrase: nothing opens');
+    assert.equal(await q.readReal(), 'a sentence that ends with correct horse battery staple\n\n', 'nothing changed');
+    q.type('today words\ncorrect horse battery staple');
+    q.continueKeys();
+    await sleep(700);
+    assert.ok(q.d.body.classList.contains('vault-open'), 'the phrase on its own line opens the copy');
+    const expected = 'saved texta sentence that ends with correct horse battery staple\n\ntoday words\n';
+    assert.equal(await q.readReal(), expected, 'the saved text first, then everything typed today in order, without the phrase line and its two Enters');
+    assert.equal(q.coverLength(), expected.length, 'the cover was rebuilt to the new length');
+    assert.equal(q.toast(), '', 'silent on success');
+    assert.deepEqual(q.errors, []);
+  } finally { q.close(); }
+});
+
+test('Continue: one Enter tries nothing; a line under 12 characters is never derived; a line of 12 is tried once; a third Enter tries nothing more', async () => {
+  const c = countDerives();
+  const q = await loadPage({ storage: await lockedCopyStorage(), failDerive: c.spy });
+  try {
+    q.type('correct horse battery staple');
+    assert.equal(q.press('Enter'), true, 'Enter is typed as always');
+    await sleep(300);
+    assert.equal(c.n, 0, 'one Enter: no key is derived');
+    assert.ok(!q.d.body.classList.contains('vault-open'), 'and nothing opens');
+    q.press('Escape');
+    q.type('elevenchars');                   // 11 characters
+    q.continueKeys();
+    await sleep(200);
+    assert.equal(c.n, 0, 'a line of 11 characters is never derived');
+    q.type('twelve chars');                  // 12 characters, not the phrase
+    q.continueKeys();
+    await sleep(400);
+    assert.equal(c.n, 1, 'a line of 12 characters is tried once');
+    q.press('Enter');
+    await sleep(200);
+    assert.equal(c.n, 1, 'a third Enter finds an empty last line and tries nothing');
+    assert.equal(await q.readReal(), 'elevenchars\n\ntwelve chars\n\n\n', 'every Enter stays in the text');
+    assert.ok(!q.d.body.classList.contains('vault-open'));
+    assert.deepEqual(q.errors, []);
+  } finally { q.close(); }
+});
+
+test('Continue: nothing is tried while the vault is open, so a paragraph break costs nothing then', async () => {
+  const c = countDerives();
+  const q = await loadPage({ storage: await lockedCopyStorage(), failDerive: c.spy });
+  try {
+    q.type('correct horse battery staple');
+    q.continueKeys();
+    await sleep(700);
+    assert.ok(q.d.body.classList.contains('vault-open'));
+    const n = c.n;
+    q.type('\ncorrect horse battery staple');
+    q.continueKeys();
+    await sleep(400);
+    assert.equal(c.n, n, 'no key is derived while the vault is open');
+    assert.equal(await q.readReal(), 'saved text\ncorrect horse battery staple\n\n');
+    assert.deepEqual(q.errors, []);
+  } finally { q.close(); }
+});
+
+test('Continue: a Backspace that reaches the phrase line drops the check; a Backspace over keys typed during the check does not, even back to exactly where it began; an Open during the check drops it', async () => {
+  const q = await loadPage({ storage: await lockedCopyStorage(), slowDerive: 300 });
+  try {
+    q.type('correct horse battery staple');
+    q.continueKeys();
+    q.press('Backspace');                    // the second Enter goes
+    q.type('x');
+    await sleep(800);
+    assert.ok(!q.d.body.classList.contains('vault-open'), 'dropped: the page no longer holds what the check would remove');
+    assert.equal(await q.readReal(), 'correct horse battery staple\nx', 'nothing removed or added');
+    q.press('Escape');
+    q.type('correct horse battery staple');
+    q.continueKeys();
+    q.type('ab');
+    q.press('Backspace');                    // only a key typed during the check goes
+    await sleep(800);
+    assert.ok(q.d.body.classList.contains('vault-open'), 'not dropped');
+    assert.equal(await q.readReal(), 'saved texta');
+    q.press('Escape');
+    await sleep(300);
+    q.type('correct horse battery staple');
+    q.continueKeys();
+    q.type('a');
+    q.press('Backspace');                    // back to exactly the length the check began at (DISH-C-81)
+    await sleep(800);
+    assert.ok(q.d.body.classList.contains('vault-open'), 'not dropped at exactly the length the check began at');
+    assert.equal(await q.readReal(), 'saved texta', 'the copy as the Esc above saved it, and nothing else');
+    q.press('Escape');
+    await sleep(300);
+    q.type('correct horse battery staple');
+    q.continueKeys();
+    chooseFile(q, new q.w.File(['an opened note'], 'note.txt', { type: 'text/plain' }));
+    await waitFor(() => !q.$('#pw').hidden, 2000);
+    q.$('#pw-ok').click();                   // Open replaces the page while the key still derives
+    await sleep(800);
+    assert.ok(!q.d.body.classList.contains('vault-open'), 'the Open dropped the check');
+    assert.equal(await q.readReal(), 'an opened note', 'the page holds the opened note only');
+    assert.deepEqual(q.errors, []);
+  } finally { q.close(); }
+});
+
+test('Continue: a newer try drops an older one still deriving its key', async () => {
+  const q = await loadPage({ storage: await lockedCopyStorage(), slowDerive: (n) => (n === 0 ? 500 : 0) });
+  try {
+    q.type('correct horse battery staple');
+    q.continueKeys();                        // the right phrase, slow
+    q.type('another line here');
+    q.continueKeys();                        // a newer try, wrong and fast
+    await sleep(900);
+    assert.ok(!q.d.body.classList.contains('vault-open'), 'the older try never lands');
+    assert.equal(await q.readReal(), 'correct horse battery staple\n\nanother line here\n\n');
+    assert.deepEqual(q.errors, []);
+  } finally { q.close(); }
+});
+
+test('Continue after a lock the device caused: the phrase on its own line opens the copy and keeps the page text as it is, without the phrase line, never the older copy in front of it (QA-G-02 on the new route)', async () => {
+  const p = await loadPage();
+  const proto = p.w.Storage.prototype;
+  const setItem = proto.setItem;
+  try {
+    p.start();
+    p.type('first words ');
+    await p.vaultOn('correct horse battery staple');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);
+    let refuse = true;
+    proto.setItem = function (key, value) { if (refuse && key === 'plainSight.vault') throw new p.w.DOMException('The quota has been exceeded.', 'QuotaExceededError'); return setItem.call(this, key, value); };
+    p.type('more words after the device filled');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);
+    assert.ok(!p.d.body.classList.contains('vault-open'), 'locked by the refusal');
+    refuse = false;
+    p.type('\ncorrect horse battery staple');
+    p.continueKeys();
+    await sleep(900);
+    assert.ok(p.d.body.classList.contains('vault-open'), 'the phrase opened the copy');
+    const onPage = 'first words more words after the device filled\n';
+    assert.equal(await p.readReal(), onPage, 'the page text stays as it is, minus the phrase line and its two Enters: no duplicated start');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);
+    assert.equal(await decryptVault(JSON.parse(p.storageDump()['plainSight.vault']), 'correct horse battery staple'), onPage, 'the page text becomes the copy');
+    assert.deepEqual(p.errors, []);
+  } finally { proto.setItem = setItem; p.close(); }
+});
+
+test('Continue after a lock the device caused, with every word on the page erased by Backspace: the phrase brings back the copy, never an empty page written over it (QA-G-02)', async () => {
+  const p = await loadPage();
+  const proto = p.w.Storage.prototype;
+  const setItem = proto.setItem;
+  try {
+    p.start();
+    p.type('first words');
+    await p.vaultOn('correct horse battery staple');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);  // the copy holds "first words"
+    let refuse = true;
+    proto.setItem = function (key, value) { if (refuse && key === 'plainSight.vault') throw new p.w.DOMException('The quota has been exceeded.', 'QuotaExceededError'); return setItem.call(this, key, value); };
+    p.type(' more');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);
+    assert.ok(!p.d.body.classList.contains('vault-open'), 'locked by the refusal');
+    for (let i = 0; i < 'first words more'.length; i++) p.press('Backspace');
+    assert.equal(await p.readReal(), '', 'the page is empty');
+    refuse = false;
+    p.type('correct horse battery staple');
+    p.continueKeys();
+    await sleep(900);
+    assert.ok(p.d.body.classList.contains('vault-open'));
+    assert.equal(await p.readReal(), 'first words', 'nothing on the page is newer than the copy, so the copy comes back');
+    assert.deepEqual(p.errors, []);
+  } finally { proto.setItem = setItem; p.close(); }
+});
+
+test('Continue after a lock the device caused keeps the page text only for the copy that lock was about: a copy another tab made meanwhile comes back in front of the page text, and its text is never lost (DISH-C-02)', async () => {
+  const p = await loadPage();
+  const proto = p.w.Storage.prototype;
+  const setItem = proto.setItem;
+  try {
+    p.start();
+    p.type('first words ');
+    await p.vaultOn('correct horse battery staple');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);
+    let refuse = true;
+    proto.setItem = function (key, value) { if (refuse && key === 'plainSight.vault') throw new p.w.DOMException('The quota has been exceeded.', 'QuotaExceededError'); return setItem.call(this, key, value); };
+    p.type('more');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);
+    assert.ok(!p.d.body.classList.contains('vault-open'), 'locked by the refusal, the text kept on the page');
+    const before = p.storageDump()['plainSight.vault'];
+    const other = await encryptVaultRecord('other tab text', 'another tab phrase here');   // another tab re-keys the copy
+    setItem.call(p.w.localStorage, 'plainSight.vault', other);
+    p.w.dispatchEvent(new p.w.StorageEvent('storage', { key: 'plainSight.vault', oldValue: before, newValue: other }));
+    refuse = false;
+    p.type('\nanother tab phrase here');
+    p.continueKeys();
+    await waitFor(() => p.d.body.classList.contains('vault-open'), 4000);
+    assert.equal(await p.readReal(), 'other tab textfirst words more\n', 'the other copy first, then the page text: not the page text alone');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);
+    assert.equal(await decryptVault(JSON.parse(p.storageDump()['plainSight.vault']), 'another tab phrase here'), 'other tab textfirst words more\n', 'the autosave keeps the other tab\'s text');
+    assert.deepEqual(p.errors, []);
+  } finally { proto.setItem = setItem; p.close(); }
+});
+
+test('Continue replaces the chord: with a copy on the device, Ctrl+E, Ctrl+Enter, Cmd+E and Cmd+Enter go to the browser and record nothing', async () => {
+  const c = countDerives();
+  const q = await loadPage({ storage: await lockedCopyStorage(), failDerive: c.spy });
+  try {
+    q.type('correct horse battery staple');
+    for (const [mod, name] of [[{ ctrlKey: true }, 'Ctrl'], [{ metaKey: true }, 'Cmd']]) {
+      assert.equal(q.press('e', mod), false, name + '+E goes to the browser');
+      assert.equal(q.press('Enter', mod), false, name + '+Enter goes to the browser');
+    }
+    await sleep(400);
+    assert.equal(c.n, 0, 'no key is derived');
+    assert.ok(!q.d.body.classList.contains('vault-open'));
+    assert.equal(await q.readReal(), 'correct horse battery staple', 'nothing recorded');
+    assert.deepEqual(q.errors, []);
+  } finally { q.close(); }
+});
+
+test('Continue does nothing inside the intro\'s fields or the password dialog: the keys belong to the field', async () => {
+  const c = countDerives();
+  const q = await loadPage({ storage: await lockedCopyStorage(), failDerive: c.spy });
+  try {
+    q.$('#btn-help').click();
+    q.$('#custom-text').focus();
+    for (const ch of 'correct horse battery staple') q.press(ch);
+    q.press('Enter'); q.press('Enter');
+    q.$('#vault-phrase').focus();
+    q.press('Enter'); q.press('Enter');
+    await sleep(300);
+    assert.equal(c.n, 0, 'nothing derived from the intro');
+    q.start();
+    q.type('x');
+    q.$('#btn-save').click();
+    await waitFor(() => !q.$('#pw').hidden, 2000);
+    for (const ch of 'correct horse battery staple') q.press(ch);
+    q.press('Enter'); q.press('Enter');
+    await sleep(300);
+    assert.equal(c.n, 0, 'nothing derived from the password dialog');
+    q.$('#pw-cancel').click();
+    assert.equal(await q.readReal(), 'x', 'the hidden text holds only the key typed on the page');
+    assert.ok(!q.d.body.classList.contains('vault-open'));
+    assert.deepEqual(q.errors, []);
+  } finally { q.close(); }
+});
+
+test('Continue in a browser: a folder chosen leaves the phrase field as the box says, Start writes no phrase check, and a stray check record arms nothing (the folder half is the Mac app\'s in this release)', async () => {
+  const c = countDerives();
+  const folder = fakeFolder('Notes');
+  const p = await loadPage({ folder, failDerive: c.spy });
+  try {
+    p.$('#btn-folder').click();
+    await waitFor(() => /into the folder/.test(p.$('#folder-status').textContent), 3000);
+    assert.equal(p.$('#vault-on').checked, false);
+    assert.equal(p.$('#vault-phrase').disabled, true, 'in a browser the folder does not use the phrase field');
+    assert.doesNotMatch(p.$('#vault-status').textContent, /newest note|press Start to set it/, 'and the intro does not offer the folder half');
+    p.$('#vault-phrase').value = 'correct horse battery staple';
+    p.start();
+    await sleep(500);
+    assert.equal(p.storageDump()['plainSight.continueCheck'], undefined, 'no phrase check in a browser');
+    p.w.localStorage.setItem('plainSight.continueCheck', await encryptVaultRecord('check', 'correct horse battery staple'));
+    p.type('correct horse battery staple');
+    p.continueKeys();
+    await sleep(400);
+    assert.equal(c.n, 0, 'a check record arms nothing in a browser');
+    assert.equal(await p.readReal(), 'correct horse battery staple\n\n');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('the intro teaches the new route in a browser: a line of its own, then Enter twice; no chord, no Cmd or Ctrl+E', async () => {
+  const p = await loadPage();
+  try {
+    const box = p.$('#vault-on').closest('fieldset');
+    assert.equal(box.querySelector('legend').textContent, 'Come back to your text (optional)');
+    assert.equal(p.$('#vault-status').textContent, 'To come back to your text: type your phrase on the page on a line of its own, then press Enter twice. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.');
+    assert.equal(HTML.match(/<p class="note" id="vault-status">([^<]*)<\/p>/)[1], p.$('#vault-status').textContent, 'the note in the markup, shown before the script runs, says the same');
+    assert.equal(p.$('#vault-phrase').getAttribute('aria-describedby'), 'vault-status', 'the note describes the phrase field for a screen reader (QA-C-06)');
+    assert.doesNotMatch(box.textContent, /press E\b|Ctrl\s*\+\s*E|Cmd\s*\+\s*E/, 'the chord is not taught');
+    p.start();
+    p.type('saved words');
+    await p.vaultOn('correct horse battery staple');
+    p.press('Escape');
+    await sleep(300);
+    p.$('#btn-help').click();
+    assert.equal(p.$('#vault-status').textContent, 'A saved copy is on this device. Type your phrase on the page on a line of its own, then press Enter twice. Untick to delete the copy.');
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
 });

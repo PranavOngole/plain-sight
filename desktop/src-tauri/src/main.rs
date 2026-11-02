@@ -6,9 +6,10 @@
 // (tauri.conf.json), the window may show nothing but the app's own page, and
 // Save writes its files through the app: into the chosen folder, never over a
 // file, or to the path the save panel returned, the one write that may replace
-// a file, since the panel asked. The page can call six app
-// commands through the adapter in desktop/adapter.js: five for Save
-// (folder.rs) and one to say it is ready to quit (quit.rs). Closing the window and quitting
+// a file, since the panel asked. The page can call eight app
+// commands through the adapter in desktop/adapter.js: five for Save and two
+// that read back a note Save wrote, for Continue (folder.rs), and one to say
+// it is ready to quit (quit.rs). Closing the window and quitting
 // both work like Esc first (quit.rs), the window's title follows the page, and
 // the menu bar is the app's own (menu.rs), whose File and Help items press the
 // page's own buttons. The app runs in the macOS App
@@ -50,6 +51,8 @@ fn main() {
             folder::forget_folder,
             folder::write_text_file,
             folder::save_download,
+            folder::list_notes,
+            folder::read_note,
             quit::quit_ready
         ])
         .menu(menu::build)

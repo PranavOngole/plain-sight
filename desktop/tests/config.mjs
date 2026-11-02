@@ -118,6 +118,21 @@ test('the capability grants only the app\'s own commands to the main window, on 
   assert.deepEqual(granted.map((p) => p.slice('allow-'.length).replace(/-/g, '_')).sort(), declaredCommands(), 'every declared command is granted and nothing else');
 });
 
+test('main.rs registers exactly the commands build.rs declares, and the adapter invokes exactly those: eight, two of them for Continue', () => {
+  const handler = read(TAURI, 'src', 'main.rs').match(/generate_handler!\[([^\]]*)\]/);
+  assert.ok(handler, 'main.rs registers its commands with generate_handler!');
+  const registered = [...handler[1].matchAll(/(?:folder|quit)::([a-z_]+)/g)].map((m) => m[1]).sort();
+  assert.deepEqual(registered, declaredCommands(), 'every declared command is registered and nothing else');
+  const invoked = [...read(ROOT, 'desktop', 'adapter.js').matchAll(/invoke\('([a-z_]+)'/g)].map((m) => m[1]).sort();
+  assert.deepEqual(invoked, declaredCommands(), 'the adapter invokes each declared command once and nothing else');
+  assert.equal(declaredCommands().length, 8);
+  for (const c of ['list_notes', 'read_note']) assert.ok(declaredCommands().includes(c), c + ' is declared');
+  const said = read(ROOT, 'README.md').match(/The page can call exactly (\w+) app commands/);
+  assert.ok(said, 'the README says how many app commands the page can call');
+  const words = { five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  assert.equal(words[said[1]], declaredCommands().length, 'the README\'s count is the number build.rs declares (DISH-C-53)');
+});
+
 // Every dependency name in Cargo.toml, in any of the ways TOML can write one:
 // a "name = ..." line under a dependencies table, or a [*.dependencies.name] table.
 function dependencyNames() {

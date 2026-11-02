@@ -625,8 +625,8 @@ test('Cmd+Q with text on the page asks "Quit without saving?": Return cancels an
 // The vault in the release app (AC-3.3, DM-223): turned on in the intro, the
 // text typed and Cmd+Q pressed at once, the vault's record found in the web
 // data folder of the bundle the test launched (inside its container when it
-// is sandboxed: a fresh copy's, DM-247), and the phrase with the chord
-// reopening it after a relaunch.
+// is sandboxed: a fresh copy's, DM-247), and the phrase on a line of its
+// own, then Return twice, reopening it after a relaunch (Continue).
 const VAULT_PHRASE = 'release vault phrase 2026';
 function vaultRecordInReleaseData() {
   const dir = webDataFolder(HOME, current);
@@ -660,8 +660,8 @@ test('the vault in the release app keeps the text typed just before Cmd+Q, in it
   assert.equal(vaultRecordInReleaseData(), 1, 'one vault record, in ' + webDataFolder(HOME, current));
   await launch();
   await keys.type(VAULT_PHRASE);
-  await keys.press('cmd+e');
-  await keys.press('cmd+return');
+  await keys.press('return');
+  await keys.press('return');
   await sleep(2500);   // the key derives again
   assert.equal(await copyRealText('cmd'), words, 'the reopened vault holds every keystroke typed before Cmd+Q');
   await keys.press('cmd+q');
