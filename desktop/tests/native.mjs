@@ -1893,7 +1893,7 @@ test('Continue in the app: a note emptied between the listing and the read is no
   } finally { p.close(); }
 });
 
-test('Continue in the app: Esc right after a new phrase is set drops both its copy and its phrase check, so the two never end under different phrases (DM-C-01)', async () => {
+test('Continue in the app: Esc right after a new phrase is set drops both its copy and its phrase check before either lands, so the two stay under one phrase (DM-C-01)', async () => {
   let slow = false;
   const native = fakeNative({ saved: { name: 'Notes' } });
   const p = await loadPage({ native, onDerive: async () => { if (slow) await sleep(300); }, storage: { 'plainSight.introSeen': '1' } });
@@ -1918,6 +1918,89 @@ test('Continue in the app: Esc right after a new phrase is set drops both its co
     assert.equal(await openRecord(stored(p, CHECK_KEY), 'the second phrase here'), null);
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
+});
+
+// The two keys of one Start derive one after the other, so the two records can still part: the README says when,
+// and that entering the phrase that opens the copy joins them again (DISH-C-91).
+test('Continue in the app: an Esc between the two landings of a new phrase leaves the copy under the new phrase and the check under the old, and entering the new phrase on the intro joins them (DISH-C-91)', async () => {
+  let n = 0;
+  let slowCheck = false;
+  const native = fakeNative({ saved: { name: 'Notes' } });
+  const p = await loadPage({ native, onDerive: async () => { if (slowCheck) { n += 1; if (n === 2) await sleep(400); } }, storage: { 'plainSight.introSeen': '1' } });
+  try {
+    await p.settle();
+    p.$('#btn-help').click();
+    p.$('#vault-on').checked = true;
+    p.$('#vault-on').dispatchEvent(new p.w.Event('change', { bubbles: true }));
+    p.$('#vault-phrase').value = 'the first phrase here';
+    p.start();
+    await until(() => p.d.body.classList.contains('vault-open') && stored(p, CHECK_KEY) && stored(p, 'plainSight.vault'), 'both records under the first phrase');
+    await p.settle(300);
+    const first = JSON.parse(stored(p, 'plainSight.vault')).salt;
+    const firstCheck = stored(p, CHECK_KEY);
+    slowCheck = true;                        // the copy's key derives at once, the check's 400 ms later
+    p.$('#btn-help').click();
+    p.$('#vault-phrase').value = 'the second phrase here';
+    p.start();
+    await until(() => JSON.parse(stored(p, 'plainSight.vault')).salt !== first, 'the copy landed under the second phrase');
+    p.press('Escape');                       // between the two landings
+    await p.settle(900);
+    assert.equal(stored(p, CHECK_KEY), firstCheck, 'the check still deriving was dropped');
+    assert.equal(await openRecord(stored(p, 'plainSight.vault'), 'the second phrase here'), '', 'the copy is under the second phrase');
+    assert.equal(await openRecord(stored(p, CHECK_KEY), 'the first phrase here'), 'check', 'the check is under the first');
+    assert.equal(p.toast(), '', 'nothing is said');
+    p.$('#btn-help').click();
+    assert.equal(p.$('#vault-on').checked, true);
+    p.$('#vault-phrase').value = 'the second phrase here';
+    p.start();
+    await until(() => stored(p, CHECK_KEY) !== firstCheck, 'the check written again');
+    await p.settle(300);
+    assert.equal(await openRecord(stored(p, CHECK_KEY), 'the second phrase here'), 'check', 'joined: the check is under the phrase that opens the copy');
+    assert.equal(await openRecord(stored(p, 'plainSight.vault'), 'the second phrase here'), '');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: a new copy the device refuses leaves the copy under the old phrase and the check under the new, with the toast, and entering the old phrase on the intro joins them (DISH-C-91)', async () => {
+  const native = fakeNative({ saved: { name: 'Notes' } });
+  const p = await loadPage({ native, storage: { 'plainSight.introSeen': '1' } });
+  const proto = p.w.Storage.prototype;
+  const setItem = proto.setItem;
+  try {
+    await p.settle();
+    p.$('#btn-help').click();
+    p.$('#vault-on').checked = true;
+    p.$('#vault-on').dispatchEvent(new p.w.Event('change', { bubbles: true }));
+    p.$('#vault-phrase').value = 'the first phrase here';
+    p.start();
+    await until(() => p.d.body.classList.contains('vault-open') && stored(p, CHECK_KEY) && stored(p, 'plainSight.vault'), 'both records under the first phrase');
+    await p.settle(300);
+    const first = JSON.parse(stored(p, 'plainSight.vault')).salt;
+    const firstCheck = stored(p, CHECK_KEY);
+    proto.setItem = function (key, value) {
+      if (key === 'plainSight.vault' && JSON.parse(value).salt !== first) throw new p.w.DOMException('The quota has been exceeded.', 'QuotaExceededError');
+      return setItem.call(this, key, value);
+    };
+    p.$('#btn-help').click();
+    p.$('#vault-phrase').value = 'the second phrase here';
+    p.start();
+    await until(() => stored(p, CHECK_KEY) !== firstCheck && !p.d.body.classList.contains('vault-open'), 'the check written and the vault locked');
+    await p.settle(300);
+    assert.equal(p.toast(), 'The copy could not be kept on this device: storage is full or blocked');
+    assert.equal(await openRecord(stored(p, 'plainSight.vault'), 'the first phrase here'), '', 'the earlier copy stays, under the first phrase');
+    assert.equal(await openRecord(stored(p, CHECK_KEY), 'the second phrase here'), 'check', 'the check is under the second');
+    proto.setItem = setItem;
+    const secondCheck = stored(p, CHECK_KEY);
+    p.$('#btn-help').click();
+    assert.equal(p.$('#vault-on').checked, true);
+    p.$('#vault-phrase').value = 'the first phrase here';
+    p.start();
+    await until(() => stored(p, CHECK_KEY) !== secondCheck, 'the check written again');
+    await p.settle(300);
+    assert.equal(await openRecord(stored(p, CHECK_KEY), 'the first phrase here'), 'check', 'joined: the check is under the phrase that opens the copy');
+    assert.equal(await openRecord(stored(p, 'plainSight.vault'), 'the first phrase here'), '');
+    assert.deepEqual(p.errors, []);
+  } finally { proto.setItem = setItem; p.close(); }
 });
 
 test('Continue in the app: a Backspace over a key typed while the phrase check derived, pressed while the note is listed, does not drop it (DM-C-02)', async () => {
