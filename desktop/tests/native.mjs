@@ -1401,7 +1401,7 @@ test('Continue in the app: "Stop using the folder" deletes the phrase check; whe
   } finally { p.close(); }
 });
 
-test('Continue in the app: with the box ticked and a folder chosen, the one field keys both the copy and the phrase check, so the two phrases can never differ', async () => {
+test('Continue in the app: with the box ticked and a folder chosen, the one field keys both the copy and the phrase check, so a Start with nothing in the way leaves them under one phrase', async () => {
   const native = fakeNative();
   const p = await loadPage({ native });
   try {
@@ -1893,7 +1893,7 @@ test('Continue in the app: a note emptied between the listing and the read is no
   } finally { p.close(); }
 });
 
-test('Continue in the app: Esc right after a new phrase is set drops both its copy and its phrase check before either lands, so the two stay under one phrase (DM-C-01)', async () => {
+test('Continue in the app: Esc right after a new phrase is set drops both its copy and its phrase check while both keys are still deriving, so the two stay under one phrase (DM-C-01)', async () => {
   let slow = false;
   const native = fakeNative({ saved: { name: 'Notes' } });
   const p = await loadPage({ native, onDerive: async () => { if (slow) await sleep(300); }, storage: { 'plainSight.introSeen': '1' } });
