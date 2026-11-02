@@ -197,7 +197,8 @@ impl Folder {
     /// counter, newest first; two of the same moment and counter (one per
     /// format) by name, last first, so the order never depends on the system's.
     /// Nothing else in the folder is listed: a note written by hand under
-    /// another name is not one Save wrote.
+    /// another name is not one Save wrote, nor is an empty file, which Save
+    /// never writes (a save cut off between making the file and writing it).
     fn list(&self) -> Result<Vec<String>, String> {
         let failed = |e: String| format!("Could not read the folder: {e}");
         let mut current = self.lock().map_err(failed)?;
@@ -211,8 +212,12 @@ impl Folder {
             let Some((moment, counter, _)) = note_name(&name) else {
                 continue;
             };
-            // The entry itself, not what a link points to.
-            if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            // The entry itself, not what a link points to (DirEntry::metadata
+            // does not follow a link), and never an empty file.
+            if entry
+                .metadata()
+                .is_ok_and(|found| found.is_file() && found.len() > 0)
+            {
                 notes.push((moment.to_owned(), counter, name));
             }
         }
@@ -1670,11 +1675,12 @@ mod tests {
         let (dir, _, folder) = folder_with(
             "list-order",
             &[
-                ("2026-10-31 23-59-59.docx", b""),
-                ("2026-11-01 10-00-02.txt", b""),
-                ("2026-11-01 10-00-02 (2).txt", b""),
-                ("2026-11-01 10-00-02 (10).md", b""),
-                ("2026-11-01 09-00-00.md", b""),
+                ("2026-10-31 23-59-59.docx", b"x"),
+                ("2026-11-01 10-00-02.txt", b"x"),
+                ("2026-11-01 10-00-02 (2).txt", b"x"),
+                ("2026-11-01 10-00-02 (10).md", b"x"),
+                ("2026-11-01 09-00-00.md", b"x"),
+                ("2026-11-01 09-00-00 (3).txt", b"x"),
             ],
         );
         assert_eq!(
@@ -1683,10 +1689,28 @@ mod tests {
                 "2026-11-01 10-00-02 (10).md",
                 "2026-11-01 10-00-02 (2).txt",
                 "2026-11-01 10-00-02.txt",
+                "2026-11-01 09-00-00 (3).txt",
                 "2026-11-01 09-00-00.md",
                 "2026-10-31 23-59-59.docx",
             ],
-            "the counter counts as a number, and no counter counts as 1"
+            "the moment first, then the counter as a number, no counter counting as 1: an older moment with a higher counter is older"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_empty_file_named_like_a_note_is_not_listed() {
+        let (dir, _, folder) = folder_with(
+            "list-empty",
+            &[
+                ("2026-11-01 10-00-02.txt", b"the last good note"),
+                ("2026-11-01 10-00-09.txt", b""),
+            ],
+        );
+        assert_eq!(
+            folder.list().unwrap(),
+            ["2026-11-01 10-00-02.txt"],
+            "Save never writes an empty note, so a newer empty file is not the newest note"
         );
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1696,9 +1720,9 @@ mod tests {
         let (dir, _, folder) = folder_with(
             "list-tie",
             &[
-                ("2026-11-01 10-00-02.md", b""),
-                ("2026-11-01 10-00-02.txt", b""),
-                ("2026-11-01 10-00-02.docx", b""),
+                ("2026-11-01 10-00-02.md", b"x"),
+                ("2026-11-01 10-00-02.txt", b"x"),
+                ("2026-11-01 10-00-02.docx", b"x"),
             ],
         );
         assert_eq!(
@@ -1718,25 +1742,25 @@ mod tests {
             "list-only",
             &[
                 ("2026-11-01 10-00-02.txt", b"a note"),
-                ("notes.txt", b""),
-                ("2026-11-01 10-00-03.TXT", b""),
-                ("2026-11-01 10-00-03 (1).txt", b""),
-                ("2026-11-01 10-00-03 (02).txt", b""),
-                ("2026-11-01 10-00-03 ().txt", b""),
-                ("2026-11-01 10-00-03 (2) .txt", b""),
-                ("2026-11-01 10-00-03.txt.bak", b""),
-                ("2026-11-01 10-00-03 (2).sight", b""),
-                ("x2026-11-01 10-00-03.txt", b""),
-                ("2026-11-01 10-00-3.txt", b""),
-                ("2026-11-01 10-00-03 (99999999999999999999).txt", b""),
-                ("my holiday notes ok.txt", b""),
-                ("my holiday notes ok (2).md", b""),
-                ("2026-11-01 10-00-0x.txt", b""),
-                ("2026-11-01 10-00-03 (+2).txt", b""),
-                ("2026-11-01 10-00-03(2).txt", b""),
-                ("2026-11-01 10-00-03  (2).txt", b""),
-                ("2026-11-01 10-00-03 (2.txt", b""),
-                ("2026-11-01 10-00-03 (2)).txt", b""),
+                ("notes.txt", b"x"),
+                ("2026-11-01 10-00-03.TXT", b"x"),
+                ("2026-11-01 10-00-03 (1).txt", b"x"),
+                ("2026-11-01 10-00-03 (02).txt", b"x"),
+                ("2026-11-01 10-00-03 ().txt", b"x"),
+                ("2026-11-01 10-00-03 (2) .txt", b"x"),
+                ("2026-11-01 10-00-03.txt.bak", b"x"),
+                ("2026-11-01 10-00-03 (2).sight", b"x"),
+                ("x2026-11-01 10-00-03.txt", b"x"),
+                ("2026-11-01 10-00-3.txt", b"x"),
+                ("2026-11-01 10-00-03 (99999999999999999999).txt", b"x"),
+                ("my holiday notes ok.txt", b"x"),
+                ("my holiday notes ok (2).md", b"x"),
+                ("2026-11-01 10-00-0x.txt", b"x"),
+                ("2026-11-01 10-00-03 (+2).txt", b"x"),
+                ("2026-11-01 10-00-03(2).txt", b"x"),
+                ("2026-11-01 10-00-03  (2).txt", b"x"),
+                ("2026-11-01 10-00-03 (2.txt", b"x"),
+                ("2026-11-01 10-00-03 (2)).txt", b"x"),
             ],
         );
         fs::create_dir(chosen.join("2026-11-01 11-00-00.txt")).unwrap();
@@ -1861,12 +1885,12 @@ mod tests {
             "read-text",
             &[(
                 "2026-11-01 10-00-02.md",
-                b"\xef\xbb\xbfone\r\ntwo\rthree\nfour \xff end\r",
+                b"\xef\xbb\xbfone\r\ntwo\rthree\nfour \xff end\r\n\nafter a blank line\r\r",
             )],
         );
         assert_eq!(
             folder.read("2026-11-01 10-00-02.md").unwrap(),
-            "\u{feff}one\ntwo\nthree\nfour \u{fffd} end\n",
+            "\u{feff}one\ntwo\nthree\nfour \u{fffd} end\n\nafter a blank line\n\n",
             "a leading U+FEFF stays as text, a bad byte becomes U+FFFD"
         );
         fs::remove_dir_all(&dir).unwrap();
