@@ -588,7 +588,7 @@ test('Continue: with a folder and no copy, the phrase on a line of its own and E
   assert.equal(await unsavedNow(), true, 'a key later, text a quit would lose');
 });
 
-test('Continue: a Word file newest brings the app\'s words in a toast after the right phrase, and the page stays as typed', async () => {
+test('Continue: a Word file newest brings the app\'s words in a toast after the right phrase, and the phrase leaves the page all the same', async () => {
   await page.press('Escape');
   await page.openIntro();
   await page.choose('folder-format', 'docx');
@@ -601,7 +601,8 @@ test('Continue: a Word file newest brings the app\'s words in a toast after the 
   await page.press('Enter');
   await page.press('Enter');
   await page.waitToast(WORD_REFUSED);
-  assert.equal(await page.peekText(), PHRASE + '\n\n', 'nothing came back');
+  assert.equal(await page.peekText(), '', 'nothing came back, and the right phrase and its two Enters are gone, so no later Save writes them');
+  assert.equal(await unsavedNow(), false, 'nothing is left that a quit would lose');
   await page.press('Escape');
   await page.openIntro();
   await page.choose('folder-format', 'txt');
