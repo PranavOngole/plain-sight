@@ -3162,7 +3162,7 @@ test('a child of the safety suite signals nothing outside its own folder: the en
   };
   assert.match(r.out, /^PART E KILL false$/m, 'the outside stand-in\'s own kill(), refused');
   assert.match(r.out, /^PART E OWN KILL true TRIED 1$/m, 'a child process\'s kill() of the case\'s own sleep is sent and counted, so the count the SIGNALS lines read moves for that path too (QA-G-59, QA-01\'s G5); the child\'s output:\n' + r.out);
-  for (const how of ['fork', 'spawn', 'spawn with an environment of its own', 'a shell\'s command', 'spawnSync with an environment of its own', 'ChildProcess.spawn with environment pairs of its own', 'a named import of execSync (QA-01\'s G4)']) assert.ok(r.out.split('\n').includes('PART E NODE ' + how + ': PROBE REFUSED AS EPERM'), 'a node the case starts by ' + how + ' loads the guard first, and its process.kill is refused; the child\'s output:\n' + r.out);
+  for (const how of ['fork', 'spawn', 'spawn with an environment of its own', 'a shell\'s command', 'spawnSync with an environment of its own', 'ChildProcess.spawn with environment pairs of its own', 'a named import of execSync (QA-01\'s G4)']) assert.ok(r.out.split('\n').includes('PART E NODE ' + how + ': PROBE REFUSED AS EPERM'), 'a node the case starts by ' + how + ' loads the guard first, and its ' + (how.startsWith('a named import') ? 'named execSync of kill' : 'process.kill') + ' is refused; the child\'s output:\n' + r.out);
   assert.match(r.out, /^PART E REFUSALS 8$/m, 'eight refusals written: the kill() and one in each of the seven nodes');
   assert.match(r.out, /^OUTSIDE STILL RUNS true$/m, 'nothing reached the stand-in');
   assert.match(r.out, /^SECOND STILL RUNS true$/m, 'nor the second stand-in');
