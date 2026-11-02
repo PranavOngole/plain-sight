@@ -1010,6 +1010,85 @@ test('the real-key and release suites\' guards stand as statements of their own,
   }
 });
 
+// QA-G-59 (round 26): QA-01's planted edits from its r25_pin_adv.mjs
+// (wave-g/qa/scripts/app), credited, with its own table of the names each
+// guarded statement calls, written by hand, so that a calleesOf that names
+// nothing or drops the first name of a member chain (QA-01's F8 and F9) leaves
+// a planted name unread and turns this red. At every guarded statement the pin
+// must refuse: QA-01's controls of rounds 16 to 25 (C1 to C3), process.abort
+// and process.reallyExit above it (X7, X8; its F3), a let, var, function or
+// class declaration or a destructuring declaration of a name it calls (D1 to
+// D7 and D9; F4, F5, F6), a for (var ...) of one beside it (B6), and a
+// parameter named like one on the function declared around it (P1; F7). What
+// the pin does not refuse (QA-01's QA-G-58 and the Delivery Manager's DM-273)
+// is written down in desktop/CHANGELOG.md, round 25.
+const CALLEES = {
+  "await keys.press('cmd+v');": ['keys'],
+  'await until(() => goToField() !== null, ': ['until', 'goToField'],
+  'await until(() => (goToField() || {}).value === target, ': ['until', 'goToField'],
+  'await until(() => goToField() === null && panelFolders().includes(name), ': ['until', 'goToField', 'panelFolders'],
+  'mustShowOwnFolder(path.dirname(file), [path.basename(file)]);': ['mustShowOwnFolder', 'path'],
+  'mustShowOwnFolder(SAVE_AS, []);': ['mustShowOwnFolder'],
+  'mustShowOwnFolder(BUILD_TEST, []);': ['mustShowOwnFolder'],
+  "const saved = driveRaw('clip-save', CLIPBOARD);": ['driveRaw'],
+  'clipboardSaved = saved.ok === true;': [],
+  "await endCopies(opened, (pid) => driveRaw('quit-app', pid));": ['endCopies', 'driveRaw'],
+  "const back = driveRaw('clip-restore', CLIPBOARD);": ['driveRaw'],
+  'rmSync(CLIPBOARD, { force: true });': ['rmSync'],
+  'return [...new Set(opened.flatMap((bundle) => copiesOf(bundle)))];': ['opened', 'copiesOf'],
+  'return copiesOf(APP);': ['copiesOf'],
+  "await endCopies([APP], (pid) => drive('quit-app', pid));": ['endCopies', 'drive']
+};
+const PLANTED = [
+  ['C1 process.exit(0) above it (the round 25 control)', () => ['process.exit(0);']],
+  ['C2 const N = () => {}; above it (the round 25 control)', (n) => ['const ' + n + ' = () => {};']],
+  ['C3 return above it (the round 16 control)', () => ['if (Date.now() >= 0) return;']],
+  ['X7 process.abort(); above it (named by the round 25 pin)', () => ['process.abort();']],
+  ['X8 process.reallyExit(0); above it (named by the round 25 pin)', () => ['process.reallyExit(0);']],
+  ['B6 for (var N of [async () => {}]) {} above it', (n) => ['for (var ' + n + ' of [async () => {}]) {}']],
+  ['D1 let N = () => {}; above it', (n) => ['let ' + n + ' = () => {};']],
+  ['D2 var N = () => {}; above it', (n) => ['var ' + n + ' = () => {};']],
+  ['D3 function N() {} above it', (n) => ['function ' + n + '() {}']],
+  ['D4 class N {} above it', (n) => ['class ' + n + ' {}']],
+  ['D5 const { N } = { N: () => {} }; above it', (n) => ['const { ' + n + ' } = { ' + n + ': () => {} };']],
+  ['D6 const [N] = [() => {}]; above it', (n) => ['const [' + n + '] = [() => {}];']],
+  ['D7 const { M: N } = { M: () => {} }; above it', (n) => ['const { m: ' + n + ' } = { m: () => {} };']],
+  ['D9 N = () => {}, N(); no. const N = a ? () => {} : () => {}; above it', (n) => ['const ' + n + ' = Date.now() > 0 ? () => {} : () => {};']]
+];
+test('the pin refuses QA-01\'s planted edits at every guarded statement, by QA-01\'s own table of the names each calls: process.abort and process.reallyExit above it, a let, var, function or class declaration or a destructuring declaration of a name it calls, a for (var ...) of one beside it, and a parameter named like one on the function declared around it (QA-G-59, QA-01\'s F3 to F9)', () => {
+  const tests = path.join(DESKTOP, 'tests');
+  assert.deepEqual(Object.keys(CALLEES).sort(), GUARDED.map(([, statement]) => statement).sort(), 'QA-01\'s table names every guarded statement, and only those');
+  let heads = 0;
+  for (const [file, statement, what, conditions = []] of GUARDED) {
+    const text = read(tests, file);
+    const lines = text.split('\n');
+    const i = lines.findIndex((l) => l.includes(statement));
+    const indent = lines[i].match(/^\s*/)[0];
+    for (const [id, make] of PLANTED) {
+      for (const n of /N\b/.test(id) ? CALLEES[statement] : [null]) {
+        const changed = [...lines];
+        changed.splice(i, 0, ...make(n, 'press').map((l) => indent + l));
+        assert.notEqual(pinFault(changed.join('\n'), statement, conditions), null, file + ', ' + what + ': the pin refuses ' + id + (n ? ', for ' + n : '') + ', above ' + JSON.stringify(statement));
+      }
+    }
+    // P1: a parameter with a default, named like the callee, added to the
+    // nearest function declared around the statement.
+    const offset = lines.slice(0, i).reduce((n, line) => n + line.length + 1, 0) + lines[i].indexOf(statement);
+    const scan = blocksOf(text);
+    let blk = scan.blocks.filter((x) => x.open < offset && offset < x.close).pop();
+    while (blk && !/^(async )?function [\w$]+\(.*\)$/.test(blk.bare)) blk = blk.parent;
+    if (!blk) continue;
+    const paren = text.indexOf('(', blk.from + Math.max(0, scan.bare.slice(blk.from, blk.open).search(/function/)));
+    for (const n of CALLEES[statement]) {
+      const empty = /^\(\s*\)/.test(text.slice(paren));
+      const changed = text.slice(0, paren + 1) + n + ' = async () => {}' + (empty ? '' : ', ') + text.slice(paren + 1);
+      assert.notEqual(pinFault(changed, statement, conditions), null, file + ', ' + what + ': the pin refuses P1, a parameter ' + n + ' = async () => {} added to ' + JSON.stringify(blk.head));
+      heads += 1;
+    }
+  }
+  assert.ok(heads > 0, 'P1 was planted on at least one function declared around a guarded statement (' + heads + ')');
+});
+
 // PO-R13-1, the robot's route to a panel (round 14, the Delivery Manager's
 // preference): macOS draws the panels in their own process and the driver
 // posts keys only to the app's, so a typed path never reaches a panel. goTo

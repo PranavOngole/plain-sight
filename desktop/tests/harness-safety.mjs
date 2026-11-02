@@ -172,8 +172,11 @@ const evasionText = (t) => (t.how === 'execSync' || t.how === 'exec' ? t.line : 
 // proof case's second stand-in alone, -TERM in place of its -USR1: the names
 // in another case (the volume and the shell's lookup ignore case), a glob in
 // the name, and ChildProcess.spawn called directly; with PKILL, KillAll and
-// OSAScript, so that each of the four is tried in another case. how is the
-// way each is started, and routeText the text the guard reads.
+// OSAScript, so that each of the four is tried in another case; and, round
+// 26, QA-01's two negated globs from its r25_glob_adv.mjs (QA-G-59: its G1,
+// a break that kept [!a] from becoming [^a], passed every suite of the
+// candidate). how is the way each is started, and routeText the text the
+// guard reads.
 const ROUTES = (pid, name) => {
   const script = shellWord('do shell script "/bin/ki" & "ll -TERM ' + pid + '"');
   return [
@@ -186,6 +189,8 @@ const ROUTES = (pid, name) => {
     { what: '/bin/k?ll, a glob (QA-01)', names: 'kill', how: 'execSync', line: '/bin/k?ll -TERM ' + pid },
     { what: '/bin/[k]ill, a glob (QA-01)', names: 'kill', how: 'execSync', line: '/bin/[k]ill -TERM ' + pid },
     { what: '/bin/k*, a glob (QA-01)', names: 'kill and killall', how: 'execSync', line: '/bin/k* -TERM ' + pid },
+    { what: '/bin/[!a]ill, a glob negated with ! (QA-01\'s G1)', names: 'kill', how: 'execSync', line: '/bin/[!a]ill -TERM ' + pid },
+    { what: '/bin/[^a]ill, a glob negated with ^ (QA-01\'s G1)', names: 'kill', how: 'execSync', line: '/bin/[^a]ill -TERM ' + pid },
     { what: 'ChildProcess.spawn called directly (QA-01)', names: 'kill', how: 'ChildProcess.spawn', argv: ['/bin/kill', 'kill', '-TERM', String(pid)] },
     { what: 'a string shell option, spawnSync(\'x\', [], { shell: \'/bin/kill\' }) (QA-01\'s W5)', names: 'kill', how: 'shell option', text: 'x /bin/kill' }
   ];
@@ -193,8 +198,9 @@ const ROUTES = (pid, name) => {
 const routeText = (t) => (t.how === 'execSync' ? t.line : t.how === '/bin/sh -c' ? '/bin/sh -c ' + t.line : t.how === 'ChildProcess.spawn' ? t.argv.join(' ') : t.text);
 
 // PO-R18-1 (round 19), DM-268 and DISH-G-103 (round 21): a child of this
-// suite never signals a process outside its own case's folder, whatever the
-// code it runs asks for. In round 18 a break of copiesOf that took any
+// suite signals no process outside its own case's folder by the ways this
+// guard reads, which the list below gives; the ways past it found so far end
+// this comment. In round 18 a break of copiesOf that took any
 // program named plain-sight made one case's end of the suites' copies signal
 // another run's stand-ins (SIGTERM, then SIGKILL 5 s later), and a real Plain
 // Sight running then would have been signalled as well. So the child
@@ -214,8 +220,8 @@ const routeText = (t) => (t.how === 'execSync' ? t.line : t.how === '/bin/sh -c'
 //   process._kill: the same rule, on its pid, unless Node has seen it end
 //   (it then sends nothing); a refused one returns false.
 // - kill, pkill, killall and osascript started through child_process, by
-//   every one of its ways (execFileSync, execFile, spawnSync, spawn,
-//   execSync, exec and fork), as a program or in a shell's command (shell:
+//   each of its seven start functions (execFileSync, execFile, spawnSync,
+//   spawn, execSync, exec and fork), as a program or in a shell's command (shell:
 //   true included): refused when any word of the command, as a shell reads
 //   it, has one of the four as its last path segment. That takes in the
 //   first word of every command, a path such as /usr/bin/pkill, and the
@@ -231,17 +237,22 @@ const routeText = (t) => (t.how === 'execSync' ? t.line : t.how === '/bin/sh -c'
 //   not wrapped here: a Worker is refused at its start.
 // - QA-G-55 (round 24): names are compared without case (the volume and the
 //   shell's lookup ignore it, so /bin/KILL runs kill); a word whose last
-//   path segment, read as a shell glob, can match one of the four names
-//   (k?ll, [k]ill, k*) is refused as if it named it; and every start is read
-//   at ChildProcess.prototype.spawn too, the one place spawn, fork, exec and
-//   execFile all go through, so that ChildProcess.spawn called directly is
-//   read as well (spawnSync, execSync and execFileSync are read at their
-//   own functions), and the environment it is given gets the guard's module.
-// - Every node a case starts, by fork, spawn or a shell, at any depth, with
-//   the environment it is given: it loads this same guard first, from the
+//   path segment, read as a shell glob of *, ? and plain bracket lists, can
+//   match one of the four names (k?ll, [k]ill, [!a]ill, k*) is refused as if
+//   it named it, a lone * among them, as in count(*) or rm dir/* (QA-01's
+//   QA-G-60: a case that runs such a command must spell it another way); and
+//   the four starts that go through ChildProcess.prototype.spawn (spawn,
+//   fork, exec and execFile) are read there too, so that ChildProcess.spawn
+//   called directly is read as well (spawnSync, execSync and execFileSync
+//   are read at their own functions), and the environment it is given gets
+//   the guard's module.
+// - A node a case starts by fork, spawn or a shell, at any depth, with the
+//   environment it is given: it loads this same guard first, from the
 //   module the guard writes into the case's folder from its own text at its
 //   install, through NODE_OPTIONS, which the guard sets in the child's own
-//   environment and adds to any environment a start is given.
+//   environment and adds to any environment a start is given (a shell's
+//   command that empties the environment another way starts one without it,
+//   below).
 // The guard stands on its own (round 22): everything it uses is a name its
 // loader gives it (fs, path, os, childProcess, syncBuiltinESMExports and
 // REFUSALS) or comes from process.getBuiltinModule, so a copy cut out of this
@@ -249,8 +260,16 @@ const routeText = (t) => (t.how === 'execSync' ? t.line : t.how === '/bin/sh -c'
 // make one, is the same guard, its module included.
 // Each refusal is printed with the pid and the program, or the command, and
 // written to the case's refusals file, and runCase fails the case for it.
-// What it does not cover (round 24, the Product Owner's D-59: the guard is a
-// net for a mistaken edit of the test code, not a sandbox): what a program
+// The ways past it found so far (rounds 24 to 26, the Product Owner's D-59:
+// the guard is a net for a mistaken edit of the test code, not a sandbox): a
+// shell's command that empties the environment without naming NODE_OPTIONS or
+// running env, such as bash's exec -c, whose node runs without the guard
+// (DM-272); a glob of a kind the reader does not read, which a shell still
+// matches to kill: a POSIX class ([[:alpha:]]), a collating symbol ([[.k.]]),
+// an equivalence class ([[=k=]]) or a bracket list that starts with ] ([]k])
+// (DM-272, QA-01's QA-G-57); a program Node starts below child_process,
+// through process.execve or its internal bindings such as
+// process.binding('spawn_sync') (DM-272); what a program
 // other than node does once it runs (a shell script file or a compiled
 // program can signal by itself, unseen: only the command that starts it is
 // read); a program under another name (a link to /bin/kill made with fs and
@@ -1418,8 +1437,24 @@ if (process.argv[2] === '--child') {
       const written = () => (existsSync(refusalFile) ? readFileSync(refusalFile, 'utf8').split('\n').filter(Boolean).length : 0);
       const probe = path.join(box, 'probe.mjs');
       writeFileSync(probe, "try { process.kill(Number(process.argv[2]), 'SIGTERM'); console.log('PROBE SENT'); } catch (err) { console.log('PROBE REFUSED AS ' + err.code); }\n");
+      // QA-G-59 (round 26): QA-01's G4 from its r25_esm_adv.mjs, a node the
+      // case starts whose own module takes execSync as a named import, which
+      // is the guard's only after the guard's syncBuiltinESMExports() (with it
+      // removed, QA-01's named import ran kill and delivered). Signal 0 here,
+      // where QA-01 sent -USR1, so that nothing is sent should it run.
+      const probeNamed = path.join(box, 'probe-named.mjs');
+      writeFileSync(probeNamed, "import { execSync } from 'node:child_process';\ntry { execSync('kill -0 ' + process.argv[2], { stdio: 'ignore' }); console.log('PROBE RAN'); } catch (err) { console.log('PROBE REFUSED AS ' + err.code); }\n");
       before = written();
       console.log('PART E KILL ' + stand.kill('SIGTERM'));
+      // QA-G-59 (round 26): QA-01's G5 from its r25_sigguard_adv.mjs, a
+      // positive control for the count a child process's kill() makes (QA-G-56
+      // W9's twin for the other path): a sleep of the case's own, through the
+      // link in its folder, ended by its kill(), which the guard sends and
+      // counts.
+      const ownSleep = spawn(programHere('sleep', '/bin/sleep'), ['30'], { stdio: 'ignore' });
+      await h.sleep(200);
+      const triedBeforeOwn = signalGuard.tried();
+      console.log('PART E OWN KILL ' + ownSleep.kill('SIGTERM') + ' TRIED ' + (signalGuard.tried() - triedBeforeOwn));
       const lastLine = (p) => new Promise((resolve) => { let out = ''; p.stdout.on('data', (d) => { out += d; }); p.on('close', () => resolve(out.trim().split('\n').pop())); });
       for (const [how, start] of [
         ['fork', () => childProcess.fork(probe, [String(second.pid)], { silent: true, execPath: nodeHere })],
@@ -1432,7 +1467,8 @@ if (process.argv[2] === '--child') {
         // with environment pairs of its own, only through
         // ChildProcess.prototype.spawn.
         ['spawnSync with an environment of its own', () => ({ sync: childProcess.spawnSync(nodeHere, [probe, String(second.pid)], { stdio: ['ignore', 'pipe', 'ignore'], env: { PATH: process.env.PATH }, encoding: 'utf8' }) })],
-        ['ChildProcess.spawn with environment pairs of its own', () => { const cp = new childProcess.ChildProcess(); cp.spawn({ file: nodeHere, args: [nodeHere, probe, String(second.pid)], envPairs: ['PATH=' + process.env.PATH], stdio: ['ignore', 'pipe', 'ignore'] }); return cp; }]
+        ['ChildProcess.spawn with environment pairs of its own', () => { const cp = new childProcess.ChildProcess(); cp.spawn({ file: nodeHere, args: [nodeHere, probe, String(second.pid)], envPairs: ['PATH=' + process.env.PATH], stdio: ['ignore', 'pipe', 'ignore'] }); return cp; }],
+        ['a named import of execSync (QA-01\'s G4)', () => spawn(nodeHere, [probeNamed, String(second.pid)], { stdio: ['ignore', 'pipe', 'ignore'] })]
       ]) { const started = start(); console.log('PART E NODE ' + how + ': ' + (started.sync ? String(started.sync.stdout || '').trim().split('\n').pop() : await lastLine(started))); }
       console.log('PART E REFUSALS ' + (written() - before));
       await h.sleep(300);
@@ -3112,9 +3148,9 @@ test('a child of the safety suite signals nothing outside its own folder: the en
   assert.match(r.out, /^PART F REFUSALS 9$/m, 'a worker thread, NODE_OPTIONS set or cleared, env with an option, ANSI-C quoting, and kill through exec and execFile, each refused (DM-270); the child\'s output:\n' + r.out);
   assert.match(r.out, /^PART F RAN \[\]$/m, 'none of the nine ran');
   const routes = ROUTES(pid2, name);
-  assert.equal(routes.length, 11, 'six names in another case, three globs, ChildProcess.spawn and a string shell option');
-  assert.match(r.out, /^PART G REFUSALS 11$/m, 'QA-01\'s routes and its string shell option, each refused (QA-G-55, QA-G-56 W5); the child\'s output:\n' + r.out);
-  assert.match(r.out, /^PART G RAN \[\]$/m, 'none of the eleven ran');
+  assert.equal(routes.length, 13, 'six names in another case, five globs (two negated, QA-01\'s G1), ChildProcess.spawn and a string shell option');
+  assert.match(r.out, /^PART G REFUSALS 13$/m, 'QA-01\'s routes, its two negated globs and its string shell option, each refused (QA-G-55, QA-G-56 W5, QA-G-59 G1); the child\'s output:\n' + r.out);
+  assert.match(r.out, /^PART G RAN \[\]$/m, 'none of the thirteen ran');
   assert.match(r.out, /^PART H ZOMBIE \d+ Z/m, 'the case\'s own node had ended and was not reaped (state Z); the child\'s output:\n' + r.out);
   assert.match(r.out, /^PART H ANSWER ESRCH$/m, 'a process.kill at it answers ESRCH and sends nothing (DISH-G-106, its DX-G7)');
   assert.match(r.out, /^PART H TRIED 1 REFUSALS 0$/m, 'the try is counted, and it is no refusal');
@@ -3125,8 +3161,9 @@ test('a child of the safety suite signals nothing outside its own folder: the en
     kill: 'names kill: a child of this suite runs no kill, pkill, killall or osascript'
   };
   assert.match(r.out, /^PART E KILL false$/m, 'the outside stand-in\'s own kill(), refused');
-  for (const how of ['fork', 'spawn', 'spawn with an environment of its own', 'a shell\'s command', 'spawnSync with an environment of its own', 'ChildProcess.spawn with environment pairs of its own']) assert.ok(r.out.split('\n').includes('PART E NODE ' + how + ': PROBE REFUSED AS EPERM'), 'a node the case starts by ' + how + ' loads the guard first, and its process.kill is refused; the child\'s output:\n' + r.out);
-  assert.match(r.out, /^PART E REFUSALS 7$/m, 'seven refusals written: the kill() and one in each of the six nodes');
+  assert.match(r.out, /^PART E OWN KILL true TRIED 1$/m, 'a child process\'s kill() of the case\'s own sleep is sent and counted, so the count the SIGNALS lines read moves for that path too (QA-G-59, QA-01\'s G5); the child\'s output:\n' + r.out);
+  for (const how of ['fork', 'spawn', 'spawn with an environment of its own', 'a shell\'s command', 'spawnSync with an environment of its own', 'ChildProcess.spawn with environment pairs of its own', 'a named import of execSync (QA-01\'s G4)']) assert.ok(r.out.split('\n').includes('PART E NODE ' + how + ': PROBE REFUSED AS EPERM'), 'a node the case starts by ' + how + ' loads the guard first, and its process.kill is refused; the child\'s output:\n' + r.out);
+  assert.match(r.out, /^PART E REFUSALS 8$/m, 'eight refusals written: the kill() and one in each of the seven nodes');
   assert.match(r.out, /^OUTSIDE STILL RUNS true$/m, 'nothing reached the stand-in');
   assert.match(r.out, /^SECOND STILL RUNS true$/m, 'nor the second stand-in');
   assert.match(r.out, /^OUTSIDE ENDED \[null,"SIGTERM"\]$/m, 'the case then ended it itself, by its pid');
@@ -3135,8 +3172,8 @@ test('a child of the safety suite signals nothing outside its own folder: the en
   const to = (signal) => 'signal ' + signal + ' to pid ' + pid + ' (' + exe + '), outside the case\'s folder ' + box;
   const command = (t, form) => 'the command ' + JSON.stringify(formText(form, t)) + ' names ' + t.program + ': a child of this suite runs no kill, pkill, killall or osascript';
   const inNode = 'signal 15 to pid ' + pid2 + ' (' + clone + '), outside the case\'s folder ' + box;
-  assert.deepEqual(r.refused, [to(15), to(9), to(15), ...tries.flatMap((t) => FORMS.map((form) => command(t, form))), ...quoted.map(({ text, program }) => 'the command ' + JSON.stringify(text) + ' names ' + program + ': a child of this suite runs no kill, pkill, killall or osascript'), 'a worker thread, whose process.kill this guard cannot reach: a child of this suite starts none', ...evasions.map((t) => 'the command ' + JSON.stringify(evasionText(t)) + ' ' + why[t.reason]), ...routes.map((t) => 'the command ' + JSON.stringify(routeText(t)) + ' names ' + t.names + ': a child of this suite runs no kill, pkill, killall or osascript'), 'signal SIGTERM to its child ' + pid + ' (' + exe + '), outside the case\'s folder ' + box, inNode, inNode, inNode, inNode, inNode, inNode], 'each refusal written with the pid and the program, or the command, which names only the second stand-in');
-  assert.deepEqual(r.out.split('\n').filter((l) => l.startsWith('SIGNAL REFUSED ')), r.refused.slice(0, -6).map((x) => 'SIGNAL REFUSED ' + x), 'and printed (the six nodes print theirs in their own output)');
+  assert.deepEqual(r.refused, [to(15), to(9), to(15), ...tries.flatMap((t) => FORMS.map((form) => command(t, form))), ...quoted.map(({ text, program }) => 'the command ' + JSON.stringify(text) + ' names ' + program + ': a child of this suite runs no kill, pkill, killall or osascript'), 'a worker thread, whose process.kill this guard cannot reach: a child of this suite starts none', ...evasions.map((t) => 'the command ' + JSON.stringify(evasionText(t)) + ' ' + why[t.reason]), ...routes.map((t) => 'the command ' + JSON.stringify(routeText(t)) + ' names ' + t.names + ': a child of this suite runs no kill, pkill, killall or osascript'), 'signal SIGTERM to its child ' + pid + ' (' + exe + '), outside the case\'s folder ' + box, inNode, inNode, inNode, inNode, inNode, inNode, 'the command ' + JSON.stringify('kill -0 ' + pid2) + ' names kill: a child of this suite runs no kill, pkill, killall or osascript'], 'each refusal written with the pid and the program, or the command, which names only the second stand-in');
+  assert.deepEqual(r.out.split('\n').filter((l) => l.startsWith('SIGNAL REFUSED ')), r.refused.slice(0, -7).map((x) => 'SIGNAL REFUSED ' + x), 'and printed (the seven nodes print theirs in their own output)');
 });
 test('a signal the guard refuses fails the case that sent it, unless the case expects it (PO-R18-1)', async () => {
   await assert.rejects(runCase('signal-guard', undefined, { outside: true, tag: 'signal-guard-unexpected', watchdog: 60000 }), /^Error: the case tried to signal a process outside its own folder, and the guard refused: signal 15 to pid \d+ /);
