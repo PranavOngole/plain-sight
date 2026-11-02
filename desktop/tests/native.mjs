@@ -1598,7 +1598,8 @@ test('Continue in the app: after the right phrase a toast says why no note came,
     [{ extra: { listAnswer: null } }, 'Could not read the folder'],
     [{ extra: { listAnswer: 'abc' } }, 'Could not read the folder'],
     [{ extra: { readAnswer: null } }, 'Could not read the folder'],
-    [{ extra: { readAnswer: 42 } }, 'Could not read the folder']
+    [{ extra: { readAnswer: 42 } }, 'Could not read the folder'],
+    [{ extra: { readAnswer: '' } }, 'No note in the folder yet']
   ];
   for (const [opts, words] of cases) {
     const { native, p } = await comeBack(opts);
@@ -1873,6 +1874,67 @@ test('Continue in the app: a key typed and taken back while the note is on its w
     await until(() => native.calls.some((c) => c[0] === 'readNote'), 'the note read');
     await p.settle();
     assert.equal(await p.real(), 'the newest note\nwith two linesbefore words\n', 'the note came back in front of the text typed before');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: a note emptied between the listing and the read is no note: the toast says so and the folder is tried again on the next phrase (QA-C-82)', async () => {
+  const { native, p } = await comeBack({ extra: { readAnswer: '' } });
+  try {
+    p.type(PHRASE);
+    enter2(p);
+    await until(() => p.toast() === 'No note in the folder yet', 'the toast');
+    assert.equal(await p.real(), '', 'nothing came back, and the phrase is gone');
+    p.$('#toast').textContent = '';
+    p.type(PHRASE);
+    enter2(p);
+    await until(() => listed(native) === 2, 'the folder tried again: nothing was marked brought back');
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: Esc right after a new phrase is set drops both its copy and its phrase check, so the two never end under different phrases (DM-C-01)', async () => {
+  let slow = false;
+  const native = fakeNative({ saved: { name: 'Notes' } });
+  const p = await loadPage({ native, onDerive: async () => { if (slow) await sleep(300); }, storage: { 'plainSight.introSeen': '1' } });
+  try {
+    await p.settle();
+    p.$('#btn-help').click();
+    p.$('#vault-on').checked = true;
+    p.$('#vault-on').dispatchEvent(new p.w.Event('change', { bubbles: true }));
+    p.$('#vault-phrase').value = 'the first phrase here';
+    p.start();
+    await until(() => p.d.body.classList.contains('vault-open') && stored(p, CHECK_KEY), 'both records under the first phrase');
+    await p.settle(300);
+    slow = true;
+    p.$('#btn-help').click();
+    p.$('#vault-phrase').value = 'the second phrase here';
+    p.start();                               // both keys derive for 300 ms
+    p.press('Escape');                       // at once, on the writing screen
+    slow = false;
+    await p.settle(900);
+    assert.equal(await openRecord(stored(p, 'plainSight.vault'), 'the first phrase here'), '', 'the copy stays under the first phrase (the setup was dropped)');
+    assert.equal(await openRecord(stored(p, CHECK_KEY), 'the first phrase here'), 'check', 'and so does the check: one phrase for both');
+    assert.equal(await openRecord(stored(p, CHECK_KEY), 'the second phrase here'), null);
+    assert.deepEqual(p.errors, []);
+  } finally { p.close(); }
+});
+
+test('Continue in the app: a Backspace over a key typed while the phrase check derived, pressed while the note is listed, does not drop it (DM-C-02)', async () => {
+  let release;
+  let slow = true;
+  const { native, p } = await comeBack({ onDerive: async () => { if (slow) await sleep(300); }, extra: { listGate: new Promise((r) => { release = r; }) } });
+  try {
+    p.type(PHRASE);
+    enter2(p);
+    p.type('ab');                            // typed while the key derives
+    slow = false;
+    await until(() => listed(native) === 1, 'the listing asked for');
+    p.press('Backspace');                    // takes back the b, typed during the check
+    release();
+    await until(() => native.calls.some((c) => c[0] === 'readNote'), 'the note read');
+    await p.settle();
+    assert.equal(await p.real(), 'the newest note\nwith two linesa', 'the note came back in front of the key that stayed');
     assert.deepEqual(p.errors, []);
   } finally { p.close(); }
 });

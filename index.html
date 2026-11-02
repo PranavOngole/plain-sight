@@ -845,6 +845,7 @@
     unlockAttempt += 1;
     wipeCount += 1;          // an Open still deriving its key is cancelled
     setupAttempt += 1;       // a vault setup or phrase change still deriving its key is dropped
+    checkAttempt += 1;       // and so is a phrase check still deriving its key, so the copy and the check never end under two phrases (DM-C-01)
     if (vaultOpen()) {
       const key = vaultKey;
       const salt = vaultSalt;
@@ -1781,7 +1782,7 @@
     try { r = await decryptRecord(check, phrase); } catch (err) { return; }   // a wrong phrase: nothing happens, on purpose
     if (r.text !== CONTINUE_CHECK_TEXT || !current()) return;
     replaceReal(continueRest(phrase, at));   // the right phrase: gone from the page now
-    mark = real.length;
+    mark = at - phrase.length - 2;           // from now on the check watches only what was typed before the phrase's line: keys typed during the check may go (DM-C-02)
     continueAt = mark;
     let text;
     try {
@@ -1796,6 +1797,7 @@
     }
     if (!current()) return;
     if (typeof text !== 'string') { toast('Could not read the folder'); return; }   // the app answers text or a failure; anything else brings nothing back
+    if (text === '') { toast('No note in the folder yet'); return; }   // an empty file is no note: the listing skips them, and one emptied after the listing is the same (QA-C-82)
     const page = real;
     replaceReal(text + page);
     broughtBack = true;
