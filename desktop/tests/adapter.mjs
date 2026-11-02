@@ -79,8 +79,8 @@ test('each call becomes exactly one app command, with the arguments the app expe
     assert.equal(await a.native.forgetFolder(), undefined, 'forgetFolder answers nothing');
     assert.equal(await a.native.writeTextFile('2026-10-21 10-00-00', '.docx', 'the real text'), '2026-10-21 10-00-00 (2).docx');
     assert.equal(await a.native.saveDownload('moment.txt', 'the real text'), 'moment (2).txt');
-    assert.deepEqual([...await a.native.listNotes()], ['2026-11-01 10-00-02 (2).txt', '2026-11-01 10-00-02.txt'], 'Continue: the names, newest first');
-    assert.equal(await a.native.readNote('2026-11-01 10-00-02 (2).txt'), 'the note text', 'Continue: the text, never a path');
+    assert.deepEqual([...await a.native.listNotes()], ['2026-11-01 10-00-02 (2).txt', '2026-11-01 10-00-02.txt'], 'Continue: the names come through as the app gave them');
+    assert.equal(await a.native.readNote('2026-11-01 10-00-02 (2).txt'), 'the note text', 'Continue: the text comes through as the app gave it');
     // The arguments were made in the page's realm; copied, they compare by value.
     assert.deepEqual(commandCalls(a.calls).map((c) => [c.cmd, c.args === undefined ? undefined : { ...c.args }]), [
       ['pick_folder', undefined],

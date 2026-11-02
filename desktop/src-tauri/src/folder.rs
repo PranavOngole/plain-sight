@@ -5,8 +5,9 @@
 //! "YYYY-MM-DD HH-MM-SS" into the folder the user picked. The page sends text
 //! only: the app makes a Word document itself (docx.rs), so no file is ever
 //! written from bytes the page made. For Continue the page may also list the
-//! notes Save wrote into the folder and read one back as text (`list_notes`,
-//! `read_note`): only names Save makes, never a path, and never a Word file. Without a folder, Save shows the system
+//! notes Save wrote into the folder (`list_notes`: only names Save makes, Word
+//! files among them) and read one back as text (`read_note`: never a path, and
+//! never a Word file). Without a folder, Save shows the system
 //! save panel through `save_download` (D-49), starting in the Downloads folder
 //! with the name the page proposes, and writes the file where the panel put
 //! it, so the page learns whether the file was really written (DM-202).
@@ -643,7 +644,9 @@ fn downloads_dir<R: Runtime>(window: &WebviewWindow<R>) -> Result<PathBuf, Strin
 /// The plain files Save writes, by extension (index.html, PLAIN_FORMATS).
 const PLAIN_EXTENSIONS: [&str; 3] = [".txt", ".md", ".docx"];
 
-/// The largest note `read_note` hands to the page (8 MB, 8,388,608 bytes).
+/// The largest note file `read_note` reads: 8 MiB, 8,388,608 bytes on disk. An
+/// invalid byte becomes U+FFFD, three bytes, so the text it hands over can be
+/// up to three times longer than the file.
 const NOTE_LIMIT: u64 = 8 * 1024 * 1024;
 
 /// `read_note`'s answer for a Word file, which the page shows as it is.
@@ -849,18 +852,22 @@ fn read_note_file(path: &Path) -> Result<String, String> {
     if !found.file_type().is_file() {
         return Err("Could not read the note: it is not a plain file".to_owned());
     }
-    // One byte past the limit is enough to know the note is too large, so
-    // nothing larger is ever held in memory.
-    let mut bytes = Vec::new();
-    fs::File::open(path)
-        .and_then(|file| file.take(NOTE_LIMIT + 1).read_to_end(&mut bytes))
-        .map_err(failed)?;
-    if bytes.len() as u64 > NOTE_LIMIT {
-        return Err(TOO_LARGE.to_owned());
-    }
+    let bytes = fs::File::open(path)
+        .and_then(|file| read_at_most(file, NOTE_LIMIT))
+        .map_err(failed)?
+        .ok_or(TOO_LARGE)?;
     Ok(String::from_utf8_lossy(&bytes)
         .replace("\r\n", "\n")
         .replace('\r', "\n"))
+}
+
+/// All of `reader` if it holds `limit` bytes or fewer, else None. It takes one
+/// byte past the limit at most, which is enough to know the rest is too large,
+/// so nothing larger is ever held in memory.
+fn read_at_most(reader: impl Read, limit: u64) -> io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    reader.take(limit + 1).read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= limit).then_some(bytes))
 }
 
 /// Writes `bytes` into a new file in `dir` under the first free name and
@@ -1725,6 +1732,11 @@ mod tests {
                 ("my holiday notes ok.txt", b""),
                 ("my holiday notes ok (2).md", b""),
                 ("2026-11-01 10-00-0x.txt", b""),
+                ("2026-11-01 10-00-03 (+2).txt", b""),
+                ("2026-11-01 10-00-03(2).txt", b""),
+                ("2026-11-01 10-00-03  (2).txt", b""),
+                ("2026-11-01 10-00-03 (2.txt", b""),
+                ("2026-11-01 10-00-03 (2)).txt", b""),
             ],
         );
         fs::create_dir(chosen.join("2026-11-01 11-00-00.txt")).unwrap();
@@ -1798,6 +1810,11 @@ mod tests {
             "2026-11-01 10-00-02.sight",
             "my holiday notes ok.txt",
             "2026-11-01 10-00-0x.txt",
+            "2026-11-01 10-00-02 (+2).txt",
+            "2026-11-01 10-00-02(2).txt",
+            "2026-11-01 10-00-02  (2).txt",
+            "2026-11-01 10-00-02 (2.txt",
+            "2026-11-01 10-00-02 (2)).txt",
         ] {
             assert_eq!(
                 folder.read(bad).unwrap_err(),
@@ -1872,6 +1889,61 @@ mod tests {
                 "{name}"
             );
         }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reading_stops_one_byte_past_the_limit_however_much_is_offered() {
+        /// A reader that offers `left` bytes and counts what it gave.
+        struct Counting {
+            left: u64,
+            given: u64,
+        }
+        impl Read for Counting {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let n = buf
+                    .len()
+                    .min(usize::try_from(self.left).unwrap_or(usize::MAX));
+                buf[..n].fill(b'a');
+                self.left -= n as u64;
+                self.given += n as u64;
+                Ok(n)
+            }
+        }
+        let mut offered = Counting {
+            left: 2 * NOTE_LIMIT,
+            given: 0,
+        };
+        assert_eq!(read_at_most(&mut offered, NOTE_LIMIT).unwrap(), None);
+        assert_eq!(
+            offered.given,
+            NOTE_LIMIT + 1,
+            "one byte past the limit, and no more"
+        );
+        let mut fits = Counting {
+            left: NOTE_LIMIT,
+            given: 0,
+        };
+        let all = read_at_most(&mut fits, NOTE_LIMIT).unwrap().unwrap();
+        assert_eq!(all.len() as u64, NOTE_LIMIT);
+    }
+
+    #[test]
+    fn read_note_says_why_it_could_not_read() {
+        let (dir, chosen, folder) =
+            folder_with("read-why", &[("2026-11-01 10-00-03.txt", b"text")]);
+        assert_eq!(
+            folder.read("2026-11-01 10-00-02.txt").unwrap_err(),
+            "Could not read the note: No such file or directory (os error 2)"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        let locked = chosen.join("2026-11-01 10-00-03.txt");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        assert_eq!(
+            folder.read("2026-11-01 10-00-03.txt").unwrap_err(),
+            "Could not read the note: Permission denied (os error 13)"
+        );
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -2,8 +2,8 @@
 // (index.html, search for "native") and each call here becomes one of the
 // app's own commands (src-tauri/src/folder.rs). The app keeps the folder's
 // path; the page only ever gets the folder's name (D-07), and for Continue the
-// names and the text of the notes Save wrote there, never a path. The app also runs
-// window.__plainSightQuit before it closes or quits (src-tauri/src/quit.rs).
+// names and the text of the notes Save wrote there, never a path. The app also
+// runs window.__plainSightQuit before it closes or quits (src-tauri/src/quit.rs).
 //
 // The app injects this before the page runs, in the main frame only, after
 // Tauri's own scripts, which provide __TAURI_INTERNALS__.invoke. Both objects

@@ -127,6 +127,10 @@ test('main.rs registers exactly the commands build.rs declares, and the adapter 
   assert.deepEqual(invoked, declaredCommands(), 'the adapter invokes each declared command once and nothing else');
   assert.equal(declaredCommands().length, 8);
   for (const c of ['list_notes', 'read_note']) assert.ok(declaredCommands().includes(c), c + ' is declared');
+  const said = read(ROOT, 'README.md').match(/The page can call exactly (\w+) app commands/);
+  assert.ok(said, 'the README says how many app commands the page can call');
+  const words = { five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  assert.equal(words[said[1]], declaredCommands().length, 'the README\'s count is the number build.rs declares (DISH-C-53)');
 });
 
 // Every dependency name in Cargo.toml, in any of the ways TOML can write one:
