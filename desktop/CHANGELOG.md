@@ -50,6 +50,16 @@ Fixes from the code review of the Mac app and the App Store review sheet, on the
 
 The end-to-end tests written for these changes (the menu items, the window's restoration setting, the delegate probe) are written and not yet run.
 
+## Continue
+
+1 November 2026, the Continue builder (branch `continue`, on appstore-candidate 8d07c14), from Pranav's decisions of that morning.
+
+- The phrase typed on a line of its own, then Enter twice, brings the text back. A locked copy on this device comes first, in a browser and in the app; in the app, with a folder chosen and no copy kept, the newest note Save wrote into the folder comes back, inside the page. With a copy kept on this device, the phrase brings back the copy; with no copy kept, it brings back the newest note in the folder. A wrong phrase does nothing and shows nothing. The Ctrl+E then Enter chord is gone, so Cmd+E, Ctrl+E, Cmd+Return and Ctrl+Return are no longer the page's.
+- Two app commands, `list_notes` and `read_note` (folder.rs), give the page the names of the notes Save wrote into the folder, newest first by the moment in the name and then the counter, and the text of one of them: only a name Save makes, never a path, never a Word file, nothing above 8 MB, and no link or folder in a note's place; the text is read as UTF-8, lossily, with every line end made a line feed. The adapter gains `listNotes` and `readNote`; the page can call eight commands, declared in build.rs, granted in the capability and registered in main.rs, and a config test holds the three lists and the adapter's calls to each other.
+- The intro's vault box is called "Come back to your text" and teaches the new route. In the app, with a folder chosen, its phrase field is in use with the box ticked or not, and Start or Esc writes a phrase check (`plainSight.continueCheck`, the word "check" encrypted under the phrase in the vault's record shape), deleted by "Stop using the folder". The folder box says that the phrase stops a guess at the keyboard and does not lock the files.
+- After a folder note comes back, the quit question answers that nothing would be lost only while the page holds exactly the note.
+- Tests: the page's jsdom suites (the chord's tests rewritten for the new keys, new tests for the trigger, the order of the text, the cancel rules, the phrase check, the toasts and the storage), the adapter, config and Rust tests, each new guard broken once on the committed bytes and seen red (one, the moment check in a note's name, only after the test it lacked was added). The end-to-end and real-key tests press the new keys; the end-to-end tests are written and not yet run, and the real-key tests are not run on this branch.
+
 ## Round 25
 
 Wave G, round 25, 30 October 2026, Developer N (appstore-candidate).
