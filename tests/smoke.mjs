@@ -5049,6 +5049,35 @@ test('Continue after a lock the device caused, with every word on the page erase
   } finally { proto.setItem = setItem; p.close(); }
 });
 
+test('Continue after a lock the device caused keeps the page text only for the copy that lock was about: a copy another tab made meanwhile comes back in front of the page text, and its text is never lost (DISH-C-02)', async () => {
+  const p = await loadPage();
+  const proto = p.w.Storage.prototype;
+  const setItem = proto.setItem;
+  try {
+    p.start();
+    p.type('first words ');
+    await p.vaultOn('correct horse battery staple');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);
+    let refuse = true;
+    proto.setItem = function (key, value) { if (refuse && key === 'plainSight.vault') throw new p.w.DOMException('The quota has been exceeded.', 'QuotaExceededError'); return setItem.call(this, key, value); };
+    p.type('more');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);
+    assert.ok(!p.d.body.classList.contains('vault-open'), 'locked by the refusal, the text kept on the page');
+    const before = p.storageDump()['plainSight.vault'];
+    const other = await encryptVaultRecord('other tab text', 'another tab phrase here');   // another tab re-keys the copy
+    setItem.call(p.w.localStorage, 'plainSight.vault', other);
+    p.w.dispatchEvent(new p.w.StorageEvent('storage', { key: 'plainSight.vault', oldValue: before, newValue: other }));
+    refuse = false;
+    p.type('\nanother tab phrase here');
+    p.continueKeys();
+    await waitFor(() => p.d.body.classList.contains('vault-open'), 4000);
+    assert.equal(await p.readReal(), 'other tab textfirst words more\n', 'the other copy first, then the page text: not the page text alone');
+    await sleep(VAULT_SAVE_DELAY_MS + 400);
+    assert.equal(await decryptVault(JSON.parse(p.storageDump()['plainSight.vault']), 'another tab phrase here'), 'other tab textfirst words more\n', 'the autosave keeps the other tab\'s text');
+    assert.deepEqual(p.errors, []);
+  } finally { proto.setItem = setItem; p.close(); }
+});
+
 test('Continue replaces the chord: with a copy on the device, Ctrl+E, Ctrl+Enter, Cmd+E and Cmd+Enter go to the browser and record nothing', async () => {
   const c = countDerives();
   const q = await loadPage({ storage: await lockedCopyStorage(), failDerive: c.spy });
@@ -5102,7 +5131,7 @@ test('Continue in a browser: a folder chosen leaves the phrase field as the box 
     await waitFor(() => /into the folder/.test(p.$('#folder-status').textContent), 3000);
     assert.equal(p.$('#vault-on').checked, false);
     assert.equal(p.$('#vault-phrase').disabled, true, 'in a browser the folder does not use the phrase field');
-    assert.doesNotMatch(p.$('#vault-status').textContent, /newest note/, 'and the intro does not offer the folder half');
+    assert.doesNotMatch(p.$('#vault-status').textContent, /newest note|press Start to set it/, 'and the intro does not offer the folder half');
     p.$('#vault-phrase').value = 'correct horse battery staple';
     p.start();
     await sleep(500);
@@ -5124,6 +5153,7 @@ test('the intro teaches the new route in a browser: a line of its own, then Ente
     assert.equal(box.querySelector('legend').textContent, 'Come back to your text (optional)');
     assert.equal(p.$('#vault-status').textContent, 'To come back to your text: type your phrase on the page on a line of its own, then press Enter twice. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.');
     assert.equal(HTML.match(/<p class="note" id="vault-status">([^<]*)<\/p>/)[1], p.$('#vault-status').textContent, 'the note in the markup, shown before the script runs, says the same');
+    assert.equal(p.$('#vault-phrase').getAttribute('aria-describedby'), 'vault-status', 'the note describes the phrase field for a screen reader (QA-C-06)');
     assert.doesNotMatch(box.textContent, /press E\b|Ctrl\s*\+\s*E|Cmd\s*\+\s*E/, 'the chord is not taught');
     p.start();
     p.type('saved words');

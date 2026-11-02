@@ -313,7 +313,7 @@
       <legend><strong>Come back to your text</strong> (optional)</legend>
       <label class="check"><input type="checkbox" id="vault-on"> <span data-app="Save my text on this computer, encrypted, so I can come back to it later.">Save my text in this browser, encrypted, so I can come back to it later.</span></label>
       <label for="vault-phrase">Phrase, 12 characters or more</label>
-      <input id="vault-phrase" class="secret" type="password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore disabled>
+      <input id="vault-phrase" class="secret" type="password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore aria-describedby="vault-status" disabled>
       <p class="note" id="vault-status">To come back to your text: type your phrase on the page on a line of its own, then press Enter twice. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.</p>
     </fieldset>
     <!-- Save location. Where the browser offers folder access (Chrome, Edge:
@@ -1753,6 +1753,7 @@
       vaultSalt = r.salt;
       vaultIterations = r.iterations;   // the copy keeps the count it was made with
       body.classList.add('vault-open');
+      if (!introEl.hidden) vaultStatusRefresh();   // an intro opened while the key derived says the vault is open; the box stays as the person left it
       const rest = continueRest(phrase, at);
       const kept = lockedTextSalts !== null && lockedTextSalts.has(bytesToBase64(r.salt)) && rest !== '';
       replaceReal(kept ? rest : r.text + rest);
@@ -1764,36 +1765,46 @@
   // In the app, with a folder chosen and no copy: the phrase opens the phrase check, then the app lists the notes its
   // Save wrote into the folder, newest first, and reads the first (folder.rs: list_notes, read_note). The app hands
   // over text, never a path, and opens nothing else: the note comes back inside this page. A wrong phrase: nothing.
-  // After the right one, a toast only when the note cannot come.
+  // The right phrase leaves the page at once, its line and its two Enters with it, whatever happens next, so a later
+  // Save never writes the phrase and the quit question never counts it; the note then goes in front of whatever the
+  // page holds. A toast only when the note cannot come.
   async function continueFromFolder(phrase, at) {
     const raw = storageGet(STORAGE.continueCheck);
     const check = continueCheckStored();
     const handle = folderHandle;
     const attempt = ++unlockAttempt;
     const wipes = wipeCount;
-    continueAt = at;
-    const current = () => attempt === unlockAttempt && continueAt === at && folderHandle === handle && storageGet(STORAGE.continueCheck) === raw;   // Esc or a newer try, the page changed before the check, another folder, another phrase
+    let mark = at;             // the page's length that the check watches: continueAt drops it when the page goes below it or is replaced
+    continueAt = mark;
+    const current = () => attempt === unlockAttempt && continueAt === mark && folderHandle === handle && storageGet(STORAGE.continueCheck) === raw;   // Esc or a newer try, the page changed under the check, another folder, another phrase
     let r;
     try { r = await decryptRecord(check, phrase); } catch (err) { return; }   // a wrong phrase: nothing happens, on purpose
     if (r.text !== CONTINUE_CHECK_TEXT || !current()) return;
+    replaceReal(continueRest(phrase, at));   // the right phrase: gone from the page now
+    mark = real.length;
+    continueAt = mark;
     let text;
     try {
       const names = await folderList();
       if (!current()) return;
-      if (!names || names.length === 0) { toast('No note in the folder yet'); return; }
+      if (!Array.isArray(names)) { toast('Could not read the folder'); return; }   // the app answers a list or a failure
+      if (names.length === 0) { toast('No note in the folder yet'); return; }
       text = await folderRead(names[0]);
     } catch (err) {
       if (current()) toast(appReason(err) || 'Could not read the folder');
       return;
     }
     if (!current()) return;
-    const rest = continueRest(phrase, at);
-    replaceReal(text + rest);
+    if (typeof text !== 'string') { toast('Could not read the folder'); return; }   // the app answers text or a failure; anything else brings nothing back
+    const page = real;
+    replaceReal(text + page);
     broughtBack = true;
-    if (rest === '') markSaved(edits, wipes);   // the page holds exactly what the note holds, as after an Open; text typed around the phrase is on no disk, so a quit still asks
+    if (page === '') markSaved(edits, wipes);   // the page holds exactly what the note holds, as after an Open; text typed around the phrase is on no disk, so a quit still asks
   }
-  // The app's own words for a failure: a command's error reaches the page as a string (Tauri's invoke rejects with it).
-  function appReason(err) { return typeof err === 'string' ? err : err && typeof err.message === 'string' ? err.message : ''; }
+  // The app's own words for a failure: a command's error reaches the page as a string (Tauri's invoke rejects with it:
+  // tauri 2.12.4, scripts/core.js and scripts/ipc-protocol.js). Anything else, such as a JavaScript error, is no words of
+  // the app's, and the caller shows its own.
+  function appReason(err) { return typeof err === 'string' ? err : ''; }
 
   // The phrase check: a record in the vault's shape whose plaintext is the fixed word "check", under the key the
   // phrase derives (the vault's own derivation and round count, a fresh salt and IV). It holds neither the phrase nor
@@ -1893,7 +1904,7 @@
       ? 'A saved copy is on this device. Type your phrase on the page on a line of its own, then press Enter twice. Untick to delete the copy.'
       : 'To come back to your text: type your phrase on the page on a line of its own, then press Enter twice. Nothing happens for a wrong phrase. There is no recovery for a forgotten one.';
     // In the app with a folder chosen, what the phrase brings back, in words true whether or not a copy is kept (Continue).
-    return native && folderHandle ? state + ' With a copy kept on this device, the phrase brings back the copy; with no copy kept, it brings back the newest note in the folder.' : state;
+    return native && folderHandle ? state + ' With a copy kept on this device, the phrase brings back the copy; with no copy kept, it brings back the newest note Plain Sight saved there. Type it in the field above and press Start to set it.' : state;
   }
   // The phrase field is in use while the box is ticked, and in the app also while a folder is chosen (Continue).
   function phraseFieldUsed() { return vaultOnEl.checked || Boolean(native && folderHandle); }
